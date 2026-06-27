@@ -62,6 +62,7 @@ transformer/
 ## Todo List
 
 ### Setup
+- [ ] Setup Docker image, CLI and uv
 - [ ] Initialize repo and virtual environment
 - [ ] Install dependencies (torch, sentencepiece, sacrebleu, datasets, wandb)
 - [ ] Download and preprocess WMT14 en-de dataset

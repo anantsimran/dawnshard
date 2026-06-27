@@ -1,0 +1,20 @@
+[project]
+name = "dawnshard"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["torch", "wandb"]
+
+[dependency-groups]
+dev = ["pytest", "pyright", "ruff"]
+
+[tool.pyright]
+include = ["app/src"]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

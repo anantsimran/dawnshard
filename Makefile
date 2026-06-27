@@ -8,10 +8,14 @@ test:
 
 # Run type checking and linting (pyright + ruff check + ruff format)
 precheck:
-	uv run pyright
-	uv run ruff check app/src/
-	uv run ruff format app/src/
-	uv run mdformat .
+	@uv run pyright
+	@uv run ruff check app/src/
+	@uv run ruff format app/src/
+	@uv run mdformat . ; \
+	if ! git diff --quiet; then \
+		echo "\033[0;31mmdformat reformatted files. Stage the changes and run precheck again.\033[0m"; \
+		exit 1; \
+	fi
 
 # Build the production Docker image
 docker-build:

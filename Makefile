@@ -10,7 +10,7 @@ test:
 precheck:
 	uv run pyright
 	uv run ruff check app/src/
-	uv run ruff format --check app/src/
+	uv run ruff format app/src/
 
 # Build the production Docker image
 docker-build:

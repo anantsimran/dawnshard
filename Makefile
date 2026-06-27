@@ -11,6 +11,7 @@ precheck:
 	uv run pyright
 	uv run ruff check app/src/
 	uv run ruff format app/src/
+	uv run mdformat .
 
 # Build the production Docker image
 docker-build:

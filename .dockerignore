@@ -1,5 +1,9 @@
-app/datasets/local/
+app/datasets/
+app/checkpoints/
+app/history/
 .venv/
 __pycache__/
 **/*.pyc
 .git/
+wandb/
+

@@ -31,7 +31,8 @@ ______________________________________________________________________
 | Tensors vs NumPy, device placement, dtypes | [tensors.md](tensors.md) |
 | Autograd, gradients, chain rule, differentiability | [grad_and_descent.md](grad_and_descent.md) |
 | `nn.Module`, parameters, multi-layer networks, idioms | [nn_module_and_multi_layer_networks.md](nn_module_and_multi_layer_networks.md) |
-| Training loop, `Dataset`, `DataLoader` | [training_loop.md](training_loop.md) |
+| Training loop, epoch aggregation, structuring (functional core / Trainer) | [training_loop.md](training_loop.md) |
+| Optimizer/model/scheduler decoupling, param aliasing, LR schedules | [optimizer_and_scheduler.md](optimizer_and_scheduler.md) |
 | Debugging, shape checks, graph visualization | [inspecting_your_model_best_practices.md](inspecting_your_model_best_practices.md) |
 
 ______________________________________________________________________

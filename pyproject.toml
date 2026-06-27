@@ -2,10 +2,19 @@
 name = "dawnshard"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["torch", "wandb", "numpy>=2.0"]
+dependencies = [
+    "torch",
+    "wandb",
+    "psutil",
+    "numpy>=2.0",
+    "jaxtyping",
+    "beartype",
+    "loguru",
+    "matplotlib",
+]
 
 [dependency-groups]
-dev = ["pytest", "pyright", "ruff", "mdformat"]
+dev = ["pytest", "pyright", "ruff", "mdformat", "torchvision", "nbconvert", "jupytext", "ipykernel"]
 
 [tool.pyright]
 include = ["app/src"]
@@ -18,3 +27,8 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+external = ["NAR001"]
+
+[tool.pytest.ini_options]
+pythonpath = ["app/src"]
+testpaths = ["app/tests"]

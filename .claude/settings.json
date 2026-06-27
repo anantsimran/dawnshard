@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/check_tests_before_pr.py",
+            "timeout": 60,
+            "statusMessage": "Running tests before create-pr..."
+          }
+        ]
+      }
+    ]
+  }
+}

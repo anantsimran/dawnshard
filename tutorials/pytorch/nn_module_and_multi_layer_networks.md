@@ -221,6 +221,67 @@ def forward(self, x):
 
 ______________________________________________________________________
 
+## `model(x)` vs `model.forward(x)` — Never Call `forward` Directly
+
+`self.net(x)` goes through `__call__`, which wraps `forward` with hook machinery:
+
+```python
+# Pseudo-internals of nn.Module.__call__
+def __call__(self, *args):
+    for hook in self._forward_pre_hooks: args = hook(self, args) or args
+    out = self.forward(*args)
+    for hook in self._forward_hooks: out = hook(self, args, out) or out
+    return out
+```
+
+Calling `model.forward(x)` directly bypasses all of that. The silent failure:
+
+```python
+with torch.no_grad():
+    out = model(x)         # ✅ no_grad respected — no graph built
+    out = model.forward(x) # ❌ no_grad bypassed — gradients computed anyway
+```
+
+`no_grad` works via a hook registered on `__call__`. Bypass `__call__` and it silently breaks. Same applies to gradient checkpointing, `torch.jit`, and any hooks you've registered yourself.
+
+**One line:** always use `model(x)`, never `model.forward(x)`.
+
+______________________________________________________________________
+
+## Why Loss Functions Are `nn.Module`
+
+**Short answer:** consistency and composability.
+
+```python
+loss_fn = nn.CrossEntropyLoss()
+loss = loss_fn(pred, yb)   # calls loss_fn.forward(pred, yb) under the hood
+```
+
+Some loss functions have **learnable parameters or persistent state:**
+
+```python
+loss_fn = nn.CrossEntropyLoss(weight=torch.tensor([1.0, 2.0, ...]))
+loss_fn.to(device)   # moves the weight tensor to GPU — works because it's a Module
+```
+
+A plain function can't do `.to(device)`. And because it's a Module, you can **embed it inside another model:**
+
+```python
+class ModelWithLoss(nn.Module):
+    def __init__(self):
+        self.net = MLP()
+        self.criterion = nn.CrossEntropyLoss()  # nested — fully tracked
+
+    def forward(self, x, y):
+        return self.criterion(self.net(x), y)
+```
+
+This pattern is common in HuggingFace and multi-GPU code (see [training_loop.md](training_loop.md#why-embed-loss-inside-the-model)).
+
+**One line:** `nn.Module` is PyTorch's universal interface for "anything with a forward pass" — loss functions qualify, so they inherit `.to(device)`, composability, and hook support for free.
+
+______________________________________________________________________
+
 ## Shape Discipline
 
 Every early bug will be a shape mismatch. Track dimensions explicitly:

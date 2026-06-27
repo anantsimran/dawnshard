@@ -1,0 +1,5 @@
+app/datasets/local/
+.venv/
+__pycache__/
+**/*.pyc
+.git/

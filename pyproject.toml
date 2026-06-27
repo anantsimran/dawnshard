@@ -2,10 +2,10 @@
 name = "dawnshard"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["torch", "wandb"]
+dependencies = ["torch", "wandb", "numpy>=2.0"]
 
 [dependency-groups]
-dev = ["pytest", "pyright", "ruff"]
+dev = ["pytest", "pyright", "ruff", "mdformat"]
 
 [tool.pyright]
 include = ["app/src"]

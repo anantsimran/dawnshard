@@ -4,7 +4,7 @@
 
 Implement the Transformer architecture from scratch (no `nn.TransformerEncoder` wrappers) and reproduce the WMT 2014 English→German translation results from the paper, validating that the attention mechanism alone — without recurrence or convolution — is sufficient for sequence-to-sequence tasks.
 
----
+______________________________________________________________________
 
 ## Success Criteria
 
@@ -19,7 +19,7 @@ Graded levels — hit them in order:
 
 L3 is the realistic bar for a solo project. L4 requires significant compute (~8 P100 GPUs × 12 hours per the paper).
 
----
+______________________________________________________________________
 
 ## Suggested Stack
 
@@ -32,19 +32,19 @@ L3 is the realistic bar for a solo project. L4 requires significant compute (~8 
 | Evaluation | sacrebleu |
 | Experiment tracking | wandb or tensorboard |
 
----
+______________________________________________________________________
 
 ## Architecture Components (from paper)
 
 1. Multi-Head Self-Attention — scaled dot-product, `h=8` heads
-2. Positional Encoding — sinusoidal, added to embeddings
-3. Encoder stack — 6 identical layers (self-attention + FFN + LayerNorm + residual)
-4. Decoder stack — 6 layers (masked self-attention + cross-attention + FFN)
-5. Label smoothing — `ε=0.1`
-6. Learning rate schedule — warmup steps with inverse sqrt decay
-7. Beam search — width 4, length penalty `α=0.6`
+1. Positional Encoding — sinusoidal, added to embeddings
+1. Encoder stack — 6 identical layers (self-attention + FFN + LayerNorm + residual)
+1. Decoder stack — 6 layers (masked self-attention + cross-attention + FFN)
+1. Label smoothing — `ε=0.1`
+1. Learning rate schedule — warmup steps with inverse sqrt decay
+1. Beam search — width 4, length penalty `α=0.6`
 
----
+______________________________________________________________________
 
 ## Project Structure
 
@@ -57,11 +57,12 @@ transformer/
   tests/           # unit tests (especially masking)
 ```
 
----
+______________________________________________________________________
 
 ## Todo List
 
 ### Setup
+
 - [ ] Setup Docker image, CLI and uv
 - [ ] Initialize repo and virtual environment
 - [ ] Install dependencies (torch, sentencepiece, sacrebleu, datasets, wandb)
@@ -69,6 +70,7 @@ transformer/
 - [ ] Train shared BPE tokenizer (37k vocab) with sentencepiece
 
 ### Model
+
 - [ ] Implement scaled dot-product attention
 - [ ] Implement multi-head attention (self + cross)
 - [ ] Implement positional encoding (sinusoidal)
@@ -78,6 +80,7 @@ transformer/
 - [ ] Tie input/output embedding weights
 
 ### Training
+
 - [ ] Implement label-smoothed cross-entropy loss (ε=0.1)
 - [ ] Implement warmup + inverse-sqrt learning rate schedule
 - [ ] Implement token-batching (batch by tokens, not sentences)
@@ -86,15 +89,18 @@ transformer/
 - [ ] Write training loop
 
 ### Evaluation
+
 - [ ] Implement beam search (width=4, length penalty α=0.6)
 - [ ] Wire up sacrebleu scoring on WMT14 newstest2014
 
 ### Validation (gates before scaling)
+
 - [ ] Pass L1: loss decreases on small dataset without instability
 - [ ] Pass L2: copy task >95% token accuracy (tiny model, CPU)
 - [ ] Pass L3: BLEU ≥ 25 on WMT14 en-de
 
 ### Tests
+
 - [ ] Unit test: attention output shapes
 - [ ] Unit test: padding mask correctness
 - [ ] Unit test: causal (look-ahead) mask correctness

@@ -1,4 +1,4 @@
-app/datasets/local
+app/datasets/
 .venv
 __pycache__/
 **/*.pyc

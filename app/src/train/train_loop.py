@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import psutil
 import torch
-from constants import HISTORY_PATH
+from constants import HISTORY_PATH, TRACES_PATH
 from loguru import logger
 from torch import Tensor, nn
 from torch.optim import Optimizer
@@ -215,6 +215,178 @@ def fit(
     save_history(
         history=history,
         history_path=history_path,
+        train_state=state,
+        runtime_config=config,
+    )
+    return history
+
+
+def _profiled_run_epoch(
+    state: TrainState,
+    config: RuntimeConfig,
+    loader: DataLoader,
+    step_fn: StepFn,
+    *,
+    train: bool,
+) -> float:
+    """Like run_epoch but with record_function labels so the profiler can attribute time."""
+    from torch.profiler import record_function
+
+    state.model.train(mode=train)
+    accumulator = {"accumulated_loss": 0.0, "count": 0}
+    loader_iter = iter(loader)  # noqa: NAR001
+    while True:
+        with record_function(name="dataloader"):
+            try:
+                batch = next(loader_iter)  # noqa: NAR001
+            except StopIteration:
+                break
+        with record_function(name="step"):
+            batch_loss, batch_size = step_fn(state, config, batch)  # noqa: NAR001
+            config.accumulate_loss(accumulator, batch_loss, batch_size)  # noqa: NAR001
+    return config.compute_reduced_loss(accumulator)  # noqa: NAR001
+
+
+def _extract_profiler_metrics(prof: Any, *, epoch_number: int, traces_dir: Path) -> dict:
+    key_averages = prof.key_averages()
+    dataloader_event = next(  # noqa: NAR001
+        (event for event in key_averages if event.key == "dataloader"), None
+    )
+    step_event = next(  # noqa: NAR001
+        (event for event in key_averages if event.key == "step"), None
+    )
+    metrics: dict = {}
+    if dataloader_event is not None:
+        metrics["dataloader_cpu_time_ms"] = dataloader_event.cpu_time_total / 1000
+    if step_event is not None:
+        metrics["step_cpu_time_ms"] = step_event.cpu_time_total / 1000
+        if torch.cuda.is_available():
+            metrics["step_cuda_time_ms"] = step_event.cuda_time_total / 1000
+    traces_dir.mkdir(parents=True, exist_ok=True)
+    trace_path = traces_dir / f"epoch_{epoch_number}.json"
+    prof.export_chrome_trace(str(trace_path))  # noqa: NAR001
+    metrics["trace_path"] = str(trace_path)  # noqa: NAR001
+    return metrics
+
+
+def profiled_fit(
+    state: TrainState,
+    config: RuntimeConfig,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    num_epochs: int,
+    val_epoch_list: list[int],
+    profile_epoch_list: list[int],
+    history_path: Optional[Path] = None,
+    history_detailed_path: Optional[Path] = None,
+    wandb_run: Optional[Any] = None,
+) -> list[dict]:
+    """Like fit, but wraps profiling epochs with torch.profiler.profile.
+
+    Writes history.json (base metrics, same as fit) and history_detailed.json
+    (same records, with profiling metrics and trace_path merged in on
+    profiling epochs). Returns the base per-epoch history list.
+    """
+    from torch.profiler import ProfilerActivity, profile
+
+    run_uuid = str(uuid4())  # noqa: NAR001
+    if history_path is None:
+        history_path = HISTORY_PATH / f"{run_uuid}.json"
+    if history_detailed_path is None:
+        history_detailed_path = HISTORY_PATH / f"{run_uuid}_detailed.json"
+    traces_dir = TRACES_PATH / run_uuid
+    logger.info(  # noqa: NAR001
+        "profiled_fit epochs={} val={} profile={} device={} history={} detailed={}",
+        num_epochs,
+        val_epoch_list,
+        profile_epoch_list,
+        config.device,
+        history_path,
+        history_detailed_path,
+    )
+    val_epoch_set = set(val_epoch_list)  # noqa: NAR001
+    profile_epoch_set = set(profile_epoch_list)  # noqa: NAR001
+    activities = [ProfilerActivity.CPU]
+    if torch.cuda.is_available():
+        activities.append(ProfilerActivity.CUDA)  # noqa: NAR001
+    history: list[dict] = []
+    history_detailed: list[dict] = []
+    for epoch_number in range(1, num_epochs + 1):  # noqa: NAR001
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        epoch_start_time = time.perf_counter()
+        if epoch_number in profile_epoch_set:
+            with profile(
+                activities=activities,
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=False,
+            ) as prof:
+                train_loss = _profiled_run_epoch(
+                    state=state,
+                    config=config,
+                    loader=train_loader,
+                    step_fn=train_step,
+                    train=True,
+                )
+            profiling_metrics = _extract_profiler_metrics(
+                prof=prof,
+                epoch_number=epoch_number,
+                traces_dir=traces_dir,
+            )
+        else:
+            train_loss = run_epoch(
+                state=state,
+                config=config,
+                loader=train_loader,
+                step_fn=train_step,
+                train=True,
+            )
+            profiling_metrics = None
+        if state.scheduler is not None:
+            state.scheduler.step()
+        epoch_duration_seconds = time.perf_counter() - epoch_start_time
+        epoch_record: dict = {
+            "epoch": epoch_number,
+            "train_loss": train_loss,
+            "epoch_duration_seconds": epoch_duration_seconds,
+        }
+        if epoch_number in val_epoch_set:
+            val_loss = run_epoch(
+                state=state,
+                config=config,
+                loader=val_loader,
+                step_fn=eval_step,
+                train=False,
+            )
+            epoch_record["val_loss"] = val_loss
+            logger.info(  # noqa: NAR001
+                "epoch {:>3} | train {:.4f} | val {:.4f}",
+                epoch_number,
+                train_loss,
+                val_loss,
+            )
+        else:
+            logger.info(  # noqa: NAR001
+                "epoch {:>3} | train {:.4f}", epoch_number, train_loss
+            )
+        epoch_record.update(_collect_system_metrics())  # noqa: NAR001
+        if wandb_run is not None:
+            wandb_run.log(data=epoch_record)
+        history.append(epoch_record)  # noqa: NAR001
+        detailed_record = (
+            {**epoch_record, **profiling_metrics} if profiling_metrics is not None else epoch_record
+        )
+        history_detailed.append(detailed_record)  # noqa: NAR001
+    save_history(
+        history=history,
+        history_path=history_path,
+        train_state=state,
+        runtime_config=config,
+    )
+    save_history(
+        history=history_detailed,
+        history_path=history_detailed_path,
         train_state=state,
         runtime_config=config,
     )

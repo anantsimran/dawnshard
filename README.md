@@ -46,7 +46,7 @@ The loop is split into three clean concerns ([train_loop.py](app/src/train/train
 |---|---|---|
 | **State** | `TrainState` | model, optimizer, criterion, scheduler — the things that mutate |
 | **Config** | `RuntimeConfig` | device + injected loss `accumulate`/`reduce` functions — the policy |
-| **Function** | `fit`, `run_epoch`, `train_step`, `eval_step` | pure-ish functions that take state + config + batch |
+| **Function** | `fit`, `profiled_fit`, `run_epoch`, `train_step`, `eval_step` | pure-ish functions that take state + config + batch |
 
 Because the step function is just a `Callable`, the *same* `run_epoch` drives both
 training and evaluation — you pass `train_step` or `eval_step`. Loss reduction is
@@ -74,6 +74,12 @@ Every run also captures the git commit, a serialized snapshot of state + config,
 and per-epoch system metrics (CPU%, RAM, GPU peak memory) into a history JSON —
 so any result is reproducible and any run is comparable.
 
+`profiled_fit` is a drop-in variant that wraps selected epochs with
+`torch.profiler.profile`. It writes Chrome trace files to
+`app/history/traces/<run-uuid>/epoch_N.json` (open in `chrome://tracing` or
+Perfetto) and a second `_detailed.json` history file with CPU/CUDA timing broken
+down by dataloader and step phases merged into the profiled-epoch records.
+
 ______________________________________________________________________
 
 ## What's inside
@@ -85,7 +91,7 @@ ______________________________________________________________________
 - **Visualization scripts** — plot a run's metrics, compare two runs, or render a
   model's autograd graph — [app/src/viz/](app/src/viz/)
 - **Observability** — loguru for humans, optional Weights & Biases, history JSON
-  for machines — built into the loop
+  for machines, and Chrome profiler traces via `profiled_fit` — built into the loop
 - **Reproducible environment** — `uv` for dependency management, Docker for
   prod/dev parity, everything driven by `uv run`
 
@@ -238,15 +244,15 @@ dawnshard/
 │   │   ├── model/            # MNIST classifiers (MLP, deep MLP, CNN)
 │   │   │   └── mnist.py
 │   │   ├── train/            # the functional training loop
-│   │   │   ├── train_loop.py # TrainState, RuntimeConfig, fit/run_epoch/step
+│   │   │   ├── train_loop.py # TrainState, RuntimeConfig, fit/profiled_fit/run_epoch/step
 │   │   │   └── mean_loss.py  # injectable loss accumulate/reduce functions
 │   │   ├── dataload/         # dataset cache location + helpers
 │   │   ├── viz/              # plot_metrics, compare_runs, model_graph
 │   │   ├── utils/            # git commit + state/config serialization
 │   │   ├── setup.py          # device selection + wandb init
-│   │   └── constants.py      # repo-root-relative paths
+│   │   └── constants.py      # repo-root-relative paths (CHECKPOINTS_PATH, HISTORY_PATH, TRACES_PATH)
 │   ├── tests/                # pytest suite
-│   ├── history/              # per-run history JSON (metrics + metadata)
+│   ├── history/              # per-run history JSON (metrics + metadata); traces/ for Chrome profiler exports
 │   └── datasets/             # downloaded dataset cache (gitignored)
 ├── tutorials/                # PyTorch learning track + CNN + observability
 ├── scripts/

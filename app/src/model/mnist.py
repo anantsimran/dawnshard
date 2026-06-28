@@ -75,8 +75,8 @@ class DeepMNISTClassifier(nn.Module):
         self, x: Float[torch.Tensor, f"batch 1 {IMAGE_SIZE} {IMAGE_SIZE}"]
     ) -> Float[torch.Tensor, f"batch {NUM_CLASSES}"]:
         x = self.flatten(x)  # noqa: NAR001
-        x = F.relu(input=self.fc1(x))
-        x = F.relu(input=self.fc2(x))
+        x = F.relu(input=self.fc1(x))  # noqa: NAR001
+        x = F.relu(input=self.fc2(x))  # noqa: NAR001
         return self.fc3(x)  # noqa: NAR001
 
 
@@ -92,10 +92,10 @@ class ConvolutionalMNISTClassifier(nn.Module):
     def forward(
         self, x: Float[torch.Tensor, f"batch 1 {IMAGE_SIZE} {IMAGE_SIZE}"]
     ) -> Float[torch.Tensor, f"batch {NUM_CLASSES}"]:
-        x = self.conv1(x)
-        x = self.pool(x)
-        x = self.conv2(x)
-        x = self.pool(x)
+        x = self.conv1(x)  # noqa: NAR001
+        x = self.pool(x)  # noqa: NAR001
+        x = self.conv2(x)  # noqa: NAR001
+        x = self.pool(x)  # noqa: NAR001
         x = x.flatten(start_dim=1)
         return self.linear(x)  # noqa: NAR001
 

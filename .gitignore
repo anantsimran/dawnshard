@@ -1,6 +1,10 @@
 app/datasets/
+appcheckpoints/
+app/history/
 .venv
 __pycache__/
 **/*.pyc
 .pytest_cache/
 .ruff_cache/
+wandb/
+

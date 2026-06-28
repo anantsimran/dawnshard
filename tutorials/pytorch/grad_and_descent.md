@@ -33,6 +33,37 @@ print(b.grad)   # 2.0  — dy/db = a
 
 ______________________________________________________________________
 
+## Why Centered Inputs Stabilize Gradients
+
+Take one neuron: `z = w·x + b`. The gradient of the loss with respect to weight `w` is:
+
+```
+∂L/∂w = ∂L/∂z · x
+                 ↑
+         the input value itself appears here
+```
+
+**The input directly scales the gradient.**
+
+**Intuition:** if all your inputs are large positive numbers (e.g. raw pixels 0–255), then for every weight feeding into a neuron, `∂L/∂w` has the same sign as `∂L/∂z` — because `x` is always positive. So *all weights into that neuron move in the same direction* every step. They can't move independently. The optimizer is forced to zig-zag:
+
+```
+Uncentered inputs (all positive):     Centered inputs (mix of ±):
+weights forced to move together        weights move independently
+→ zig-zag path to minimum              → direct path
+
+    \  /\                                   \
+     \/  \                                   \
+          \                                   \
+           → slow                              → fast
+```
+
+Centering inputs around 0 means `x` is sometimes positive, sometimes negative → gradients for different weights can have different signs → independent movement → straighter, faster descent.
+
+**Second effect — scale:** if `x` is huge, `∂L/∂w` is huge → giant weight jumps → instability. Dividing by std keeps gradient magnitudes in a sane range. This is the same reasoning behind BatchNorm. (LeCun et al., *Efficient BackProp*, 1998.)
+
+______________________________________________________________________
+
 ## Chain Rule Trace
 
 Autograd is the chain rule, automated. For `L = f(g(h(w)))`:
@@ -57,6 +88,41 @@ Backward:
 ```
 
 `w.grad` → `-24`. Swap in cross-entropy and only the final node's local rule changes.
+
+______________________________________________________________________
+
+## Leaf vs Non-Leaf, `retain_grad`, and `no_grad`
+
+**Leaf node:** a tensor you created directly, not produced by an operation. Model parameters are leaves — they sit at the edges of the computation graph.
+
+**Non-leaf node:** any tensor that is the *result* of an operation. Intermediate activations and the loss itself are non-leaf.
+
+```python
+w = torch.tensor([1.0], requires_grad=True)  # leaf
+x = torch.tensor([2.0])                       # leaf (requires_grad=False)
+z = w * x                                      # non-leaf — result of multiply
+loss = z.sum()                                 # non-leaf
+```
+
+`loss.backward()` walks the graph backward and **accumulates into `.grad` of leaf tensors only:**
+
+```python
+loss.backward()
+print(w.grad)   # populated  — w is a leaf
+print(z.grad)   # None       — z is non-leaf, grad discarded by default
+```
+
+Non-leaf grads are computed transiently during backprop (to propagate the chain rule) then discarded — memory savings. Add `z.retain_grad()` before `backward()` if you actually need a non-leaf's grad.
+
+**`torch.no_grad()`:** disables graph recording inside its context. Results have `requires_grad=False`:
+
+```python
+with torch.no_grad():
+    z = w * x
+    print(z.requires_grad)   # False — no graph built
+```
+
+Two reasons to use at eval time: (1) no graph = less memory, (2) no graph-building overhead = faster. You're not training, so you never need the backward pass.
 
 ______________________________________________________________________
 

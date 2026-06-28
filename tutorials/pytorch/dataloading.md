@@ -38,6 +38,142 @@ for xb, yb in loader:   # xb: (B, features), yb: (B, ...)
 
 ______________________________________________________________________
 
+## Transforms — Format and Normalization Pipeline
+
+`transforms` is a pipeline that processes raw data into what your model expects. Two jobs:
+
+### Format conversion — `ToTensor()`
+
+```python
+# Raw image: PIL Image, pixel values 0–255
+# After ToTensor():
+#   - converts to torch.Tensor
+#   - scales values from [0, 255] → [0.0, 1.0]   (divides by 255)
+#   - reshapes to (C, H, W)
+
+transforms.ToTensor()
+```
+
+Neural nets train better on small float inputs than large integers — the scale directly affects gradient magnitude (see [grad_and_descent.md](grad_and_descent.md#why-centered-inputs-stabilize-gradients)).
+
+### Normalization — `Normalize(mean, std)`
+
+```python
+# Shifts each pixel so distribution is centered at 0
+# (pixel - mean) / std   — applied independently per channel
+
+transforms.Normalize((mean_ch1,), (std_ch1,))
+```
+
+**Why a tuple?** One value per channel. A single-channel image takes `(mean,)`. RGB takes three:
+
+```python
+transforms.Normalize((0.485, 0.456, 0.406),   # ImageNet R, G, B means
+                     (0.229, 0.224, 0.225))    # R, G, B stds
+```
+
+### Compose chains them
+
+```python
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((mean,), (std,))
+])
+# Applied in order, automatically, to every sample the DataLoader yields
+```
+
+### Why it's the standard pattern — lazy + train/test split
+
+Transforms are applied **lazily** — per sample as batches load, not upfront. This makes it natural to use different transforms for training vs evaluation:
+
+```python
+train_transform = transforms.Compose([
+    transforms.RandomRotation(10),   # augmentation — training only
+    transforms.ToTensor(),
+    transforms.Normalize(...)
+])
+
+test_transform = transforms.Compose([
+    transforms.ToTensor(),           # no augmentation for test
+    transforms.Normalize(...)
+])
+```
+
+______________________________________________________________________
+
+## How Augmentations Work
+
+`Dataset.__getitem__(i)` is the hook point. The transform is stored on the dataset and called inside `__getitem__`:
+
+```python
+# Simplified torchvision internals
+class SomeDataset(Dataset):
+    def __getitem__(self, i):
+        img, label = self.raw_data[i]      # raw, untouched on disk
+        if self.transform:
+            img = self.transform(img)      # called fresh, every access
+        return img, label
+```
+
+Three consequences:
+
+- **Stateless & per-call** — the raw bytes never change. Each `__getitem__` call produces a new transformed copy. A `RandomRotation` rolls a new angle *every epoch* → the model sees a slightly different image each time → free data variety without changing the dataset.
+- **Lazy** — nothing runs until the DataLoader pulls index `i`. Memory holds raw data only; transformed tensors are ephemeral, created and discarded per batch.
+- **Composable** — `Compose` is just function composition. Each transform is a callable:
+
+```python
+class Compose:
+    def __call__(self, x):
+        for t in self.transforms:
+            x = t(x)
+        return x
+```
+
+A list of callables applied in sequence — that's it.
+
+______________________________________________________________________
+
+## PIL Image
+
+PIL = **Python Imaging Library** (the `Pillow` fork). It's the standard Python object for representing an image in memory before tensor conversion. torchvision loads images as PIL Images by default.
+
+```python
+from torchvision import datasets
+
+raw = datasets.MNIST(root="data", train=True, download=True)  # no transform
+img, label = raw[0]
+
+print(type(img))    # <class 'PIL.Image.Image'>
+print(img.size)     # (28, 28)  — note: PIL is (W, H), not (H, W)
+print(img.mode)     # 'L'  → 'L' means 8-bit grayscale
+```
+
+`type(img)` is how you confirm. After `ToTensor()` it becomes `torch.Tensor`.
+
+______________________________________________________________________
+
+## Computing Normalization Stats
+
+**Can you compute mean/std at runtime?** Yes:
+
+```python
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+
+ds = datasets.SomeDataset(root="data", train=True, download=True,
+                           transform=transforms.ToTensor())
+loader = DataLoader(ds, batch_size=1000)
+
+mean = sum(xb.mean() for xb, _ in loader) / len(loader)
+std  = sum(xb.std()  for xb, _ in loader) / len(loader)
+```
+
+**Do train and test stats differ?** Slightly — they're different image sets. **But always use training stats for both.** At inference you may have only one image; you can't compute meaningful stats from it. Test data is treated as unseen, so you normalize it with numbers derived only from training. Using test stats on test data is data leakage.
+
+This is why constants like MNIST's 0.1307/0.3081 are hardcoded — computed once on train, reused everywhere.
+
+______________________________________________________________________
+
 ## What are Logits?
 
 Raw, unnormalized scores output by the model — one number per class, before any probability conversion.

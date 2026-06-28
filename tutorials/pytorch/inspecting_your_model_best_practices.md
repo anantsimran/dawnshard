@@ -44,6 +44,49 @@ def assert_param_names(model: nn.Module, expected: set[str]) -> None:
 
 ______________________________________________________________________
 
+## PyTorch Hooks
+
+A hook is a **callback you register on a module or tensor** that fires automatically during forward or backward — think middleware or event listeners.
+
+### Three main types
+
+```python
+# 1. Forward hook — fires AFTER forward(), sees input & output
+def fwd_hook(module, inp, out):
+    print(f"{module.__class__.__name__}: out shape {out.shape}")
+
+handle = model.net[1].register_forward_hook(fwd_hook)
+model(xb)        # prints layer output shape automatically
+handle.remove()  # always clean up
+```
+
+```python
+# 2. Forward pre-hook — fires BEFORE forward(), can modify input
+def pre_hook(module, inp):
+    return (inp[0] * 2,)   # returning a value replaces the input
+
+model.register_forward_pre_hook(pre_hook)
+```
+
+```python
+# 3. Backward hook — fires during backward(), sees gradients
+def bwd_hook(module, grad_in, grad_out):
+    print(f"grad norm: {grad_out[0].norm()}")
+
+model.net[1].register_full_backward_hook(bwd_hook)
+```
+
+### What hooks are actually used for
+
+- **Debugging** — inspect activations/gradients mid-network without editing `forward`
+- **Feature extraction** — grab intermediate layer outputs (transfer learning, Grad-CAM)
+- **Gradient monitoring** — detect vanishing/exploding gradients by logging norms
+- **Profiling** — torchvision/profilers attach hooks to time each layer
+
+This is also why `model(x)` matters over `model.forward(x)` — `__call__` is what runs registered hooks around `forward`. Bypass `__call__` and your hooks silently never fire. See [nn_module_and_multi_layer_networks.md](nn_module_and_multi_layer_networks.md#modelx-vs-modelforwardx--never-call-forward-directly).
+
+______________________________________________________________________
+
 ## `jaxtyping` + `beartype` — Runtime Shape Contracts
 
 Shape annotations as type hints, enforced at runtime. `jaxtyping` provides the vocabulary; `beartype` enforces it. Together they give typed contracts: wrong shape in → immediate, readable exception at the call site.

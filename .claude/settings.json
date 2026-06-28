@@ -1,4 +1,11 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(xargs cat -n)",
+      "Bash(git commit --amend -m ' *)",
+      "Bash(git commit *)"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {

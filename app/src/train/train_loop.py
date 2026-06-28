@@ -52,14 +52,10 @@ class TrainState:
         # Build the optimizer from model.parameters() before calling create();
         # we move the model here so optimizer buffers land on device on first step.
         model.to(device=device)
-        return cls(
-            model=model, optimizer=optimizer, criterion=criterion, scheduler=scheduler
-        )
+        return cls(model=model, optimizer=optimizer, criterion=criterion, scheduler=scheduler)
 
 
-def train_step(
-    train_state: TrainState, config: RuntimeConfig, batch: Batch
-) -> tuple[float, int]:
+def train_step(train_state: TrainState, config: RuntimeConfig, batch: Batch) -> tuple[float, int]:
     """One optimization step. Returns (mean batch loss, batch size)."""
     input_tensor, target_tensor = (tensor.to(device=config.device) for tensor in batch)
     train_state.optimizer.zero_grad(set_to_none=True)
@@ -71,9 +67,7 @@ def train_step(
 
 
 @torch.no_grad()
-def eval_step(
-    train_state: TrainState, config: RuntimeConfig, batch: Batch
-) -> tuple[float, int]:
+def eval_step(train_state: TrainState, config: RuntimeConfig, batch: Batch) -> tuple[float, int]:
     """One forward-only step. Returns (mean batch loss, batch size)."""
     input_tensor, target_tensor = (tensor.to(device=config.device) for tensor in batch)
     predicted = train_state.model(input_tensor)  # noqa: NAR001
@@ -106,9 +100,7 @@ def _collect_system_metrics() -> dict:
         "ram_used_gb": ram.used / 1e9,
     }
     if torch.cuda.is_available():
-        metrics["gpu_peak_memory_allocated_gb"] = (
-            torch.cuda.max_memory_allocated() / 1e9
-        )
+        metrics["gpu_peak_memory_allocated_gb"] = torch.cuda.max_memory_allocated() / 1e9
         metrics["gpu_peak_memory_reserved_gb"] = torch.cuda.max_memory_reserved() / 1e9
     elif torch.backends.mps.is_available():
         metrics["gpu_memory_allocated_gb"] = torch.mps.current_allocated_memory() / 1e9
@@ -170,6 +162,14 @@ def fit(
     """
     if history_path is None:
         history_path = HISTORY_PATH / f"{uuid4()}.json"
+    logger.info(  # noqa: NAR001
+        "fit | epochs {} | val_epochs {} | device {} | wandb {} | history {}",
+        num_epochs,
+        val_epoch_list,
+        config.device,
+        wandb_run is not None,
+        history_path,
+    )
     val_epoch_set = set(val_epoch_list)  # noqa: NAR001
     history: list[dict] = []
     for epoch_number in range(1, num_epochs + 1):  # noqa: NAR001

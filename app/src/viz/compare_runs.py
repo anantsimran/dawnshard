@@ -1,10 +1,24 @@
 """Compare per-epoch metrics from two training runs on the same graph."""
 
 import argparse
+import base64
+import io
 import json
+import webbrowser
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+
+
+def _save_and_open_html(fig: Figure, output_path: Path) -> None:
+    buffer = io.BytesIO()
+    fig.savefig(fname=buffer, format="png", bbox_inches="tight")
+    buffer.seek(0)  # noqa: NAR001
+    encoded = base64.b64encode(s=buffer.read()).decode(encoding="utf-8")
+    html = f'<html><body><img src="data:image/png;base64,{encoded}"></body></html>'
+    output_path.write_text(data=html)
+    webbrowser.open(url=output_path.as_uri())
 
 
 def load_history(history_path: Path) -> list[dict]:
@@ -94,7 +108,10 @@ def main():
         axis.grid(visible=True)
 
     fig.tight_layout()
-    plt.show()
+    _save_and_open_html(
+        fig=fig,
+        output_path=Path("/tmp/compare_runs.html"),  # noqa: NAR001
+    )
 
 
 if __name__ == "__main__":

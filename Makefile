@@ -1,4 +1,4 @@
-.PHONY: test precheck docker-build docker-build-dev docker-run docker-run-dev docker-build-dev-test nb-to-py py-to-nb
+.PHONY: test precheck check-named-args docker-build docker-build-dev docker-run docker-run-dev docker-build-dev-test nb-to-py py-to-nb
 
 IMAGE_NAME := dawnshard
 
@@ -11,12 +11,15 @@ precheck:
 	@uv run pyright
 	@uv run ruff check app/src/ --fix
 	@uv run ruff format app/src/
-	@find app/src -name "*.py" | xargs uv run python scripts/check_named_args.py
 	@uv run mdformat . ; \
 	if ! git diff --quiet; then \
 		echo "\033[0;31mmdformat reformatted files. Stage the changes and run precheck again.\033[0m"; \
 		exit 1; \
 	fi
+
+# Check all source files for positional arguments (run before opening a PR)
+check-named-args:
+	@find app/src -name "*.py" | xargs uv run python scripts/check_named_args.py
 
 # Build the production Docker image
 docker-build:

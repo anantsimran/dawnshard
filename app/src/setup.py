@@ -6,6 +6,8 @@ import wandb
 
 
 def get_device() -> torch.device:
+    if os.environ.get(key="DISABLE_GPU") == "1":
+        return torch.device("cpu")  # noqa: NAR001
     if torch.cuda.is_available():
         return torch.device("cuda")  # noqa: NAR001
     if torch.backends.mps.is_available():

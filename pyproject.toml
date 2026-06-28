@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest", "pyright", "ruff", "mdformat", "torchvision", "nbconvert", "jupytext", "ipykernel"]
+dev = ["pytest", "pyright", "ruff", "mdformat", "torchvision", "nbconvert", "jupytext", "ipykernel", "torchviz", "torchinfo"]
 
 [tool.pyright]
 include = ["app/src"]
@@ -22,7 +22,7 @@ pythonVersion = "3.12"
 typeCheckingMode = "basic"
 
 [tool.ruff]
-line-length = 88
+line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]

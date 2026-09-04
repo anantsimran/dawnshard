@@ -88,6 +88,9 @@ ______________________________________________________________________
   reproducible per-run history — [app/src/train/](app/src/train/)
 - **MNIST reference models** — simple MLP, deep MLP, and a CNN, all runtime
   shape-checked with `jaxtyping` + `beartype` — [app/src/model/mnist.py](app/src/model/mnist.py)
+- **Attention primitives** — scaled dot-product attention and multi-head
+  self-attention, written from scratch with broadcasting masks —
+  [app/src/transformer/](app/src/transformer/)
 - **Visualization scripts** — plot a run's metrics, compare two runs, or render a
   model's autograd graph — [app/src/viz/](app/src/viz/)
 - **Observability** — loguru for humans, optional Weights & Biases, history JSON
@@ -243,6 +246,10 @@ dawnshard/
 │   ├── src/
 │   │   ├── model/            # MNIST classifiers (MLP, deep MLP, CNN)
 │   │   │   └── mnist.py
+│   │   ├── transformer/      # attention built from scratch
+│   │   │   ├── functions.py  # scaled dot-product attention
+│   │   │   ├── modules.py    # MultiHeadAttentionLayer
+│   │   │   └── bpe.py        # BPE tokenizer (not yet implemented)
 │   │   ├── train/            # the functional training loop
 │   │   │   ├── train_loop.py # TrainState, RuntimeConfig, fit/profiled_fit/run_epoch/step
 │   │   │   └── mean_loss.py  # injectable loss accumulate/reduce functions
@@ -275,7 +282,9 @@ ______________________________________________________________________
   `jaxtyping` provides the annotation syntax —
   `Float[torch.Tensor, "batch 1 28 28"]` — and `beartype` enforces it at
   call time. Every `forward()` in [app/src/model/mnist.py](app/src/model/mnist.py)
-  is decorated this way: a shape mismatch raises immediately at the call site
-  instead of surfacing as a cryptic downstream error.
+  and [app/src/transformer/](app/src/transformer/) is decorated this way: a shape
+  mismatch raises immediately at the call site instead of surfacing as a cryptic
+  downstream error. Ruff's `F722` is ignored project-wide because it reads these
+  shape strings as malformed forward references.
 - **Run `make precheck` before opening a PR.** Type-checking, linting,
   formatting, and markdown formatting all have to pass.

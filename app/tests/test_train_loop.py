@@ -23,7 +23,7 @@ def make_state_and_config():
     criterion = nn.MSELoss()
     state = TrainState(model=model, optimizer=optimizer, criterion=criterion)
     config = RuntimeConfig(
-        device=torch.device("cpu"),
+        device=torch.device("cpu"),  # noqa: NAR001
         accumulate_loss=accumulate_loss,
         compute_reduced_loss=compute_reduced_loss,
     )
@@ -31,57 +31,57 @@ def make_state_and_config():
 
 
 def test_train_state_create_moves_model_to_device():
-    device = torch.device("cpu")
+    device = torch.device("cpu")  # noqa: NAR001
     model = nn.Linear(in_features=2, out_features=1)
     optimizer = torch.optim.SGD(params=model.parameters(), lr=0.01)
     criterion = nn.MSELoss()
     state = TrainState.create(
         model=model, optimizer=optimizer, criterion=criterion, device=device
     )
-    assert next(state.model.parameters()).device.type == "cpu"
+    assert next(state.model.parameters()).device.type == "cpu"  # noqa: NAR001
 
 
 def test_train_step_returns_loss_and_batch_size():
     state, config = make_state_and_config()
-    batch = (torch.randn(4, 2), torch.randn(4, 1))
+    batch = (torch.randn(4, 2), torch.randn(4, 1))  # noqa: NAR001
     batch_loss, batch_size = train_step(
         train_state=state, config=config, batch=batch
     )
-    assert isinstance(batch_loss, float)
+    assert isinstance(batch_loss, float)  # noqa: NAR001
     assert batch_size == 4
 
 
 def test_train_step_updates_weights():
     state, config = make_state_and_config()
     weights_before = state.model.weight.clone()
-    batch = (torch.randn(4, 2), torch.randn(4, 1))
+    batch = (torch.randn(4, 2), torch.randn(4, 1))  # noqa: NAR001
     train_step(train_state=state, config=config, batch=batch)
-    assert not torch.equal(weights_before, state.model.weight)
+    assert not torch.equal(weights_before, state.model.weight)  # noqa: NAR001
 
 
 def test_eval_step_does_not_update_weights():
     state, config = make_state_and_config()
     weights_before = state.model.weight.clone()
-    batch = (torch.randn(4, 2), torch.randn(4, 1))
+    batch = (torch.randn(4, 2), torch.randn(4, 1))  # noqa: NAR001
     eval_step(train_state=state, config=config, batch=batch)
-    assert torch.equal(weights_before, state.model.weight)
+    assert torch.equal(weights_before, state.model.weight)  # noqa: NAR001
 
 
 def test_eval_step_returns_loss_and_batch_size():
     state, config = make_state_and_config()
-    batch = (torch.randn(4, 2), torch.randn(4, 1))
+    batch = (torch.randn(4, 2), torch.randn(4, 1))  # noqa: NAR001
     batch_loss, batch_size = eval_step(
         train_state=state, config=config, batch=batch
     )
-    assert isinstance(batch_loss, float)
+    assert isinstance(batch_loss, float)  # noqa: NAR001
     assert batch_size == 4
 
 
 def test_run_epoch_returns_nonnegative_loss():
     state, config = make_state_and_config()
     batches = [
-        (torch.randn(4, 2), torch.randn(4, 1)),
-        (torch.randn(4, 2), torch.randn(4, 1)),
+        (torch.randn(4, 2), torch.randn(4, 1)),  # noqa: NAR001
+        (torch.randn(4, 2), torch.randn(4, 1)),  # noqa: NAR001
     ]
     loss = run_epoch(
         state=state,
@@ -90,7 +90,7 @@ def test_run_epoch_returns_nonnegative_loss():
         step_fn=train_step,
         train=True,
     )
-    assert isinstance(loss, float)
+    assert isinstance(loss, float)  # noqa: NAR001
     assert loss >= 0.0
 
 
@@ -100,10 +100,10 @@ def test_save_and_load_roundtrip(tmp_path):
     save_state(state=state, checkpoint_path=checkpoint_path)
 
     original_weight = state.model.weight.clone()
-    state.model.weight.data.fill_(99.0)
+    state.model.weight.data.fill_(99.0)  # noqa: NAR001
 
     load(state=state, config=config, checkpoint_path=checkpoint_path)
-    assert torch.allclose(state.model.weight, original_weight)
+    assert torch.allclose(state.model.weight, original_weight)  # noqa: NAR001
 
 
 def test_save_history_writes_valid_json(tmp_path):

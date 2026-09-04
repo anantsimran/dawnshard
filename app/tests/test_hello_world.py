@@ -1,2 +1,2 @@
 def test_hello_world():
-    print("hello world")
+    print("hello world")  # noqa: NAR001

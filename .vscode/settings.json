@@ -1,4 +1,10 @@
 {
   "jupyter.notebookFileRoot": "${workspaceFolder}",
-  "makefile.configureOnOpen": false
+  "makefile.configureOnOpen": false,
+  "files.exclude": {
+    "**/__pycache__": true
+  },
+  "search.exclude": {
+    "**/__pycache__": true
+  }
 }

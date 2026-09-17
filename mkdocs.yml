@@ -1,0 +1,97 @@
+site_name: Dawnshard
+site_description: A top-down–designed ML infrastructure library, and a learning track that builds it from the ground up.
+site_url: https://anantsimran.github.io/dawnshard/
+repo_url: https://github.com/anantsimran/dawnshard
+repo_name: anantsimran/dawnshard
+
+# MkDocs needs a single docs_dir, but the site mirrors repo paths so relative links
+# behave the same here as on github.com. pages/hooks.py re-roots tutorials/ under
+# tutorials/ and adds the READMEs listed in its EXTRA_PAGES.
+docs_dir: tutorials
+hooks:
+  - pages/hooks.py
+watch:
+  - README.md
+  - pages
+
+theme:
+  name: material
+  custom_dir: pages/overrides
+  icon:
+    logo: material/weather-sunset-up
+    repo: fontawesome/brands/github
+  favicon: assets/favicon.svg
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Follow system theme
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - content.code.copy
+
+extra_css:
+  - stylesheets/extra.css
+
+markdown_extensions:
+  - tables
+  - toc:
+      permalink: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+
+validation:
+  nav:
+    omitted_files: warn
+  links:
+    anchors: warn
+
+nav:
+  - Home: README.md
+  - Index: tutorials/index.md
+  - PyTorch:
+      - Overview: tutorials/pytorch/overview.md
+      - Tensors: tutorials/pytorch/tensors.md
+      - Shapes & broadcasting: tutorials/pytorch/broadcasting.md
+      - Gradients & descent: tutorials/pytorch/grad_and_descent.md
+      - nn.Module & multi-layer nets: tutorials/pytorch/nn_module_and_multi_layer_networks.md
+      - Linear-layer backward: tutorials/pytorch/linear_layer_backward.md
+      - ReLU & dead neurons: tutorials/pytorch/relu_and_dead_neurons.md
+      - Data loading: tutorials/pytorch/dataloading.md
+      - Inspecting your model: tutorials/pytorch/inspecting_your_model_best_practices.md
+  - Training:
+      - The training loop: tutorials/training/training_loop.md
+      - Optimizer & scheduler: tutorials/training/optimizer_and_scheduler.md
+      - Adam & the learning rate: tutorials/training/adam_and_learning_rate.md
+      - Observability: tutorials/training/observability.md
+  - Transformers:
+      - Attention implementation: app/src/training/transformer/README.md
+      - Attention masks: tutorials/transformer/attention_masks.md
+      - Pre-norm vs post-norm: tutorials/transformer/norm.md
+  - Guides:
+      - Matrix calculus: tutorials/math/matrix_calculus.md
+      - Convolutional networks: tutorials/vision/cnn.md

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f2a72"/>
+      <stop offset="1" stop-color="#b8527a"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#sky)"/>
+  <path d="M14 45a18 18 0 0 1 36 0z" fill="#f29d38"/>
+  <rect x="9" y="47" width="46" height="4" rx="2" fill="#ffd29a"/>
+</svg>

@@ -11,6 +11,7 @@ dependencies = [
     "beartype",
     "loguru",
     "matplotlib",
+    "sortedcontainers",
 ]
 
 [dependency-groups]
@@ -29,7 +30,7 @@ target-version = "py312"
 select = ["E", "F", "I"]
 # jaxtyping shape annotations are string literals, not forward references.
 ignore = ["F722"]
-external = ["NAR001"]
+external = ["NAR001", "NAR002"]
 
 [tool.pytest.ini_options]
 pythonpath = ["app/src"]

@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+
+{#-
+  MathJax is large, so load it only on pages that contain display math.
+  The tutorials write math as $$...$$ with no markdown math extension; Python-Markdown's
+  escape handling leaves plain TeX in the HTML, and MathJax typesets it on load.
+-#}
+{% block scripts %}
+  {{ super() }}
+  {% if page and page.content and "$$" in page.content %}
+    <script>
+      window.MathJax = {
+        tex: { inlineMath: [], displayMath: [["$$", "$$"]] },
+        options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] },
+      };
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js"></script>
+  {% endif %}
+{% endblock %}

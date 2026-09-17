@@ -1,0 +1,177 @@
+{% extends "main.html" %}
+
+{#-
+  Landing page for README.md (selected by pages/hooks.py). The hero, design-choice
+  cards, and learning-track cards summarize the README; the README itself renders
+  in full underneath, so keep the cards in step with it when the design changes.
+-#}
+
+{% block tabs %}
+  {{ super() }}
+
+  <section class="ds-hero">
+    <div class="md-grid ds-hero__inner">
+      <div class="ds-hero__copy">
+        <p class="ds-eyebrow">ML infrastructure, designed top-down</p>
+        <h1 class="ds-hero__title">Dawnshard</h1>
+        <p class="ds-hero__lead">
+          Most ML code grows bottom-up: a script becomes a notebook becomes a tangle of
+          globals. Dawnshard goes the other way, with clean seams between configuration,
+          state, and computation, and it's engineered like a real codebase.
+        </p>
+        <p class="ds-hero__goal">
+          The long-term goal is Constitutional AI and RLHF. The training loop,
+          observability, and reproducibility primitives here are the groundwork.
+        </p>
+        <div class="ds-hero__actions">
+          <a class="ds-btn ds-btn--primary" href="#design">
+            See the design choices
+            {% include ".icons/material/arrow-right.svg" %}
+          </a>
+          <a class="ds-btn ds-btn--ghost" href="tutorials/pytorch/overview/">
+            {% include ".icons/material/school-outline.svg" %}
+            Start learning
+          </a>
+          <a class="ds-btn ds-btn--ghost" href="{{ config.repo_url }}">
+            {% include ".icons/fontawesome/brands/github.svg" %}
+            GitHub
+          </a>
+        </div>
+        <ul class="ds-chips" aria-label="Engineering practices">
+          <li>typed</li><li>tested</li><li>linted</li><li>containerized</li>
+        </ul>
+      </div>
+
+      <figure class="ds-code" aria-label="Training a model with Dawnshard">
+        <figcaption>
+          <span class="ds-code__name">train.py</span>
+        </figcaption>
+<pre><code><span class="c"># the state that mutates</span>
+train_state = <span class="n">TrainState</span>(
+    model=model,
+    optimizer=torch.optim.<span class="n">Adam</span>(params=model.parameters(), lr=<span class="s">1e-3</span>),
+    criterion=nn.<span class="n">CrossEntropyLoss</span>(),
+)
+<span class="c"># the policy, injected</span>
+epoch_spec = <span class="n">EpochSpec</span>(
+    device=DEVICE,
+    metrics_type=ClassificationMetrics,
+    calculate_metrics=calculate_metrics,
+    accumulate_metrics=accumulate_metrics,
+    reduce_metrics=reduce_metrics,
+)
+<span class="c"># plain functions over both</span>
+<span class="f">fit</span>(state=train_state, config=epoch_spec,
+    train_loader=train, val_loader=val,
+    num_epochs=<span class="s">15</span>, val_epoch_list=[<span class="s">5</span>, <span class="s">10</span>, <span class="s">15</span>])</code></pre>
+      </figure>
+    </div>
+  </section>
+
+  <section class="ds-section" id="design">
+    <div class="md-grid ds-section__inner">
+      <p class="ds-eyebrow ds-eyebrow--accent">Design choices</p>
+      <h2 class="ds-section__title">Every seam is deliberate</h2>
+      <p class="ds-section__lead">
+        Each choice below trades a little convenience for code you can reason about,
+        test, and reproduce. The full reasoning is in the README further down.
+      </p>
+      <div class="ds-grid">
+        <a class="ds-card" href="#separate-state-policy-and-mechanism">
+          <span class="ds-card__icon">{% include ".icons/material/function-variant.svg" %}</span>
+          <h3>No Trainer god-class</h3>
+          <p>
+            State (<code>TrainState</code>), policy (<code>EpochSpec</code>), and
+            behaviour (<code>fit</code>, <code>run_epoch</code>) are kept apart.
+            <code>nn.Module</code> already gives dependency injection, so an extra
+            object-oriented layer buys nothing.
+          </p>
+        </a>
+        <a class="ds-card" href="#why-the-training-loop-is-different">
+          <span class="ds-card__icon">{% include ".icons/material/swap-horizontal-circle-outline.svg" %}</span>
+          <h3>One loop for train and eval</h3>
+          <p>
+            <code>run_epoch</code> takes the step function as an argument, so the same
+            code drives training and evaluation. Loss accumulation and reduction are
+            injected too, and changing a metric never touches the loop.
+          </p>
+        </a>
+        <a class="ds-card" href="#why-the-training-loop-is-different">
+          <span class="ds-card__icon">{% include ".icons/material/source-commit.svg" %}</span>
+          <h3>Every run is reproducible</h3>
+          <p>
+            Each run records its git commit, a snapshot of state and config, and
+            per-epoch CPU, RAM, and GPU memory into a history JSON. Any result can be
+            traced back, and any two runs can be compared.
+          </p>
+        </a>
+        <a class="ds-card" href="#the-repo-keeps-itself-clean">
+          <span class="ds-card__icon">{% include ".icons/material/ruler-square.svg" %}</span>
+          <h3>Shapes checked at runtime</h3>
+          <p>
+            Every <code>forward()</code> is annotated with <code>jaxtyping</code> and
+            enforced by <code>beartype</code>. A shape mismatch fails at the call site,
+            not as a cryptic error three layers downstream.
+          </p>
+        </a>
+        <a class="ds-card" href="#debuggability">
+          <span class="ds-card__icon">{% include ".icons/material/chart-timeline-variant.svg" %}</span>
+          <h3>Observability built in</h3>
+          <p>
+            loguru for humans, a history JSON for machines, optional Weights &amp;
+            Biases, and Chrome profiler traces from <code>profiled_fit</code>. None of
+            it has to be bolted on later.
+          </p>
+        </a>
+        <a class="ds-card" href="#the-repo-keeps-itself-clean">
+          <span class="ds-card__icon">{% include ".icons/material/hammer-wrench.svg" %}</span>
+          <h3>Engineered like a codebase</h3>
+          <p>
+            <code>uv</code> for dependencies, Docker for prod/dev parity, keyword
+            arguments enforced by a custom linter, and <code>make precheck</code> before
+            every PR.
+          </p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <section class="ds-section ds-section--tinted">
+    <div class="md-grid ds-section__inner">
+      <p class="ds-eyebrow ds-eyebrow--accent">Learning track</p>
+      <h2 class="ds-section__title">Built from the ground up, and written down</h2>
+      <p class="ds-section__lead">
+        Tutorials that build the same concepts the library uses, from the first tensor
+        to attention masks.
+      </p>
+      <div class="ds-grid ds-grid--three">
+        <a class="ds-card ds-card--track" href="tutorials/pytorch/overview/">
+          <span class="ds-card__icon">{% include ".icons/material/fire.svg" %}</span>
+          <h3>PyTorch</h3>
+          <p>Tensors and broadcasting, autograd, <code>nn.Module</code>, the training
+            loop, optimizers, and Adam and the learning rate.</p>
+          <span class="ds-card__more">Start the series {% include ".icons/material/arrow-right.svg" %}</span>
+        </a>
+        <a class="ds-card ds-card--track" href="tutorials/transformer/attention_masks/">
+          <span class="ds-card__icon">{% include ".icons/material/transit-connection-variant.svg" %}</span>
+          <h3>Transformers</h3>
+          <p>Attention masks and cross-attention, pre-norm vs post-norm, and the
+            attention code in <code>app/src/training/transformer</code>.</p>
+          <span class="ds-card__more">Read about attention {% include ".icons/material/arrow-right.svg" %}</span>
+        </a>
+        <a class="ds-card ds-card--track" href="tutorials/vision/cnn/">
+          <span class="ds-card__icon">{% include ".icons/material/book-open-page-variant-outline.svg" %}</span>
+          <h3>Guides</h3>
+          <p>Convolutional networks for MNIST, what the training loop measures for
+            free, and the matrix calculus behind backprop.</p>
+          <span class="ds-card__more">Browse the guides {% include ".icons/material/arrow-right.svg" %}</span>
+        </a>
+      </div>
+    </div>
+  </section>
+{% endblock %}
+
+{% block content %}
+  <p class="ds-eyebrow ds-eyebrow--accent">The README</p>
+  {{ page.content }}
+{% endblock %}

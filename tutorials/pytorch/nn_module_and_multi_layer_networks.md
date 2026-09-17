@@ -86,6 +86,61 @@ print(list(bn.state_dict().keys()))            # all of the above
 
 ______________________________________________________________________
 
+## A Module Is a Tree Node, Not a Layer
+
+A layer is a Module, but so is the whole model. `nn.Linear`, `nn.Sequential`, and a ResNet are the same kind of object, and they nest through `_modules`. Each node owns its own `_parameters`, `_buffers`, and child `_modules`.
+
+`.parameters()`, `.to(device)`, and `state_dict()` are just recursive walks over that tree. The registry is the whole point of the class.
+
+______________________________________________________________________
+
+## The Module Doesn't Save Forward Results — the Graph Does
+
+Backward needs intermediate values from forward, such as the input to a matmul. A natural guess is that the module stores them. It doesn't. **Autograd attaches them to the output tensor.** Each op's output carries a `grad_fn`, and that backward node holds only what its gradient formula needs:
+
+| Op | Backward node | Saves |
+|---|---|---|
+| `nn.Linear` | `AddmmBackward0` | both operands (`mat1` = input, `mat2` = weight) |
+| `a @ b` | `MmBackward0` | both operands |
+| `relu` | `ReluBackward0` | its output (`result`) |
+| `a + b` | `AddBackward0` | no tensors |
+
+```python
+import torch, torch.nn as nn
+
+lin = nn.Linear(3, 2)
+x = torch.randn(1, 3)
+y1, y2 = lin(x), lin(x)          # two independent graphs; lin recalls neither
+
+print(y1.grad_fn)                                        # AddmmBackward0
+print(y1.grad_fn is y2.grad_fn)                          # False
+print(y1.grad_fn._saved_mat1.data_ptr() == x.data_ptr()) # True: graph holds the input
+
+y1.sum().backward()
+print(lin.weight.grad.shape)     # torch.Size([2, 3]): grads land on the parameter
+```
+
+Three consequences show that this state lives outside the module:
+
+1. **Calling one module twice builds two independent graphs.** That's what makes RNN unrolling and weight tying work.
+1. **`retain_graph=True` exists** because `backward()` frees the *graph's* saved tensors. A second `backward()` through the same graph raises `Trying to backward through the graph a second time`. The module is untouched.
+1. **`del loss` frees activation memory while the model stays alive**, as long as nothing else holds the graph (a kept `logits` tensor does).
+
+Some state does persist on the module: gradients. `backward()` accumulates into `param.grad`, which is why you call `optimizer.zero_grad()`.
+
+**The split:**
+
+```
+Module  → persistent state: parameters, buffers, .grad   (optimizer reads this)
+Graph   → per-call state:   saved activations            (backward() reads this)
+```
+
+This is why activation memory grows with batch size and depth, and parameter memory doesn't.
+
+Sources: [nn.Module](https://pytorch.org/docs/stable/generated/torch.nn.Module.html), [nn.Parameter](https://pytorch.org/docs/stable/generated/torch.nn.parameter.Parameter.html), [Autograd mechanics](https://pytorch.org/docs/stable/notes/autograd.html).
+
+______________________________________________________________________
+
 ## Why You Need Nonlinearity
 
 A single `nn.Linear` computes `y = xW^T + b` — purely linear. Stack two with nothing between:
@@ -276,7 +331,7 @@ class ModelWithLoss(nn.Module):
         return self.criterion(self.net(x), y)
 ```
 
-This pattern is common in HuggingFace and multi-GPU code (see [training_loop.md](training_loop.md#why-embed-loss-inside-the-model)).
+This pattern is common in HuggingFace and multi-GPU code (see [training_loop.md](../training/training_loop.md#why-embed-loss-inside-the-model)).
 
 **One line:** `nn.Module` is PyTorch's universal interface for "anything with a forward pass" — loss functions qualify, so they inherit `.to(device)`, composability, and hook support for free.
 

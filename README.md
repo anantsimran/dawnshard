@@ -276,9 +276,9 @@ behind a flag, and nothing else in the repo knows W&B exists.
 
 ### When the numbers aren't enough
 
-The same loop has two more levels. [Probes](#probes-look-inside-the-model) capture
+The same loop has two more levels. [Probes](#add-a-probe) capture
 whatever you want from inside the model on every batch, and
-[`profiled_fit`](#profiling-is-a-separate-function) writes a Chrome trace of the
+[`profiled_fit`](#profile-a-few-epochs) writes a Chrome trace of the
 epochs you choose, with the dataloader and the step labelled separately.
 
 ______________________________________________________________________
@@ -302,127 +302,14 @@ locally or in Docker.
 
 ______________________________________________________________________
 
-## Why the training loop is different
+## Using the loop
 
-Most PyTorch training loops are a single class that owns the model, the optimizer,
-the device, the metrics, and the loop body all at once. Dawnshard takes a
-**functional** approach instead. `nn.Module` already gives us dependency injection,
-so an extra object-oriented layer buys nothing.
+The sections above say what each piece is and where it lives. This one is the
+manual: one subsection per task, each opening with code, then what the loop does with
+it. Every snippet assumes a `model`, a `train_loader`, and a `val_loader` whose
+batches are `(input, target)` tuples.
 
-### Design decisions
-
-The loop is split into three concerns ([model.py](app/src/training/train/model.py),
-[train_loop.py](app/src/training/train/train_loop.py)):
-
-| Concern | Type | What it holds |
-|---|---|---|
-| **State** | `TrainState` | model, optimizer, criterion, scheduler — the things that mutate |
-| **Config** | `EpochSpec` | device, the metrics type and its functions, optional probes — the policy |
-| **Function** | `fit`, `profiled_fit`, `run_epoch`, `train_step`, `eval_step` | functions that take state + config + batch |
-
-#### One loop for training and evaluation
-
-`run_epoch` takes the step function as an argument, so the same loop drives training
-with `train_step` and evaluation with `eval_step`. It switches the model into train or
-eval mode, walks the loader, and passes each step the epoch number and the batch's
-index. `eval_step` runs under `torch.no_grad()`. `fit` runs a training pass every
-epoch, a validation pass only on the epochs in `val_epoch_list`, and steps the
-scheduler once per epoch.
-
-There is no `Trainer` class and no callback registry. To do something the loop
-doesn't, you call a function before or after `fit`, or you add a probe.
-
-#### Metrics are injected
-
-`EpochSpec` holds a `Metrics` dataclass and three functions. `calculate_metrics`
-turns one batch's predictions and targets into a `Metrics`, `accumulate_metrics` adds
-it into the epoch's accumulator in place, and `reduce_metrics` turns the accumulator
-into the epoch's result. Changing how a metric is computed never touches the loop.
-
-The step fills in `loss` and `count` itself, so every `Metrics` carries both; subclass
-it to add fields. `run_epoch` builds a fresh accumulator at the start of each epoch by
-calling `metrics_type()`. An accumulator needs nothing to start, so the class itself is
-the constructor and there is no separate init function.
-
-[loss_only_metrics.py](app/src/training/metrics/loss_only_metrics.py) tracks the loss
-only, and [classification_metrics.py](app/src/training/metrics/classification_metrics.py)
-adds accuracy and macro-averaged precision and recall. Both weight each batch's loss
-by its batch size before averaging, so a smaller last batch doesn't skew the epoch
-loss.
-
-`EpochSpec` is generic over its metrics type, written `EpochSpec[M: Metrics]`.
-Callable parameters are contravariant, so a function that only accepts
-`ClassificationMetrics` is not a `Callable[[Metrics], ...]`. Without the type
-parameter, pyright rejects every spec built from a subclass's functions.
-
-#### Probes look inside the model
-
-Some things you want from a run aren't metrics: attention maps, gradient norms,
-activations for a few fixed inputs. A probe is a plain function set as `train_probe`
-or `eval_probe` on `EpochSpec`. The step calls it on every batch, after the forward
-pass, as `probe(model, input, target, predicted, epoch, batch_index)`. `train_step`
-calls it after the optimizer step, while that batch's gradients are still on the
-parameters.
-
-The probe runs inside the step because that is the only place where the model, the
-batch, and its predictions exist together. The forward pass has already happened, so
-a probe costs no extra one.
-
-The loop passes `epoch` and `batch_index` instead of building a new probe object each
-epoch. A probe that only wants the first batch checks `batch_index == 0`, and it keeps
-no state between calls.
-
-A probe returns nothing. Whatever it keeps goes to disk or to the log, never back
-through `run_epoch`, so `fit` still returns only metrics and memory doesn't grow with
-the number of epochs. Settings such as an output folder are bound with
-`functools.partial`, and reading the results is a separate function you call after
-`fit`.
-
-A probe that needs values from inside `forward` reads them off the model. `forward`
-has to keep returning only what the criterion expects, so `AGNewsClassifier` stores
-each block's detached attention weights in `model.attention_map` instead of returning
-them. That keeps one batch of weights per block on the device between calls.
-
-#### Every run is recorded
-
-`fit` gives each run a UUID and, when training finishes, writes
-`app/history/<run-uuid>.json`. The file holds the git commit, a summary of the state
-and config (model, optimizer and its hyperparameters, criterion, scheduler, device),
-and one record per epoch with training and validation metrics, epoch duration, and
-CPU, RAM, and GPU memory. Any result can be traced back to the code that produced it,
-and any two runs can be compared. If you pass a Weights & Biases run, each epoch's
-record is logged there as well.
-
-#### Profiling is a separate function
-
-`profiled_fit` takes the same arguments as `fit`, plus `profile_epoch_list`. On those
-epochs it wraps the training pass in `torch.profiler.profile`, labels the dataloader
-and step phases, and writes a Chrome trace to
-`app/history/traces/<run-uuid>/epoch_N.json`. Open it in `chrome://tracing` or
-Perfetto. Validation passes aren't profiled.
-
-It writes the normal history file and a second `<run-uuid>_detailed.json`, in which
-the profiled epochs also carry dataloader and step CPU time, CUDA time on a GPU, and
-the trace path.
-
-Profiling is its own function rather than a flag on `fit` for two reasons. The
-profiler slows down every step it records, so you pick which epochs pay for it. And
-the regular history file keeps `fit`'s format, so profiled runs compare directly with
-normal ones.
-
-#### Checkpoints are functions you call
-
-`save_state` writes the model, optimizer, and scheduler state, and `load` restores
-them. `fit` calls neither, so checkpointing happens where you decide, not through a
-lifecycle hook.
-
-### Using the loop
-
-This walkthrough goes from a first run to custom metrics, probes, profiling, and
-checkpoints. It assumes you have a `model`, a `train_loader`, and a `val_loader`.
-Every batch must be an `(input, target)` tuple.
-
-#### Train a model
+### Train and validate
 
 ```python
 import torch
@@ -436,47 +323,25 @@ from training.metrics.classification_metrics import (
 from training.setup import DEVICE
 from training.train.model import EpochSpec, TrainState
 from training.train.train_loop import fit
-
-train_state = TrainState(
-    model=model.to(device=DEVICE),
-    optimizer=torch.optim.Adam(params=model.parameters(), lr=1e-3),
-    criterion=nn.CrossEntropyLoss(),
-)
-epoch_spec = EpochSpec(
-    device=DEVICE,
-    metrics_type=ClassificationMetrics,
-    calculate_metrics=calculate_metrics,
-    accumulate_metrics=accumulate_metrics,
-    reduce_metrics=reduce_metrics,
-)
-history = fit(
-    state=train_state,
-    epoch_spec=epoch_spec,
-    train_loader=train_loader,
-    val_loader=val_loader,
-    num_epochs=15,
-    val_epoch_list=[5, 10, 15],
-)
 ```
 
-With `val_epoch_list=[5, 10, 15]`, validation only runs on those three epochs. To use
-a learning-rate scheduler, pass `scheduler=` to `TrainState`. For a model that doesn't
-classify, import the same three functions from `training.metrics.loss_only_metrics`
-and set `metrics_type=Metrics`.
+With these imports, the three calls in
+[A training run in one screen](#a-training-run-in-one-screen) are a complete program.
 
-#### Read the history
+`fit` runs a training pass every epoch, then steps the scheduler if `TrainState` has
+one, then runs a validation pass only if the epoch is in `val_epoch_list`. Both passes
+go through the same `run_epoch`, which takes the step function as an argument:
+`train_step` for training, and `eval_step`, which runs under `torch.no_grad()`, for
+validation. `run_epoch` sets the model's train or eval mode, walks the loader, and
+hands each step the epoch number and the batch index.
 
-`fit` returns one `EpochRecord` per epoch and writes them to
-`app/history/<run-uuid>.json`. It logs the path when it starts, and you can choose it
-with `history_path=`. [Debuggability](#debuggability) shows what the file holds and
-what the plots look like. To plot one run, or compare two:
+`fit` returns one `EpochRecord` per epoch and writes the history file, at a path you
+can choose with `history_path=`. [Debuggability](#debuggability) shows what the file
+holds and how to plot it. To use a learning-rate scheduler, pass `scheduler=` to
+`TrainState`. For a model that doesn't classify, import the same three functions from
+`training.metrics.loss_only_metrics` and set `metrics_type=Metrics`.
 
-```bash
-uv run python app/src/training/viz/plot_metrics.py app/history/<run-uuid>.json
-uv run python app/src/training/viz/compare_runs.py app/history/<run-a>.json app/history/<run-b>.json
-```
-
-#### Add a metric
+### Add a metric
 
 Subclass `Metrics` and write the three functions. This one tracks mean absolute
 error:
@@ -513,11 +378,23 @@ def reduce_mae(acc: MAEMetrics) -> MAEMetrics:
     )
 ```
 
-The step sets `loss` and `count` after `calculate_metrics` returns, so
-`accumulate_mae` still has to add them. Pass `metrics_type=MAEMetrics`,
-`calculate_metrics=calculate_mae`, and so on to `EpochSpec`.
+Pass `metrics_type=MAEMetrics`, `calculate_metrics=calculate_mae`, and so on to
+`EpochSpec`. The step fills in `loss` and `count` after `calculate_metrics` returns,
+so every `Metrics` carries both and `accumulate_mae` still has to add them.
+`run_epoch` builds a fresh accumulator each epoch by calling `metrics_type()`, so the
+class is its own constructor and there is no init function.
 
-#### Add a probe
+`accumulate_mae` weights each batch's loss by its batch size before averaging, as
+[loss_only_metrics.py](app/src/training/metrics/loss_only_metrics.py) and
+[classification_metrics.py](app/src/training/metrics/classification_metrics.py) do,
+so a smaller last batch doesn't skew the epoch loss.
+
+`EpochSpec` is generic over its metrics type, written `EpochSpec[M: Metrics]`.
+Callable parameters are contravariant, so a function that only accepts `MAEMetrics`
+is not a `Callable[[Metrics], ...]`. Without the type parameter, pyright rejects every
+spec built from a subclass's functions.
+
+### Add a probe
 
 This probe logs the gradient norm on every `every_n`-th training batch:
 
@@ -554,11 +431,28 @@ epoch_spec = EpochSpec(
 )
 ```
 
-For a probe that writes to disk and a function that reads the files back, see
-`save_attention_maps` in [probes.py](app/src/training/transformer/probes.py) and
-[Visualizing attention](#visualizing-attention).
+`eval_step` calls `eval_probe` after the forward pass. `train_step` calls
+`train_probe` after the optimizer step, while the batch's gradients are still on the
+parameters, which is what `log_grad_norm` reads. Both call it as
+`probe(model, input, target, predicted, epoch, batch_index)` with a detached
+`predicted`, so a probe never costs an extra forward pass.
 
-#### Profile a few epochs
+A probe keeps no state between calls. It gets `epoch` and `batch_index` every time, so
+one that only wants the first batch checks `batch_index == 0`. Settings such as
+`every_n` or an output folder are bound with `functools.partial`.
+
+A probe returns nothing. What it keeps goes to disk or to the log, never back through
+`run_epoch`, so `fit` still returns only metrics and memory doesn't grow with the
+number of epochs. Reading the results is a separate function you call after `fit`.
+
+A probe that needs values from inside `forward` reads them off the model, because
+`forward` has to keep returning only what the criterion expects. `AGNewsClassifier`
+stores each block's detached attention weights in `model.attention_map`, which keeps
+one batch of weights per block on the device between calls. `save_attention_maps` in
+[probes.py](app/src/training/transformer/probes.py) writes them to disk, and
+[Visualizing attention](#visualizing-attention) plots them.
+
+### Profile a few epochs
 
 ```python
 from training.train.train_loop import profiled_fit
@@ -574,10 +468,22 @@ profiled_fit(
 )
 ```
 
-This profiles epoch 2 rather than 1, which keeps one-time startup costs out of the
-trace, and writes `app/history/traces/<run-uuid>/epoch_2.json`.
+`profiled_fit` takes `fit`'s arguments plus `profile_epoch_list`. On those epochs it
+wraps the training pass in `torch.profiler.profile`, labels the dataloader and step
+phases, and writes a Chrome trace to `app/history/traces/<run-uuid>/epoch_N.json` for
+`chrome://tracing` or Perfetto. Validation passes aren't profiled. Profiling epoch 2
+rather than 1 keeps one-time startup costs out of the trace.
 
-#### Save and restore a checkpoint
+It writes the normal history file and a second `<run-uuid>_detailed.json`, in which
+the profiled epochs also carry dataloader and step CPU time, CUDA time on a GPU, and
+the trace path.
+
+Profiling is its own function rather than a flag on `fit` for two reasons. The
+profiler slows down every step it records, so you pick which epochs pay for it. And
+the regular history file keeps `fit`'s format, so profiled runs compare directly with
+normal ones.
+
+### Save and restore a checkpoint
 
 ```python
 from training.constants import CHECKPOINTS_PATH
@@ -590,8 +496,10 @@ save_state(state=train_state, checkpoint_path=checkpoint_path)
 load(state=train_state, epoch_spec=epoch_spec, checkpoint_path=checkpoint_path)
 ```
 
-`save_state` doesn't create the folder, hence the `mkdir`. `load` restores into an
-existing `TrainState`, so build the model and optimizer first.
+`save_state` writes the model, optimizer, and scheduler `state_dict`s, and `load`
+restores them into an existing `TrainState`, so build the model and optimizer first.
+`save_state` doesn't create the folder, hence the `mkdir`. `fit` calls neither, so a
+checkpoint happens exactly where you put the call.
 
 ______________________________________________________________________
 

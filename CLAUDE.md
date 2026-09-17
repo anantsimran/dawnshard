@@ -69,6 +69,14 @@ Tutorials are grouped by topic: `pytorch/` (basics), `training/` (loop, optimize
 
 To publish another README, add its path to `EXTRA_PAGES` in `pages/hooks.py` and add a `nav:` entry for it.
 
+**The landing page is not generated from the README.** `pages/overrides/home.html` is a hand-written hero and card grid that renders above the README and copies parts of it: the hero code block is the README's one-screen run, the "Design choices" cards summarize the design sections, and the "Learning track" cards list what each tutorial group covers. Nothing checks it. The mkdocs build passes and the pre-PR hook is satisfied while it goes stale. So in the same change:
+
+- When the README's one-screen run changes, copy it into the hero `<pre>` block with the same argument names.
+- When a claim a design card makes changes in the README (what `EpochSpec` holds, what the history file records, what the loop injects, a rule or tool), rewrite that card.
+- When a tutorial is added, moved, or regrouped, fix the learning-track card for its group.
+
+Before opening the PR, read `home.html` next to the README diff. Don't treat a green build as proof the landing page is current.
+
 Check a change with:
 
 ```bash
@@ -107,7 +115,7 @@ Top-level sections are `##`, separated by a horizontal rule. They are not number
 | `## The repo keeps itself clean` | The engineering pitch: how the layout reinforces hygiene, then every rule the repo enforces and the tool that enforces it. | Two `###` subsections. `The layout enforces the boundaries`: a `Package | Owns` table with one row per package under `app/src/training/`, then a bullet list of the rules that fall out of the layout (downward-only imports, one `constants.py` and one `setup.py`, gitignored artifacts, one test file per module). `Every rule has a tool behind it`: a `Rule | Enforced by` table, one row per rule, each rule phrased "Every …" and each enforcer naming the file. A rule only belongs here if a tool checks it. When you add such a tool, add a row. When you remove one, remove its row. When you add a package, add a row to the layout table. |
 | `## Debuggability` | What a run leaves behind and how to read it. | `###` subsections in this order: `The terminal: one line per epoch`; `The history file: everything` (a numbered list of the three functions that build it: `EpochRecord` → `serialize_epoch_record` → `save_history`, then a trimmed real excerpt, then a bold-lead bullet list of what the file reveals about that run and a one-line verdict); `Plot it locally` (the `plot_metrics.py` command and its screenshot); `Compare two runs`; `Weights & Biases: the same dict, streamed`; `When the numbers aren't enough` (pointers to probes and `profiled_fit`). The excerpt and the screenshot come from a real run in `app/history/`; regenerate both when the history format or the plot script changes. Keep the excerpt trimmed to one epoch and rounded. The screenshot lives in `tutorials/assets/` (see Style). |
 | `## What's inside` | A scannable map: one table row per part of the library, with a one-line description and a link to its package. | Add a row when you add a package or a major capability. Keep descriptions to one line. |
-| `## Why the training loop is different` | The reasoning behind the loop's seams, then the usage walkthrough. | `### Design decisions` holds one `####` per decision (one loop for train and eval, injected metrics, probes, history, profiling, checkpoints). `### Using the loop` holds one `####` per task (train, read history, add a metric, add a probe, profile, checkpoint), each with a runnable snippet. A new loop feature gets both a decision and a walkthrough step. |
+| `## Using the loop` | The manual: how each part of the loop behaves and how to use it. | One `###` per task, in this order: `Train and validate`, `Add a metric`, `Add a probe`, `Profile a few epochs`, `Save and restore a checkpoint`. Each opens with a snippet, then says what the loop does with it and, where it isn't obvious, why. Only mechanics and reasoning that no earlier section states belong here. Don't re-explain the state/policy/mechanism split, the history file (Debuggability owns it), or where things go (Exactly one place for everything owns it); link to them instead. `Train and validate` shows only the imports and points at the one-screen run rather than repeating it. A new loop feature gets one `###`. |
 | `## The BPE tokenizer` | A short section: what it is, one snippet, one number. | **Keep it short. BPE internals stay out of the README**; they live in `bpe.py`'s docstrings and in the intentional-choices list below. |
 | `## Getting started` | Everything practical, as `###` subsections: install, run something, W&B, the MNIST models, model graph, attention heatmaps, Docker, Make targets. | A new script gets a line in the "Run something" block. A new Make target gets a row in the Make targets table. |
 | `## Tutorials` | What the learning track covers and how the site is built. | Keep the bold reminder about `tutorials/index.md` and `mkdocs.yml`. |
@@ -119,7 +127,7 @@ Attention design lives in `app/src/training/transformer/README.md`, not the root
 
 ### Anchors other files depend on
 
-`pages/overrides/home.html` links to `#separate-state-policy-and-mechanism`, `#whats-inside`, `#why-the-training-loop-is-different`, `#the-repo-keeps-itself-clean`, and `#debuggability`, and its design cards summarize the README. The walkthrough links to `#visualizing-attention` and `#debuggability`, and Debuggability links to `#probes-look-inside-the-model` and `#profiling-is-a-separate-function`. When you rename or remove one of those headings, update the links in the same change, then run the mkdocs build above; it warns about anchors that no longer exist.
+`pages/overrides/home.html` links to `#separate-state-policy-and-mechanism`, `#whats-inside`, `#train-and-validate`, `#the-repo-keeps-itself-clean`, and `#debuggability`, and its design cards summarize the README. The walkthrough links to `#visualizing-attention` and `#debuggability`, and Debuggability links to `#add-a-probe` and `#profile-a-few-epochs`. When you rename or remove one of those headings, update the links in the same change, then run the mkdocs build above; it warns about anchors that no longer exist.
 
 ### Where a change goes
 
@@ -127,14 +135,15 @@ Use this to decide which README sections a code change touches. A pre-PR hook (`
 
 | You changed | Update |
 |---|---|
-| The loop's API (`fit`, `EpochSpec`, `TrainState`, probes) | The one-screen run, the matching `###` under Separate state, policy, and mechanism, the matching `###` under Exactly one place for everything, the matching `####` under Design decisions, and the matching `####` under Using the loop. |
+| The loop's API (`fit`, `EpochSpec`, `TrainState`, probes) | The one-screen run, the matching `###` under Separate state, policy, and mechanism, the matching `###` under Exactly one place for everything, and the matching `###` under Using the loop. |
 | A rule or the tool that enforces it (linter, hook, Make target, typing) | Its paragraph under The repo keeps itself clean, and the Make targets table if a target changed. |
 | A package, module, or major capability | Its row in What's inside, its line in Project structure, and the layout paragraph under The repo keeps itself clean if it is a new package. |
 | A script that is run from the command line | The "Run something" block. |
 | The history file format, `serialize_epoch_record`, `save_history`, or a viz script | Debuggability: the prose, the JSON excerpt, and the screenshot (regenerate it with the `plot_metrics.py` command shown there, then extract the PNG from `/tmp/plot_metrics.html` into `tutorials/assets/plot_metrics.png`). |
 | An attention or mask choice | `app/src/training/transformer/README.md` (not the root README), and the intentional-choices list below if it's a choice that looks like a bug. |
 | A BPE or AG News data choice | The docstring in `bpe.py` or `ag_news_classifier.py`, and the intentional-choices list below. Not the README. |
-| A tutorial | `tutorials/index.md` and `mkdocs.yml`, per the Tutorials site section above. |
+| A tutorial | `tutorials/index.md` and `mkdocs.yml`, per the Tutorials site section above, and the learning-track card in `pages/overrides/home.html` if the group's topics changed. |
+| Any README section the landing page summarizes (the one-screen run, the design sections, debuggability, the rules) | The hero code block and the matching design card in `pages/overrides/home.html`. See the Tutorials site section above. |
 
 ### Style
 

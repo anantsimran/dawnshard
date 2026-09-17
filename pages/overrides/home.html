@@ -48,7 +48,7 @@
         </figcaption>
 <pre><code><span class="c"># the state that mutates</span>
 train_state = <span class="n">TrainState</span>(
-    model=model,
+    model=model.<span class="f">to</span>(device=DEVICE),
     optimizer=torch.optim.<span class="n">Adam</span>(params=model.parameters(), lr=<span class="s">1e-3</span>),
     criterion=nn.<span class="n">CrossEntropyLoss</span>(),
 )
@@ -60,10 +60,15 @@ epoch_spec = <span class="n">EpochSpec</span>(
     accumulate_metrics=accumulate_metrics,
     reduce_metrics=reduce_metrics,
 )
-<span class="c"># plain functions over both</span>
-<span class="f">fit</span>(state=train_state, config=epoch_spec,
-    train_loader=train, val_loader=val,
-    num_epochs=<span class="s">15</span>, val_epoch_list=[<span class="s">5</span>, <span class="s">10</span>, <span class="s">15</span>])</code></pre>
+<span class="c"># the mechanism: a function over both</span>
+history = <span class="f">fit</span>(
+    state=train_state,
+    epoch_spec=epoch_spec,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    num_epochs=<span class="s">15</span>,
+    val_epoch_list=[<span class="s">5</span>, <span class="s">10</span>, <span class="s">15</span>],
+)</code></pre>
       </figure>
     </div>
   </section>
@@ -82,27 +87,27 @@ epoch_spec = <span class="n">EpochSpec</span>(
           <h3>No Trainer god-class</h3>
           <p>
             State (<code>TrainState</code>), policy (<code>EpochSpec</code>), and
-            behaviour (<code>fit</code>, <code>run_epoch</code>) are kept apart.
-            <code>nn.Module</code> already gives dependency injection, so an extra
-            object-oriented layer buys nothing.
+            mechanism (<code>fit</code>, <code>run_epoch</code>) are kept apart:
+            separation of policy and mechanism, plus explicit state as in JAX and
+            Flax. Nothing hides in <code>self</code>.
           </p>
         </a>
-        <a class="ds-card" href="#why-the-training-loop-is-different">
+        <a class="ds-card" href="#train-and-validate">
           <span class="ds-card__icon">{% include ".icons/material/swap-horizontal-circle-outline.svg" %}</span>
           <h3>One loop for train and eval</h3>
           <p>
             <code>run_epoch</code> takes the step function as an argument, so the same
-            code drives training and evaluation. Loss accumulation and reduction are
-            injected too, and changing a metric never touches the loop.
+            code drives training and evaluation. Metrics are injected as a type and
+            three functions, so adding one never touches the loop.
           </p>
         </a>
-        <a class="ds-card" href="#why-the-training-loop-is-different">
+        <a class="ds-card" href="#debuggability">
           <span class="ds-card__icon">{% include ".icons/material/source-commit.svg" %}</span>
           <h3>Every run is reproducible</h3>
           <p>
-            Each run records its git commit, a snapshot of state and config, and
-            per-epoch CPU, RAM, and GPU memory into a history JSON. Any result can be
-            traced back, and any two runs can be compared.
+            Each run writes a history file with its git commit, the optimizer's
+            hyperparameters, and per-epoch metrics, duration, CPU, RAM, and GPU
+            memory. Any result can be traced back, and any two runs can be compared.
           </p>
         </a>
         <a class="ds-card" href="#the-repo-keeps-itself-clean">
@@ -118,9 +123,9 @@ epoch_spec = <span class="n">EpochSpec</span>(
           <span class="ds-card__icon">{% include ".icons/material/chart-timeline-variant.svg" %}</span>
           <h3>Observability built in</h3>
           <p>
-            loguru for humans, a history JSON for machines, optional Weights &amp;
-            Biases, and Chrome profiler traces from <code>profiled_fit</code>. None of
-            it has to be bolted on later.
+            loguru for humans, a history JSON for machines, probes that look inside
+            the model mid-run, optional Weights &amp; Biases, and Chrome profiler
+            traces from <code>profiled_fit</code>. None of it is bolted on later.
           </p>
         </a>
         <a class="ds-card" href="#the-repo-keeps-itself-clean">
@@ -148,8 +153,9 @@ epoch_spec = <span class="n">EpochSpec</span>(
         <a class="ds-card ds-card--track" href="tutorials/pytorch/overview/">
           <span class="ds-card__icon">{% include ".icons/material/fire.svg" %}</span>
           <h3>PyTorch</h3>
-          <p>Tensors and broadcasting, autograd, <code>nn.Module</code>, the training
-            loop, optimizers, and Adam and the learning rate.</p>
+          <p>Tensors and broadcasting, autograd, <code>nn.Module</code>, and data
+            loading, then the training loop, optimizers, and Adam and the learning
+            rate.</p>
           <span class="ds-card__more">Start the series {% include ".icons/material/arrow-right.svg" %}</span>
         </a>
         <a class="ds-card ds-card--track" href="tutorials/transformer/attention_masks/">
@@ -162,8 +168,8 @@ epoch_spec = <span class="n">EpochSpec</span>(
         <a class="ds-card ds-card--track" href="tutorials/vision/cnn/">
           <span class="ds-card__icon">{% include ".icons/material/book-open-page-variant-outline.svg" %}</span>
           <h3>Guides</h3>
-          <p>Convolutional networks for MNIST, what the training loop measures for
-            free, and the matrix calculus behind backprop.</p>
+          <p>Convolutional networks for MNIST and the matrix calculus behind
+            backprop.</p>
           <span class="ds-card__more">Browse the guides {% include ".icons/material/arrow-right.svg" %}</span>
         </a>
       </div>

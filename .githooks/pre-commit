@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# Installed via `make install-hooks` (git config core.hooksPath .githooks).
+set -e
+
+find app/src -name "*.py" | xargs uv run python scripts/check_docstrings.py

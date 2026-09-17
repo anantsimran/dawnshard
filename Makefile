@@ -1,4 +1,4 @@
-.PHONY: test precheck check-named-args docker-build docker-build-dev docker-run docker-run-dev docker-build-dev-test nb-to-py py-to-nb
+.PHONY: test precheck check-named-args check-docstrings install-hooks docker-build docker-build-dev docker-run docker-run-dev docker-build-dev-test nb-to-py py-to-nb
 
 IMAGE_NAME := dawnshard
 
@@ -20,6 +20,14 @@ precheck:
 # Check all source files for positional arguments (run before opening a PR)
 check-named-args:
 	@find app/src -name "*.py" | xargs uv run python scripts/check_named_args.py
+
+# Check all source files for missing docstrings (run before opening a PR)
+check-docstrings:
+	@find app/src -name "*.py" | xargs uv run python scripts/check_docstrings.py
+
+# Point git at the versioned hooks directory (run once after cloning)
+install-hooks:
+	git config core.hooksPath .githooks
 
 # Build the production Docker image
 docker-build:

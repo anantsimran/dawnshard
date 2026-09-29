@@ -441,47 +441,47 @@ history = fit(
 )
 ```
 
-All three seeds are required, and none of them defaults: a run that cannot say how it
-was seeded cannot be repeated, and a default is the easiest way to stop noticing which
-seed a number came from. The train seed is drawn fresh each run so results are not
-read off one lucky draw; the two eval seeds are the fixed constants, so val and test
-numbers stay comparable. Both seeding calls in the diagram below are shown here, and
-that diagram is worth reading before relying on them together.
+All three seeds are required, and none of them defaults: a run should say which
+random streams it used. The train seed is drawn fresh each run so results are not
+read off one lucky draw. The eval seeds are fixed constants so masking can stay
+comparable across passes. Seeds control part of a run; exact replay also depends on
+the data, tokenizer, model configuration, and execution environment.
 
 The three seeds do three different jobs, and the split is the point:
 
 - **`train_seed` owns the global RNG.** `fit` calls `torch.manual_seed` with it once,
-  before the first epoch, so shuffling, dropout, and anything a collate draws repeat
-  across runs. One call covers every device: it seeds CPU, CUDA, MPS, and XPU. Weight
-  init happens before `fit` ever sees the model, so each `main` seeds with the same
+  before the first epoch, so shuffling, dropout, and training collates start from
+  the same RNG state for the same setup. One call covers every device: it seeds CPU,
+  CUDA, MPS, and XPU. Weight init happens before `fit` ever sees the model, so each
+  `main` seeds with the same
   value just before constructing it. Those two calls are the only `torch.manual_seed`
-  in `app/src`, and together they make a run reproduce end to end — with one wrinkle,
-  below.
+  in `app/src`. Together they control model initialization and the RNG stream inside
+  `fit`; they do not cover work the data loader does before those calls.
 - **The train seed is drawn fresh for every run.** Each `main` sets
   `train_seed = random.getrandbits(32)` rather than pinning a literal, so no single
   lucky draw gets trained on forever and a result that only holds for one seed shows
-  itself. Reproducibility does not depend on the seed being fixed, only on its being
-  recorded: `fit` writes it to `meta.seeds`, so any past run can be rerun by passing
-  its seed back.
+  itself. `fit` writes the seed to `meta.seeds`, so its seeded draws can be replayed
+  with the same inputs and configuration.
 - **`val_seed` and `test_seed` are fixed repo-wide**, as `VAL_SEED` and `TEST_SEED` in
   [constants.py](app/src/training/constants.py), and only `train_seed` varies per run.
   Eval randomness that changes between runs makes `val_loss` incomparable: with masked
   language modelling, a drop from 2.31 to 2.29 could be a better model or an easier
   mask. Fixing the eval seeds takes that term out. The caller passes the constants
   rather than the signature defaulting to them, so a run states every seed it used.
+  `fit` does not run a test pass; it only records `test_seed` for the test loader.
 - **Only `val_seed` travels.** `fit` hands `train_seed` to nothing but
   `torch.manual_seed`: a training pass passes `seed=None` to its step and probe, and
   any randomness they draw comes from the global RNG that seed set. A validation pass
   gets `val_seed`, threaded by `run_epoch` to the step and on to the probe without
-  reseeding anything, so an eval probe that draws randomness of its own draws the
-  same thing for every model. The train seed makes a run reproducible; the val seed
-  makes two runs comparable. A loader's own randomness stays the loader's job; see
+  reseeding anything, so an eval probe can use it for deterministic sampling. The
+  train seed controls the loop's RNG stream; the val seed holds validation masking
+  steady. A loader's own randomness stays the loader's job; see
   [Random collates](app/src/training/dataload/README.md#random-collates-mask-validation-and-test-once).
 
-All three land in the history file's `meta.seeds`, so a run says how to repeat itself.
+All three land in the history file's `meta.seeds`, so a run records its seed choices.
 
-Seeding is complete now — init, training, validation, and test all have a seed — but
-the global generator does something worth knowing before you read a curve. A seed does
+The seed roles are explicit, but the global generator does something worth knowing
+before you read a curve. A seed does
 not name a value, it selects a stream; every draw moves a position along it. Seeding
 twice with the same number does not continue the stream, it returns to position zero:
 
@@ -497,7 +497,7 @@ twice with the same number does not continue the stream, it returns to position 
   ┌─────────────────────┐                                   │
   │ S(train_seed)  n=k  │  k is set by the architecture     │
   └──────────┬──────────┘                                   │
-             │  loaders, tokenizer, anything else random    │
+             │  any other setup draws before fit             │
              ▼                                              │
   ┌─────────────────────┐                                   │
   │ S(train_seed)  n=m  │                                   │
@@ -513,18 +513,17 @@ twice with the same number does not continue the stream, it returns to position 
 `S(x)` is the stream seeded with `x`, and `n` is how many draws have been taken from
 it. Three consequences fall out of that back edge:
 
-- **Training draws are a pure function of `train_seed`.** Add a layer, change the
-  vocabulary, load the data differently: init consumes a different number of draws,
-  but `fit` rewinds, so epoch 1 sees the same shuffle order and the same dropout
-  masks as before. Pin the same seed in two runs and they compare two architectures
-  on identical randomness, whatever else moved.
+- **`fit` starts from the same RNG state for the same `train_seed`.** The rewind
+  means draws made during setup do not shift the start of training. With the same
+  model, loaders, and data, it replays the same draw sequence. Changing the model
+  or loader can change how many draws training consumes, so the same seed alone
+  does not make two architectures a controlled comparison.
 - **Training replays the draws init just used.** Both start at `n=0` of the same
   stream, so the numbers that set the weights are the numbers that later mask the
   activations. It is harmless in practice, but init and training are not independent
   streams, and anything that assumes they are is wrong here.
 - **Two `fit` calls in one process are not independent.** The second rewinds to `n=0`
-  as well, so it replays the first one's draws exactly. For a genuine repeat, vary
-  `train_seed` rather than calling `fit` twice with the same one.
+  as well. Use a different `train_seed` for an independent run.
 
 Workers are covered: a `DataLoader` draws its base seed from this generator, and each
 worker derives its own from that, so the rewind reaches them too. See
@@ -542,9 +541,17 @@ jq '.meta.seeds' app/history/<run-uuid>.json
 train_seed = 2847715383  # from that run's meta.seeds, in place of a fresh draw
 ```
 
-Everything `fit` drives repeats: the shuffle order, the dropout masks, and whatever a
-collate draws. Weight init repeats too, as long as that seed reaches
-`torch.manual_seed` before the model is built.
+For the same model and loaders, `fit` starts from the same RNG state, covering
+shuffle, dropout, and training-time collate draws. Weight initialization starts
+from that seed too when `torch.manual_seed` runs before the model is built.
+
+The recorded seeds are not a complete Multi30k replay recipe. Its loader randomly
+reorders training rows before `train_config` chooses the recorded `train_seed`, even
+when it keeps all 29,000 rows. The downloaded splits and selected BPE merges are
+local cache files, and their identities are not saved in the history. Keep those
+inputs and the model configuration alongside the seed to reproduce a past setup.
+Validation masks are stable per sentence when the split, tokenizer, and `val_seed`
+are the same.
 
 ### Add a metric
 
@@ -933,11 +940,13 @@ the longer derivations remain available when you need them.
 - [tutorials/transformer/](tutorials/transformer/) — attention masks and
   cross-attention, pre-norm vs post-norm, and compute and memory planning.
 
-The tutorials and this README are also published as a website at
-[anantsimran.github.io/dawnshard](https://anantsimran.github.io/dawnshard/), rebuilt
-on every push to `main` by [pages.yml](.github/workflows/pages.yml). Pages keep their
-repo paths, so relative links work the same on the site as on GitHub, and links to
-source files point at GitHub.
+The project landing page and tutorials are built as a website at
+[anantsimran.github.io/dawnshard](https://anantsimran.github.io/dawnshard/) by
+[pages.yml](.github/workflows/pages.yml) on pushes to `main`. The landing page links
+to this full README on GitHub. Tutorial paths mirror the repo, and source-file links
+point to GitHub. In the repository's **Settings → Pages → Build and deployment**,
+the publishing source must be **GitHub Actions**; branch publishing runs a separate
+Jekyll build that can replace the MkDocs site.
 
 **When you add or change a tutorial, update
 [tutorials/index.md](tutorials/index.md), and add a line for a new page to the `nav:`

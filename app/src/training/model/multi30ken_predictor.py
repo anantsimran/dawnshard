@@ -289,8 +289,8 @@ def train_config(
         building the model, so weight init repeats too; `fit` writes the history
         file, seed included, and the probe writes one attention capture per epoch.
     """
-    # Fresh per run, so no single lucky draw is trained on forever; fit writes it to
-    # the history file, so a run can be repeated by passing its recorded seed back.
+    # Fresh per run, so no single lucky draw is trained on forever. fit records it;
+    # the same data and config are also needed to replay a past setup.
     train_seed = random.getrandbits(32)  # noqa: NAR001
     run_uuid = str(uuid4())  # noqa: NAR001
     epoch_spec = EpochSpec(
@@ -306,7 +306,7 @@ def train_config(
         ),
     )
     # fit reseeds from it, but only after the model exists; seed here so weight init
-    # is reproducible too. See the README on what the rewind implies.
+    # uses the recorded seed too. See the README on what the rewind implies.
     torch.manual_seed(seed=train_seed)
     model = Multi30kEnPredictor(
         dropout_rate=config.dropout_rate,
@@ -350,9 +350,11 @@ def grid_search() -> None:
 
     Every run draws its own train seed, so two configs differ in weight init and batch
     order as well as in the config; each run's seed is in its history file. Loaders are
-    built once per `seq_len`, all from the default merges file, so every config sees
-    the same tokenizer.
+    built once per `seq_len`. They share a tokenizer only if a default merges file
+    has been configured.
 
+    On a fresh clone without a configured default merges file, loader construction
+    retrains BPE for each `seq_len`; the sweep then does not share one tokenizer.
     Val loss is a mean over selected positions. A shorter `seq_len` truncates long
     sentences and drops their tail positions from val, so its val loss is over a
     slightly different set of positions than the others'.

@@ -26,10 +26,6 @@ EXTRA_ASSETS = ["graphify-out/graph.html"]
 
 # Inline markdown link targets that are relative paths: ](path) or ](path#anchor).
 RELATIVE_LINK = re.compile(pattern=r"\]\((?![a-z]+:|#)([^)\s#]+)(#[^)\s]*)?\)")
-# The README's title and bold tagline, which the landing page hero already shows.
-HOME_TITLE = re.compile(pattern=r"\A# .*\n+(\*\*.*\*\*\n+)?")
-
-
 def on_files(files: Files, config: MkDocsConfig) -> Files:
     """Re-root docs_dir files under their repo path and add the READMEs as pages.
 
@@ -52,8 +48,10 @@ def on_page_markdown(markdown: str, page: Page, config: MkDocsConfig, files: Fil
     """Use the landing template for the home page and send non-page links to GitHub."""
     if page.file.src_uri == HOME_PAGE:
         page.meta["template"] = "home.html"
-        page.meta["hide"] = ["navigation"]
-        markdown = HOME_TITLE.sub("", markdown, count=1)  # noqa: NAR001
+        page.meta["hide"] = ["navigation", "toc"]
+        # Keep a TOC target for Material's skip link. The landing template renders
+        # the overview and points readers to the full README on GitHub.
+        return "## Overview\n"
     page_dir = posixpath.dirname(p=page.file.src_uri)
 
     def rewrite(match: re.Match[str]) -> str:

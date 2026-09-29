@@ -1,7 +1,9 @@
 name: Pages
 
-# Builds README.md, tutorials/, and package READMEs into the site at
+# Builds the project landing page, tutorials/, and package READMEs into the site at
 # https://anantsimran.github.io/dawnshard/ (config: mkdocs.yml, pages/).
+# Repository Settings > Pages > Build and deployment > Source must be GitHub Actions.
+# Branch publishing runs a separate Jekyll deployment that can overwrite this one.
 on:
   push:
     branches: [main]

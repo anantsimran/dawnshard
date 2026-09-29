@@ -1,10 +1,23 @@
 # DataLoader — Batching and the Dataset Abstraction
 
+**The story of one example:** the dataset retrieves it, a transform prepares it, the loader groups it with other examples, the model produces logits, and the loss reduces the batch to a scalar. Keep each job separate when revising this page.
+
+```
+dataset[i] → (image: C×H×W, label: scalar)
+collate B items → images: (B,C,H,W), labels: (B,)
+model → logits: (B,num_classes)
+loss → one scalar (with the default mean reduction)
+```
+
+Read [the two abstractions](#two-abstractions--keep-them-separate) and [how a batch becomes a scalar loss](#how-a-batch-becomes-a-scalar-loss) for the main flow; the intervening sections explain image transforms and normalization.
+
+______________________________________________________________________
+
 ## Why mini-batches?
 
 - **Full dataset (batch GD):** true gradient, but one update per full pass and memory blows up
 - **One sample (pure SGD):** frequent updates, but jittery convergence
-- **Mini-batch (sweet spot):** gradient estimate variance shrinks like `1/B` — quadrupling batch size halves noise, with diminishing returns past ~32–512
+- **Mini-batch (common compromise):** for roughly independent examples, gradient estimate variance shrinks approximately like `1/B`, so quadrupling batch size halves the standard deviation of the noise. Correlation and dataset size affect the real gain.
 
 ## Two abstractions — keep them separate
 
@@ -27,7 +40,7 @@ class MyDataset(Dataset):
 loader = DataLoader(dataset, batch_size=32, shuffle=True)
 ```
 
-It calls `__getitem__` under the hood, stacks `B` samples into one tensor (adding the batch dimension at the front: `(B, ...)`), and hands it to you:
+It calls `__getitem__` under the hood and collates `B` samples into a batch. With simple tensor samples, default collation stacks each field and adds a leading batch dimension `(B, ...)`:
 
 ```python
 for xb, yb in loader:   # xb: (B, features), yb: (B, ...)
@@ -48,11 +61,13 @@ ______________________________________________________________________
 # Raw image: PIL Image, pixel values 0–255
 # After ToTensor():
 #   - converts to torch.Tensor
-#   - scales values from [0, 255] → [0.0, 1.0]   (divides by 255)
+#   - for an 8-bit PIL image, scales values from [0, 255] → [0.0, 1.0]
 #   - reshapes to (C, H, W)
 
 transforms.ToTensor()
 ```
+
+This is the classic `torchvision.transforms` API. In the newer `transforms.v2` API, the same idea is split into [`ToImage()` and `ToDtype(torch.float32, scale=True)`](https://docs.pytorch.org/tutorials/beginner/basics/transforms_tutorial.html). Scaling depends on the input image type; do not assume every tensor conversion divides by 255.
 
 Neural nets train better on small float inputs than large integers — the scale directly affects gradient magnitude (see [grad_and_descent.md](grad_and_descent.md#why-centered-inputs-stabilize-gradients)).
 
@@ -135,7 +150,7 @@ ______________________________________________________________________
 
 ## PIL Image
 
-PIL = **Python Imaging Library** (the `Pillow` fork). It's the standard Python object for representing an image in memory before tensor conversion. torchvision loads images as PIL Images by default.
+PIL = **Python Imaging Library** (the `Pillow` fork). It's a common Python object for representing an image in memory before tensor conversion. Many torchvision image datasets return PIL Images before a transform converts them.
 
 ```python
 from torchvision import datasets
@@ -154,18 +169,26 @@ ______________________________________________________________________
 
 ## Computing Normalization Stats
 
-**Can you compute mean/std at runtime?** Yes:
+**Can you compute mean/std at runtime?** Yes, from the training set. Weight every pixel equally; averaging batch standard deviations is not the standard deviation of the whole dataset, and averaging batch means equally is wrong when the final batch is smaller.
 
 ```python
+import torch
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
-ds = datasets.SomeDataset(root="data", train=True, download=True,
-                           transform=transforms.ToTensor())
+ds = datasets.MNIST(root="data", train=True, download=True,
+                    transform=transforms.ToTensor())
 loader = DataLoader(ds, batch_size=1000)
 
-mean = sum(xb.mean() for xb, _ in loader) / len(loader)
-std  = sum(xb.std()  for xb, _ in loader) / len(loader)
+total = torch.zeros(1)   # one entry per image channel (MNIST has one)
+total_sq = torch.zeros(1)
+count = 0
+for xb, _ in loader:     # xb: (B,C,H,W)
+    total += xb.sum(dim=(0, 2, 3))
+    total_sq += xb.square().sum(dim=(0, 2, 3))
+    count += xb.shape[0] * xb.shape[2] * xb.shape[3]
+mean = total / count
+std = (total_sq / count - mean.square()).clamp_min(0).sqrt()
 ```
 
 **Do train and test stats differ?** Slightly — they're different image sets. **But always use training stats for both.** At inference you may have only one image; you can't compute meaningful stats from it. Test data is treated as unseen, so you normalize it with numbers derived only from training. Using test stats on test data is data leakage.
@@ -188,7 +211,7 @@ logits = [2.1, 0.3, 1.5]
 These aren't probabilities — they don't sum to 1 and can be negative. To get probabilities, you pass them through softmax:
 
 ```
-softmax([2.1, 0.3, 1.5]) = [0.62, 0.11, 0.27]  ← now sums to 1
+softmax([2.1, 0.3, 1.5]) ≈ [0.58, 0.10, 0.32]  ← now sums to 1
 ```
 
 **Why keep them as logits and not convert first?**
@@ -226,3 +249,25 @@ nn.CrossEntropyLoss(reduction='none')   # returns (B,), no reduction
 ```
 
 **Why mean and not sum?** With sum, your loss (and gradients) scale with batch size — doubling `B` doubles the gradient magnitude. With mean, gradient scale stays constant regardless of batch size, so your learning rate stays stable.
+
+## Common confusions
+
+- `Dataset` supplies individual samples; `DataLoader` decides order, batching, and worker loading. A map-style dataset does not need to return a prebuilt batch.
+- A random training transform is drawn on access; evaluation should use a stable transform. Both splits use normalization statistics calculated from **training data only**.
+- Logits are scores, not probabilities. `CrossEntropyLoss` expects logits and class indices, and applies the needed log-softmax internally.
+
+## Check your understanding
+
+1. If images are `(3, 28, 28)` and the loader collates 32 of them, what shape reaches the model?
+1. Why is averaging batch standard deviations insufficient for a dataset-wide standard deviation?
+1. Why should test images use the training set's mean and standard deviation?
+
+<details markdown="1"><summary>Answers</summary>
+
+1. `(32, 3, 28, 28)`; the loader adds a leading batch axis.
+1. Standard deviation depends on distances from the **global** mean; within-batch deviations omit differences between batch means.
+1. Evaluation must treat test data as unseen, and an individual inference example may not support a meaningful new estimate.
+
+</details>
+
+**One-minute recap:** the dataset retrieves one item, transforms prepare it, the loader collates batches, and the loss reduces per-example errors. Estimate normalization statistics from training pixels, then reuse them.

@@ -36,6 +36,42 @@ The ruff linter is configured to allow `NAR002` as an external code via `pyproje
 external = ["NAR001", "NAR002"]
 ```
 
+## Documenting an `nn.Module`
+
+The checker above only asks that a docstring exists. This section says what it has to contain. Every `nn.Module` under `app/src` explains its forward pass, and explains it by drawing it. `MultiHeadAttentionLayer` and `EncoderBlock` in [modules.py](app/src/training/transformer/modules.py) are the reference; `SinusoidalEmbedding` and `AGNewsClassifier` follow them.
+
+Write the class docstring in this order:
+
+1. **A one-line summary that is the pipeline**, arrows and all: `Embedding → 2 pre-norm encoder blocks → mask-aware mean pool → 4 logits.`
+1. **A short paragraph** saying what the module is for and what goes in and out, with shapes: "In and out are both (B, L, d_model), so blocks stack by composition."
+1. **A fenced ASCII diagram of the forward pass.** Rules below.
+1. **One paragraph per non-obvious choice**, each saying what that choice buys. Pre-norm over post-norm, one shared `nn.Dropout`, a mean pool instead of a `[CLS]`, a non-persistent buffer. If a reader could mistake the choice for a bug, this is where it stops being one.
+1. **A closing line about output or mutable state** — raw logits vs. probabilities, or which attribute `forward` overwrites.
+
+### Diagram rules
+
+- Box-drawing characters only: `│ ─ ▼ ► ┌ ┐ └ ┘ ├ ┴ ┬`. No ASCII art with `|` and `-`, no emoji.
+- Data flows top to bottom. Annotate each wire with the shape it carries (`│  (B, L, d_model)`), and put commentary in a right-hand column (`padding_idx=PAD_ID`, `RMSNorm over d_k, only if qk_norm`).
+- Name the actual attributes and functions the diagram stands for — `embedding_dropout`, `pad_masked_mean`, `@ w_o` — so the diagram can be grepped against the code.
+- Shapes use the axis vocabulary in [transformer/constants.py](app/src/training/transformer/constants.py): B, L, d_model, h, d_k. A new axis goes in that table first.
+- Fence it with triple backticks inside the docstring, and keep every line inside the 88-character limit. `ruff format` does not reflow docstrings, so this is on you — and count **characters**, not bytes: `awk 'length > 88'` reports every box-drawing character as three and will lie to you.
+
+### The methods
+
+- `__init__`: what it builds, then `Args:` for the parameters whose meaning isn't obvious from the name, then `Raises:` for every validation it performs. Don't restate `d_model: The model dimension.`
+- `forward`: one line on what it returns, `Args:` covering what the caller must guarantee (padding convention, what a mask's `True` means, which builder produced it), and `Returns:` when the return is a tuple.
+- **Any method that mutates `self` gets a `Side effects:` section.** `AGNewsClassifier.forward` overwrites `attention_map` on every call, and a probe reads it; that fact lives in the docstring, not in a comment.
+
+### What does not go in a module docstring
+
+Package-level narrative — how attention is built, why masks are boolean — lives in the package README (`app/src/training/transformer/README.md`), and the module docstring points at it rather than repeating it. Dataset choices live in the dataload module's own docstring. See Architecture choices below for which file owns which decision.
+
+## Keep general code and docs general
+
+This is a general-purpose library. Code under `common/`, `transformer/`, `train/`, `metrics/`, `viz/`, and `utils/` works for any dataset and any model, so its comments, docstrings, and package READMEs must not name one: no AG News, MNIST, Multi30k, or a model class from `model/`. Examples use a generic `model`, `loader`, `src_text`, or a toy string such as `bpe.train(text="low lower lowest", ...)`. Say what a caller must pass, not which caller does ("`vocab`: as returned by `bpe.train`", not "as returned by `get_ag_news_dataloader`").
+
+A dataset or model belongs in exactly three places: its own module (`dataload/<name>.py`, `model/<name>.py`, and a script that exists for one dataset, such as `viz/bpe_seq_len.py`), the architecture-choices list below, and the root README sections that inventory the repo (What's inside, Getting started, Project structure). The package READMEs, including `dataload/README.md`, stay general.
+
 ## Line length
 
 The project enforces an 88-character line limit (configured in `pyproject.toml`). `ruff format` (run by `make precheck`) handles most wrapping automatically, but **cannot** split lines that contain `# noqa` comments or long string literals — those must be wrapped manually.
@@ -53,6 +89,30 @@ some_call(  # noqa: NAR001
     arg3,
 )
 ```
+
+## Pre-commit checks
+
+These checks have standing permission. Run them without asking, before reporting a change as done:
+
+```bash
+make precheck           # pyright, ruff check --fix, ruff format, mdformat
+make check-named-args
+make check-docstrings
+make test               # or: make test DIR=app/tests/test_x.py
+sh .githooks/pre-commit
+```
+
+`make precheck` rewrites files (ruff `--fix`, `ruff format`, `mdformat .`), so review its diff before reporting. To tell whether a failure is pre-existing, compare against `git show HEAD:<path>`. Don't `git stash` the working tree, since the user may be editing files at the same time.
+
+## Before creating a PR
+
+Refresh the graphify knowledge graph, then check the docs against it:
+
+```bash
+graphify update .       # re-extracts code into graphify-out/graph.json, no LLM needed
+```
+
+Look at the updated graph in `graphify-out/` for what the branch added, removed, renamed, or rewired: modules, classes, functions, and the edges between packages. Where the root `README.md` or the site pages (`tutorials/`, `tutorials/index.md`, `mkdocs.yml`, `pages/overrides/home.html`, the READMEs in `EXTRA_PAGES`) no longer match, update them in the same PR, using Where a change goes under README structure to pick the sections.
 
 ## Tutorials site
 
@@ -125,6 +185,10 @@ Top-level sections are `##`, separated by a horizontal rule. They are not number
 
 Attention design lives in `app/src/training/transformer/README.md`, not the root README. The root README's What's inside table links to it. It has two sections: `## Attention` (the reasoning behind `attention`, `MultiHeadAttentionLayer`, `EncoderBlock`, and the masks, explaining each choice by what it buys, plus a usage snippet) and `## Axis names` (the symbol table). Any new axis name goes in that table and in `transformer/constants.py` in the same change. `constants.py` and `modules.py` point readers at this README in their docstrings. It is published on the site through `EXTRA_PAGES` in `pages/hooks.py` and the Transformers `nav:` group in `mkdocs.yml`. Links to package files are relative to the package (`[constants.py](constants.py)`).
 
+### The dataload README
+
+How a `DataLoader` is put together lives in `app/src/training/dataload/README.md`: the sampler → dataset → `collate_fn` pipeline, what a new loader has to define, shuffling, train and eval loaders, seeding, chunking long documents, and a checklist for writing a new loader. It is general, per Keep general code and docs general above: it names no dataset, and a dataset's own choices go in its module docstring. The basics (why mini-batches, transforms, normalization) stay in `tutorials/pytorch/dataloading.md`, and the README links there instead of repeating them. The root README's What's inside table links to it. It is published through `EXTRA_PAGES` in `pages/hooks.py` and the PyTorch `nav:` group in `mkdocs.yml`.
+
 ### Anchors other files depend on
 
 `pages/overrides/home.html` links to `#separate-state-policy-and-mechanism`, `#whats-inside`, `#train-and-validate`, `#the-repo-keeps-itself-clean`, and `#debuggability`, and its design cards summarize the README. The walkthrough links to `#visualizing-attention` and `#debuggability`, and Debuggability links to `#add-a-probe` and `#profile-a-few-epochs`. When you rename or remove one of those headings, update the links in the same change, then run the mkdocs build above; it warns about anchors that no longer exist.
@@ -141,6 +205,7 @@ Use this to decide which README sections a code change touches. A pre-PR hook (`
 | A script that is run from the command line | The "Run something" block. |
 | The history file format, `serialize_epoch_record`, `save_history`, or a viz script | Debuggability: the prose, the JSON excerpt, and the screenshot (regenerate it with the `plot_metrics.py` command shown there, then extract the PNG from `/tmp/plot_metrics.html` into `tutorials/assets/plot_metrics.png`). |
 | An attention or mask choice | `app/src/training/transformer/README.md` (not the root README), and the intentional-choices list below if it's a choice that looks like a bug. |
+| How loaders are built: collate, samplers, shuffling, seeding, workers | `app/src/training/dataload/README.md`, kept general. |
 | A BPE or AG News data choice | The docstring in `bpe.py` or `ag_news_classifier.py`, and the intentional-choices list below. Not the README. |
 | A tutorial | `tutorials/index.md` and `mkdocs.yml`, per the Tutorials site section above, and the learning-track card in `pages/overrides/home.html` if the group's topics changed. |
 | Any README section the landing page summarizes (the one-screen run, the design sections, debuggability, the rules) | The hero code block and the matching design card in `pages/overrides/home.html`. See the Tutorials site section above. |
@@ -162,5 +227,5 @@ These choices are intentional, even where they look like bugs. Don't "fix" them 
 
 - **Training loop:** there is no `Trainer` class. State (`TrainState`), policy (`EpochSpec`), and functions (`fit`, `run_epoch`, `train_step`, `eval_step`) stay separate. Checkpointing and history are functions you call, not lifecycle hooks.
 - **Attention:** `attention` works on pre-split heads and returns `(out, weights)`. Masks are boolean, and `True` means keep. Padding masks hide key columns only, never whole query rows, because a fully masked row turns into NaN after softmax.
-- **BPE (`app/src/training/common/bpe.py`):** all whitespace becomes a single space, so `decode` is lossy. Merges may cross word boundaries. Overlapping runs merge left to right (`aaa` → `aa` + `a`). `PAD_ID = 256` sits between the byte ids and the merge ids, so it doesn't move when `num_merges` changes.
+- **BPE (`app/src/training/common/bpe.py`):** all whitespace becomes a single space, so `decode` is lossy. Text is pre-tokenized with the GPT-4 (`cl100k_base`) pattern and merges never cross a chunk; a leading space or symbol joins the next word, and numbers split into runs of at most 3 digits. Overlapping runs merge left to right (`aaa` → `aa` + `a`). The protected ids (`PAD_ID = 256`, then `MASK_ID`, `CLS_ID`, `SEP_ID`) live in `common/constants.py` and sit between the byte ids and the merge ids, so they don't move when `num_merges` changes. `FIRST_MERGE_ID` is derived in `bpe.py` as `256 + len(PROTECTED_IDS)`.
 - **AG News (`app/src/training/dataload/ag_news.py`):** the tokenizer trains on train rows only. The row cache only checks that files exist, so callers pass `refresh_cache=True` after changing `n_*` or `seed`. The DataLoaders use no worker processes, because the data is already tokenized in memory.

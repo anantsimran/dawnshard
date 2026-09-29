@@ -1,5 +1,14 @@
 # Convolutional Neural Networks
 
+**In one minute:** a convolution learns a small pattern once and looks for it at every
+image position. One filter produces one output channel; a later filter reads *all*
+channels from the preceding layer. Pooling shrinks the spatial grid, while the
+number of learned filter weights does not depend on image width or height.
+
+**Revision route:** first follow the shapes in [Multiple Channels](#multiple-channels-1--16--32),
+then check the [parameter count](#parameter-count-cnnclassifier). Return to
+[How One Filter Works](#how-one-filter-works) if the channel arithmetic feels abstract.
+
 ## Core Idea
 
 A fully-connected layer connects every input pixel to every neuron. For a 28×28 image that's 784 inputs — and those weights don't know that pixel `(5, 5)` is next to pixel `(5, 6)`. Spatial structure is invisible.
@@ -29,6 +38,18 @@ Slide this across all positions → you get one output map the same size as the 
 ______________________________________________________________________
 
 ## Multiple Channels: 1 → 16 → 32
+
+Keep the batch dimension `B` while tracing the model. With stride 1 and padding 1,
+each 3×3 convolution preserves height and width; each 2×2 pool halves them:
+
+| Stage | Shape | What changed? |
+|---|---|---|
+| Input | `(B, 1, 28, 28)` | one grayscale channel |
+| `conv1` | `(B, 16, 28, 28)` | 16 filters create 16 channels |
+| first pool | `(B, 16, 14, 14)` | spatial size halves |
+| `conv2` | `(B, 32, 14, 14)` | each of 32 filters reads all 16 channels |
+| second pool | `(B, 32, 7, 7)` | spatial size halves again |
+| flatten → linear | `(B, 1568)` → `(B, 10)` | one score per digit |
 
 **`conv1`** takes a single-channel input `(1, 28, 28)`.
 
@@ -65,11 +86,18 @@ After the two conv+pool steps the tensor is `(B, 32, 7, 7)`. `flatten(start_dim=
 32 × 7 × 7 = 1,568
 ```
 
-All 32 feature maps are concatenated into one long vector. The `fc` layer then sees all 1,568 values at once.
+All 32 feature maps are concatenated into one long vector. The `linear` layer then sees all 1,568 values at once.
 
 ______________________________________________________________________
 
-## Parameter Count: `CNNClassifier`
+<span id="parameter-count-cnnclassifier"></span>
+
+## Parameter Count: `ConvolutionalMNISTClassifier`
+
+The [model in this repo](../../app/src/training/model/mnist.py) uses the layers
+counted below. The count comes from each filter's shape, not the number of places
+where that filter is applied: `out_channels × in_channels × 3 × 3`, plus one bias
+per output channel.
 
 `MaxPool2d` has no learnable parameters. Only the three layers with weights count.
 
@@ -89,7 +117,7 @@ biases:  32
 ──────────────────────────   4,640
 ```
 
-**`fc`** — `(in_features=1568, out_features=10)`
+**`linear`** — `(in_features=1568, out_features=10)`
 
 ```
 weights: 1,568 × 10  = 15,680
@@ -113,17 +141,17 @@ Two complementary tools — one shows you shapes, one shows you gradient wiring.
 
 ```python
 from torchinfo import summary
-summary(model=CNNClassifier(), input_size=(1, 1, 28, 28))
+summary(model=ConvolutionalMNISTClassifier(), input_size=(1, 1, 28, 28))
 ```
 
 ```
 ==========================================================================================
 Layer (type:depth-idx)                   Output Shape              Param #
 ==========================================================================================
-CNNClassifier                            [1, 10]                   --
+ConvolutionalMNISTClassifier             [1, 10]                   --
 ├─ Conv2d: 1-1                           [1, 16, 28, 28]           160
 ├─ MaxPool2d: 1-2                        [1, 16, 14, 14]           --
-├─ Conv2d: 1-3                           [1, 32, 7, 7]             4,640
+├─ Conv2d: 1-3                           [1, 32, 14, 14]           4,640
 ├─ MaxPool2d: 1-4                        [1, 32, 7, 7]             --
 ├─ Linear: 1-5                           [1, 10]                   15,690
 ==========================================================================================
@@ -136,9 +164,41 @@ Total params: 20,490
 
 ```python
 from viz.model_graph import visualize_model
-visualize_model(model=CNNClassifier(), input_shape=(1, 1, 28, 28))
+visualize_model(model=ConvolutionalMNISTClassifier(), input_shape=(1, 1, 28, 28))
 ```
 
 The graph is read **bottom-up**: leaf nodes at the top are parameters (weights and biases, shown in blue). Each grey box is a backward operation — `AddmmBackward0` is a linear layer's backward pass, `ConvolutionBackward0` is a conv layer's. Orange boxes are intermediate tensors saved for the backward pass. Arrows show data dependencies: if A → B, then B's gradient computation needs A's value.
 
 This is a lower-level view than `torchinfo` — use it when you want to verify gradient flow or debug why a parameter isn't getting gradients (it won't appear in the graph if it's detached from the output).
+
+______________________________________________________________________
+
+## Common Confusions
+
+- **A filter is not 3×3 once the input has many channels.** Its *spatial* window is
+  3×3, but a `conv2` filter has shape `(16, 3, 3)` and combines all 16 input maps.
+- **More image positions do not mean more filter weights.** The same weights slide
+  across every position. A dense layer after flattening has separate weights for
+  every input feature, which explains its much larger count.
+- **Pooling changes shape, not parameter count.** The 2×2 maximum operation has no
+  learned weights.
+
+## Quick Recall
+
+1. If `conv2` has 16 input channels and 32 output channels, how many filters does it
+   learn, and what is each filter's shape?
+1. Why does `conv2` have the same number of weights on a 14×14 and a 28×28 grid?
+1. What shape reaches the linear layer after two pools, and where does 1,568 come from?
+
+<details markdown="1">
+<summary>Answers</summary>
+
+1. It learns 32 filters of shape `(16, 3, 3)`; each produces one output channel.
+1. The filter weights are reused at every spatial position. Grid size changes how
+   often they are applied, not how many are learned.
+1. `(B, 1568)`, because 32 channels × 7 rows × 7 columns = 1,568 features per image.
+
+</details>
+
+**Keep in mind:** filter count sets output channels, each filter spans all input
+channels, and the spatial grid controls the size of the later flattened vector.

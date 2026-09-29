@@ -2,7 +2,7 @@
 
 {#-
   Landing page for README.md (selected by pages/hooks.py). The hero, design-choice
-  cards, and learning-track cards summarize the README; the README itself renders
+  cards, and revision cards summarize the README; the README itself renders
   in full underneath, so keep the cards in step with it when the design changes.
 -#}
 
@@ -16,8 +16,8 @@
         <h1 class="ds-hero__title">Dawnshard</h1>
         <p class="ds-hero__lead">
           Most ML code grows bottom-up: a script becomes a notebook becomes a tangle of
-          globals. Dawnshard goes the other way, with clean seams between configuration,
-          state, and computation, and it's engineered like a real codebase.
+          globals. Dawnshard goes the other way, with clean seams between state, policy,
+          and mechanism, and it's engineered like a real codebase.
         </p>
         <p class="ds-hero__goal">
           The long-term goal is Constitutional AI and RLHF. The training loop,
@@ -28,9 +28,9 @@
             See the design choices
             {% include ".icons/material/arrow-right.svg" %}
           </a>
-          <a class="ds-btn ds-btn--ghost" href="tutorials/pytorch/overview/">
+          <a class="ds-btn ds-btn--ghost" href="tutorials/">
             {% include ".icons/material/school-outline.svg" %}
-            Start learning
+            Revise the theory
           </a>
           <a class="ds-btn ds-btn--ghost" href="{{ config.repo_url }}">
             {% include ".icons/fontawesome/brands/github.svg" %}
@@ -68,6 +68,9 @@ history = <span class="f">fit</span>(
     val_loader=val_loader,
     num_epochs=<span class="s">15</span>,
     val_epoch_list=[<span class="s">5</span>, <span class="s">10</span>, <span class="s">15</span>],
+    train_seed=random.<span class="f">getrandbits</span>(<span class="s">32</span>),
+    val_seed=VAL_SEED,
+    test_seed=TEST_SEED,
 )</code></pre>
       </figure>
     </div>
@@ -141,36 +144,50 @@ history = <span class="f">fit</span>(
     </div>
   </section>
 
+  <section class="ds-section">
+    <div class="md-grid ds-section__inner">
+      <p class="ds-eyebrow ds-eyebrow--accent">Code map</p>
+      <h2 class="ds-section__title">Trace the code from data to training</h2>
+      <p class="ds-section__lead">
+        The code graph connects tokenization, data loading, attention, model state,
+        metrics, and the training loop. Search a symbol to see what it touches.
+      </p>
+      <a class="ds-btn ds-btn--primary" href="graphify-out/graph.html">
+        Explore the interactive graph
+        {% include ".icons/material/arrow-right.svg" %}
+      </a>
+    </div>
+  </section>
+
   <section class="ds-section ds-section--tinted">
     <div class="md-grid ds-section__inner">
-      <p class="ds-eyebrow ds-eyebrow--accent">Learning track</p>
-      <h2 class="ds-section__title">Built from the ground up, and written down</h2>
+      <p class="ds-eyebrow ds-eyebrow--accent">Theory &amp; revision</p>
+      <h2 class="ds-section__title">Reconnect the ideas behind the code</h2>
       <p class="ds-section__lead">
-        Tutorials that build the same concepts the library uses, from the first tensor
-        to attention masks.
+        Follow a short route through related ideas, or look up one question. Each page
+        starts with the main idea and ends with a quick recall check.
       </p>
       <div class="ds-grid ds-grid--three">
-        <a class="ds-card ds-card--track" href="tutorials/pytorch/overview/">
+        <a class="ds-card ds-card--track" href="tutorials/#a-batch-from-input-to-update">
           <span class="ds-card__icon">{% include ".icons/material/fire.svg" %}</span>
-          <h3>PyTorch</h3>
-          <p>Tensors and broadcasting, autograd, <code>nn.Module</code>, and data
-            loading, then the training loop, optimizers, and Adam and the learning
-            rate.</p>
-          <span class="ds-card__more">Start the series {% include ".icons/material/arrow-right.svg" %}</span>
+          <h3>One batch, one update</h3>
+          <p>Trace how shapes, a model, a loss, gradients, and an optimizer fit
+            together.</p>
+          <span class="ds-card__more">Follow the ideas {% include ".icons/material/arrow-right.svg" %}</span>
         </a>
-        <a class="ds-card ds-card--track" href="tutorials/transformer/attention_masks/">
+        <a class="ds-card ds-card--track" href="tutorials/#a-gradient-back-through-the-model">
           <span class="ds-card__icon">{% include ".icons/material/transit-connection-variant.svg" %}</span>
-          <h3>Transformers</h3>
-          <p>Attention masks and cross-attention, pre-norm vs post-norm, and the
-            attention code in <code>app/src/training/transformer</code>.</p>
-          <span class="ds-card__more">Read about attention {% include ".icons/material/arrow-right.svg" %}</span>
+          <h3>Follow a gradient</h3>
+          <p>Connect autograd, the chain rule, linear layers, and ReLU to see where
+            parameter gradients come from.</p>
+          <span class="ds-card__more">Review gradient flow {% include ".icons/material/arrow-right.svg" %}</span>
         </a>
-        <a class="ds-card ds-card--track" href="tutorials/vision/cnn/">
+        <a class="ds-card ds-card--track" href="tutorials/#attention-and-gradient-flow">
           <span class="ds-card__icon">{% include ".icons/material/book-open-page-variant-outline.svg" %}</span>
-          <h3>Guides</h3>
-          <p>Convolutional networks for MNIST and the matrix calculus behind
-            backprop.</p>
-          <span class="ds-card__more">Browse the guides {% include ".icons/material/arrow-right.svg" %}</span>
+          <h3>Attention &amp; residuals</h3>
+          <p>Recall which tokens can interact, how masks act, and why normalization
+            placement changes gradient flow.</p>
+          <span class="ds-card__more">Review transformers {% include ".icons/material/arrow-right.svg" %}</span>
         </a>
       </div>
     </div>

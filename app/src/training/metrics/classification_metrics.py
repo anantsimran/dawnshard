@@ -29,9 +29,9 @@ def calculate_metrics(predicted: Tensor, target: Tensor) -> ClassificationMetric
     num_classes = predicted.size(dim=-1)
     predicted_ids = predicted.argmax(dim=-1)
     hit = predicted_ids == target
-    predicted_counts = torch.bincount(predicted_ids, minlength=num_classes)
-    target_counts = torch.bincount(target, minlength=num_classes)
-    true_positives = torch.bincount(predicted_ids[hit], minlength=num_classes)
+    predicted_counts = torch.bincount(input=predicted_ids, minlength=num_classes)
+    target_counts = torch.bincount(input=target, minlength=num_classes)
+    true_positives = torch.bincount(input=predicted_ids[hit], minlength=num_classes)
     return ClassificationMetrics(
         correct=int(hit.sum().item()),  # noqa: NAR001
         true_positives=true_positives.tolist(),
@@ -49,11 +49,11 @@ def accumulate_metrics(acc: ClassificationMetrics, batch: ClassificationMetrics)
     acc.count += batch.count
     acc.correct += batch.correct
     if not acc.true_positives:
-        num_classes = len(batch.true_positives)
+        num_classes = len(batch.true_positives)  # noqa: NAR001
         acc.true_positives = [0] * num_classes
         acc.false_positives = [0] * num_classes
         acc.false_negatives = [0] * num_classes
-    for class_id in range(len(batch.true_positives)):
+    for class_id in range(len(batch.true_positives)):  # noqa: NAR001
         acc.true_positives[class_id] += batch.true_positives[class_id]
         acc.false_positives[class_id] += batch.false_positives[class_id]
         acc.false_negatives[class_id] += batch.false_negatives[class_id]

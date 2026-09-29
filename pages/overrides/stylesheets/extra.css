@@ -315,6 +315,35 @@
   fill: currentColor;
 }
 
+/* Recall answers in the theory pages use native details, so they also work
+   when a page is read from the repository instead of the published site. */
+.md-typeset details {
+  margin: 1rem 0;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--ds-card-border);
+  border-left: 3px solid var(--md-accent-fg-color);
+  border-radius: 0.4rem;
+  background: var(--md-code-bg-color);
+}
+
+.md-typeset details > summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.md-typeset details > summary:focus-visible {
+  outline: 2px solid var(--md-accent-fg-color);
+  outline-offset: 3px;
+}
+
+.md-typeset details[open] > summary {
+  margin-bottom: 0.5rem;
+}
+
+.md-typeset details > :last-child {
+  margin-bottom: 0;
+}
+
 @media screen and (max-width: 59.9375em) {
   .ds-hero__inner {
     grid-template-columns: minmax(0, 1fr);

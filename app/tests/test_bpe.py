@@ -1,6 +1,7 @@
 import pytest
 from training.common import bpe
 from training.common.bpe import Phrase
+from training.common.constants import CLS_ID, MASK_ID, PAD_ID, PROTECTED_IDS, SEP_ID
 
 
 def test_phrase_requires_encoding_xor_merge():
@@ -27,27 +28,48 @@ def test_train_learns_most_frequent_pair():
 
 def test_train_vocab_includes_pad_id_so_len_is_embedding_size():
     merges, vocab = bpe.train(text="aaaa bb", num_merges=1)
-    assert vocab[bpe.PAD_ID] == ""
+    assert vocab[PAD_ID] == ""
     assert sorted(vocab) == list(range(bpe.FIRST_MERGE_ID + len(merges)))
 
 
 def test_encode_never_emits_pad_id_and_numbers_merges_after_it():
     merges, _ = bpe.train(text="aaaa bb", num_merges=1)
     ids = bpe.encode(text="aaaa bb", merges=merges)
-    assert bpe.PAD_ID not in ids
+    assert PAD_ID not in ids
     assert ids[:2] == [bpe.FIRST_MERGE_ID, bpe.FIRST_MERGE_ID]
 
 
 def test_decode_drops_pad_id():
     merges, vocab = bpe.train(text="ab", num_merges=0)
-    assert bpe.decode(ids=[97, 98, bpe.PAD_ID], vocab=vocab) == "ab"
+    assert bpe.decode(ids=[97, 98, PAD_ID], vocab=vocab) == "ab"
 
 
-def test_train_stops_early_when_fewer_than_two_distinct_pairs_exist():
-    # "aaaa" has only one distinct adjacent pair ("aa"), so train can never
-    # satisfy its "fewer than two distinct pairs" stopping condition.
-    merges, _ = bpe.train(text="aaaa", num_merges=10)
-    assert merges == []
+def test_protected_ids_sit_between_bytes_and_merges():
+    assert PROTECTED_IDS == list(range(256, bpe.FIRST_MERGE_ID))
+
+
+def test_train_vocab_names_protected_ids():
+    _, vocab = bpe.train(text="ab", num_merges=0)
+    assert [vocab[i] for i in (MASK_ID, CLS_ID, SEP_ID)] == ["[MASK]", "[CLS]", "[SEP]"]
+
+
+def test_decode_drops_protected_ids():
+    _, vocab = bpe.train(text="ab", num_merges=0)
+    ids = [CLS_ID, 97, MASK_ID, SEP_ID, 98, PAD_ID]
+    assert bpe.decode(ids=ids, vocab=vocab) == "ab"
+
+
+def test_train_keeps_merging_while_a_single_distinct_pair_repeats():
+    merges, vocab = bpe.train(text="aaaaaaaa", num_merges=10)
+    assert [vocab[bpe.FIRST_MERGE_ID + k] for k in range(len(merges))] == ["aa", "aaaa"]
+
+
+def test_train_never_merges_across_chunks():
+    # Chunks are 'The', ' dog', '.', ' The', ' dog', '!': "g." and "g!" never form.
+    merges, vocab = bpe.train(text="The dog. The dog!", num_merges=50)
+    learned = [vocab[bpe.FIRST_MERGE_ID + k] for k in range(len(merges))]
+    assert " dog" in learned
+    assert not any("." in token or "!" in token for token in learned)
 
 
 def test_train_no_merges_when_no_pair_repeats():

@@ -38,12 +38,12 @@ A few smaller choices:
   holds no state and samples a fresh mask on every call.
 
 ```python
-from common import bpe
+from common.constants import PAD_ID
 from transformer.mask import padding_keep_mask
 from transformer.modules import MultiHeadAttentionLayer
 
 layer = MultiHeadAttentionLayer(d_model=128, h=8, qk_norm=True)
-keep = padding_keep_mask(token_ids=token_ids, pad_id=bpe.PAD_ID)  # (B, 1, 1, L)
+keep = padding_keep_mask(token_ids=token_ids, pad_id=PAD_ID)  # (B, 1, 1, L)
 out, weights = layer(batch=embeddings, pad_mask=keep)  # (B, L, d_model), (B, h, L, L)
 ```
 
@@ -61,6 +61,7 @@ docstring, or a comment, uses these symbols:
 | `d_model` | `D_MODEL` | embedding width | 512 | model config |
 | `h` | `H` | heads | 8 | model config |
 | `d_k` | `D_K` | width per head | 64 | `d_model // h` |
+| `vocab` | `V` | vocabulary size | 32000 | tokenizer |
 
 The constants in [constants.py](constants.py) hold the axis *names*, not sizes, so
 annotations build their shape strings from them. Sizes are bound per call, and

@@ -4,6 +4,27 @@
 
 **Notation on this page.** In prose, **bold** letters are vectors (**x**, **w**) and plain letters are scalars (`x`, `z`). Code blocks can't show bold, so their comments give each object's shape. Vectors are columns unless marked with a transpose `ᵀ`. `ones(n)` is a column vector of `n` ones.
 
+**In one minute:** a derivative tells you how an output changes when an input
+changes. For vector functions, put one output in each **row** of a Jacobian and
+one input in each **column**. Break a long computation into small operations;
+their Jacobians multiply in reverse order to carry a loss gradient back to the
+inputs.
+
+**Choose a revision route:**
+
+| If you need to recall… | Read |
+|---|---|
+| what a gradient or Jacobian's shape means | [§3](#3-introduction-to-vector-calculus-and-partial-derivatives) and [§4.1](#41-generalization-of-the-jacobian) |
+| why element-wise operations and reductions have different derivatives | [§4.2–4.4](#42-derivatives-of-vector-element-wise-binary-operators) |
+| how gradients pass through several operations | [§4.5](#45-the-chain-rules) |
+| where a neuron's weight and bias gradients come from | [§5](#5-the-gradient-of-neuron-activation) and [§6](#6-the-gradient-of-the-neural-network-loss-function) |
+| only the identities | [§8 reference](#8-matrix-calculus-reference) |
+
+The worked neuron in §§5–6 is the destination. Sections 2–4 supply one rule at a
+time so that its final gradient has an explanation, rather than appearing as a
+formula to memorize. The PyTorch snippets check the derivations; reading them is
+optional for a theory review.
+
 ______________________________________________________________________
 
 ## 1. Introduction
@@ -303,6 +324,19 @@ jacobian(lambda z: (x * z).sum(), z)    # tensor(15.)   ← sum(x) = 4 + 5 + 6
 
 ### 4.5 The Chain Rules
 
+Keep this picture in mind through the three forms below:
+
+```
+input x ──► intermediate u ──► output y
+             dy/dx = (dy/du) · (du/dx)
+```
+
+For vectors, each factor is a Jacobian. Their inner dimensions must agree: if
+`x` has `n` entries, `u` has `k`, and `y` has `m`, then an `(m × k)` Jacobian times
+a `(k × n)` Jacobian yields the required `(m × n)` derivative of `y` with respect
+to `x`. If a value reaches the output along several paths, the contributions
+from those paths add.
+
 The rules so far don't cover nested expressions like `sum(w + x)`, unless you break them down into scalars by hand. Combining the rules takes a chain rule. Several different rules share that name, so this section names three of them and says when each one applies:
 
 1. The **single-variable chain rule**: a scalar function of a scalar, through a single path.
@@ -593,6 +627,11 @@ ______________________________________________________________________
 
 ## 6. The Gradient of the Neural Network Loss Function
 
+The causal chain for one example is **weights and bias → pre-activation → ReLU
+output → error → squared loss**. Backpropagation walks that chain from the loss
+back to the parameters. The batch mean then adds each example's contribution
+and divides by `N`.
+
 Training uses `N` input vectors with a scalar target for each one:
 
 ```
@@ -707,6 +746,41 @@ The whole article comes down to a few ideas:
 - **One chain rule.** `∂f/∂x = ∂f/∂g · ∂g/∂x` (§4.5.3). It covers the scalar and total-derivative chain rules as special cases.
 
 The next step is derivatives with respect to **matrices**, such as a layer's weight matrix. [Linear-layer backward](../pytorch/linear_layer_backward.md) works through one in this repo.
+
+### Common Confusions
+
+- **Gradient or Jacobian?** A scalar output gives one row of derivatives: its
+  gradient. Several outputs stack those rows into a Jacobian.
+- **Which shape is right?** In this page's numerator layout, output count sets
+  rows and input count sets columns. A source using denominator layout will
+  transpose that matrix.
+- **Why does a shared bias get a sum?** Every example uses the same `b`, so each
+  active example contributes to its one derivative. The batch mean scales the
+  total by `1/N`.
+- **Does an inactive ReLU erase every gradient?** It contributes zero for that
+  neuron and example. Other active examples and other paths may still contribute.
+
+### Quick Recall
+
+1. If `x` has 3 entries and `y = f(x)` has 2, what is the shape of `∂y/∂x` in
+   this page's convention? What does row 1 represent?
+1. Why is the Jacobian of an element-wise function diagonal, while the
+   derivative of `sum(x)` is a row of ones?
+1. For `y = f(g(x))`, which two Jacobians multiply, and how can shape checks
+   catch an incorrect order?
+
+<details markdown="1">
+<summary>Answers</summary>
+
+1. `(2, 3)`. Row 1 contains the partial derivatives of the first output with
+   respect to all three inputs.
+1. Output element `i` of an element-wise function reads only input `i`, so its
+   off-diagonal partials are zero. A sum reads every input and changes by one
+   unit when any one input increases by one.
+1. `∂y/∂x = (∂y/∂g)(∂g/∂x)`. If `g` has `k` entries, the factors have shapes
+   `(m, k)` and `(k, n)`; the result must have shape `(m, n)`.
+
+</details>
 
 ______________________________________________________________________
 

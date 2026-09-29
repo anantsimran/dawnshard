@@ -8,7 +8,6 @@ so they broadcast over the scores (B, h, L, L). Combine them with `&`.
 import torch
 from beartype import beartype
 from jaxtyping import Bool, Float, Int, jaxtyped
-
 from training.transformer.constants import D_MODEL, B, L
 
 
@@ -29,7 +28,7 @@ def padding_keep_mask(
         True where the key is a real token. The size-1 axes broadcast over heads
         and query positions.
     """
-    return (token_ids != pad_id)[:, None, None, :]
+    return (token_ids != pad_id).unsqueeze(dim=1).unsqueeze(dim=1)
 
 
 @jaxtyped(typechecker=beartype)
@@ -47,7 +46,7 @@ def causal_keep_mask(
         over batch and heads.
     """
     ones = torch.ones(seq_len, seq_len, dtype=torch.bool, device=device)  # noqa: NAR001
-    return torch.tril(input=ones)[None, None, :, :]
+    return torch.tril(input=ones).unsqueeze(dim=0).unsqueeze(dim=0)
 
 
 @jaxtyped(typechecker=beartype)

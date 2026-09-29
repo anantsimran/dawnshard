@@ -9,3 +9,4 @@ L = "L"  # sequence length
 D_MODEL = "d_model"  # embedding width
 H = "h"  # attention heads
 D_K = "d_k"  # width per head, d_model // h
+V = "vocab"  # vocabulary size, logits per position

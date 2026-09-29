@@ -8,20 +8,17 @@ are backward ops (AddmmBackward0 = Linear, ConvolutionBackward0 = Conv2d), orang
 boxes are intermediate tensors saved for the backward pass.
 
     from training.viz.model_graph import visualize_model
-    from training.model.mnist import CNNClassifier
 
-    visualize_model(model=CNNClassifier(), input_shape=(1, 1, 28, 28))
-    # optional: visualize_model(..., output_path=Path("cnn_graph.html"))
+    visualize_model(model=model, input_shape=(1, 1, 28, 28))
+    # optional: visualize_model(..., output_path=Path("model_graph.html"))
 
 ─── torchinfo: layer-by-layer table ────────────────────────────────────────────
 Prints output shape and parameter count per layer — the fastest way to verify
 your architecture matches what you designed.
 
     from torchinfo import summary
-    from training.model.mnist import MNISTClassifier, CNNClassifier
 
-    summary(model=MNISTClassifier(), input_size=(1, 1, 28, 28))
-    summary(model=CNNClassifier(), input_size=(1, 1, 28, 28))
+    summary(model=model, input_size=(1, 1, 28, 28))
 
 input_size is (batch, channels, height, width). Use batch=1 for a single example.
 """

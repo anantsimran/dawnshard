@@ -12,10 +12,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import torch
-from training.common import bpe
 from loguru import logger
 from torch.utils.data import DataLoader, Dataset
-
+from training.common import bpe
+from training.common.constants import PAD_ID
 from training.dataload.constants import DATASETS_CACHE_DIR
 
 AG_NEWS_URL = (
@@ -115,10 +115,12 @@ def _save_merges(merges: List[bpe.Phrase], num_merges: int, path: Path) -> None:
         assert merge.first is not None and merge.second is not None
         pairs.append([ids[merge.first], ids[merge.second]])  # noqa: NAR001
         ids[merge] = bpe.FIRST_MERGE_ID + rank
-    # first_merge_id lets _load_merges reject caches written with a different id layout.
+    # first_merge_id and chunk_pattern let _load_merges reject caches written with a
+    # different id layout or pre-tokenization, whose merges encode would misapply.
     cached = {
         "num_merges": num_merges,
         "first_merge_id": bpe.FIRST_MERGE_ID,
+        "chunk_pattern": bpe._CHUNK_PATTERN.pattern,
         "merges": pairs,
     }
     path.write_text(data=json.dumps(obj=cached), encoding="utf-8")
@@ -130,7 +132,9 @@ def _load_merges(path: Path, num_merges: int) -> Optional[Tuple[List[bpe.Phrase]
         return None
     cached = json.loads(s=path.read_text(encoding="utf-8"))
     if (
-        cached["num_merges"] != num_merges or cached.get("first_merge_id") != bpe.FIRST_MERGE_ID  # noqa: NAR001
+        cached["num_merges"] != num_merges
+        or cached.get("first_merge_id") != bpe.FIRST_MERGE_ID  # noqa: NAR001
+        or cached.get("chunk_pattern") != bpe._CHUNK_PATTERN.pattern  # noqa: NAR001
     ):
         return None
     return bpe.tokenizer_from_pairs(pairs=cached["merges"])
@@ -139,8 +143,8 @@ def _load_merges(path: Path, num_merges: int) -> Optional[Tuple[List[bpe.Phrase]
 def _encode_rows(
     rows: List[Tuple[str, int]], merges: List[bpe.Phrase], max_len: int
 ) -> AGNewsDataset:
-    """Tokenize `rows` into a fixed-length AGNewsDataset, right-padded with bpe.PAD_ID."""
-    ids = torch.full(size=(len(rows), max_len), fill_value=bpe.PAD_ID, dtype=torch.long)  # noqa: NAR001
+    """Tokenize `rows` into a fixed-length AGNewsDataset, right-padded with PAD_ID."""
+    ids = torch.full(size=(len(rows), max_len), fill_value=PAD_ID, dtype=torch.long)  # noqa: NAR001
     for i, (text, _) in enumerate(rows):  # noqa: NAR001
         row = bpe.encode(text=text, merges=merges)[:max_len]
         ids[i, : len(row)] = torch.tensor(data=row, dtype=torch.long)  # noqa: NAR001
@@ -149,10 +153,10 @@ def _encode_rows(
 
 def get_ag_news_dataloader(
     batch_size: int = 64,
-    n_train: int = 20_000,
+    n_train: int = 100_000,
     n_eval: int = 2_000,
     n_test: int = 2_000,
-    num_merges: int = 2000,
+    num_merges: int = 1000,
     max_len: int = 128,
     seed: int = 0,
     data_dir: Path = DATASETS_CACHE_DIR,
@@ -166,10 +170,10 @@ def get_ag_news_dataloader(
     seen by the tokenizer. Sampled rows, and the BPE merges trained on them, are
     cached under data_dir; pass refresh_cache=True to resample (required after
     changing any n_* or seed). Merges are retrained whenever the rows are
-    resampled or num_merges changes.
+    resampled, num_merges changes, or bpe's pre-tokenization pattern changes.
     Batches are (ids (B, max_len) long, labels (B,) long) with ids right-padded using
-    bpe.PAD_ID; vocab includes it, so the embedding needs len(vocab) rows with
-    padding_idx=bpe.PAD_ID.
+    PAD_ID; vocab includes it, so the embedding needs len(vocab) rows with
+    padding_idx=PAD_ID.
     """
     splits, from_cache = _load_splits(
         n_train=n_train,
@@ -251,10 +255,10 @@ def inspect_ag_news_dataset(loader: DataLoader, vocab: Dict[int, str]) -> None:
     counts = [ds.labels.count(c) for c in range(NUM_CLASSES)]  # noqa: NAR001
     logger.info("Total samples : {}", len(ds))  # noqa: NAR001
     logger.info("Classes       : {}", dict(zip(CLASSES, counts)))  # noqa: NAR001
-    logger.info("Vocab size    : {} (incl. pad_id={})", len(vocab), bpe.PAD_ID)  # noqa: NAR001
+    logger.info("Vocab size    : {} (incl. pad_id={})", len(vocab), PAD_ID)  # noqa: NAR001
 
     ids, labels = next(iter(loader))  # noqa: NAR001
-    real = ids != bpe.PAD_ID
+    real = ids != PAD_ID
     logger.info("Batch shape   : {}  (B, L)", ids.shape)  # noqa: NAR001
     logger.info("Label sample  : {}", labels[:8].tolist())  # noqa: NAR001
     lengths = real.sum(dim=1)

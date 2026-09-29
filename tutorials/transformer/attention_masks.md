@@ -1,5 +1,17 @@
 # Attention Masks and Cross-Attention — Q&A
 
+**Revision question:** For one query, which keys may it read? First identify what
+the score matrix's columns represent; then decide whether any columns are padding
+or future information.
+
+**Reading route:** Use the [mask table](#cheat-sheet) to reorient, follow the
+[cross-attention example](#worked-example), and then
+[trace the mask decision](#the-mistake-is-attaching-masks-to-blocks).
+The [padding matrix](#the-matrix-picture) resolves the most common shape mistake.
+The Python syntax and MPS sections are
+reference material for when you encounter those details in code. Finish with the
+[recall check](#recall-check).
+
 Vocabulary, matching `app/src/training/transformer/constants.py`:
 
 | Symbol | Meaning |
@@ -9,6 +21,7 @@ Vocabulary, matching `app/src/training/transformer/constants.py`:
 | `d_model` | embedding width |
 | `h` | attention heads |
 | `d_k` | width per head, `d_model // h` |
+| `d_v` | value width per head; often the same as `d_k` |
 
 When the queries and keys come from different sequences, `L` splits into `L_q` / `L_k`
 (or `L_tgt` / `L_src` for translation). Attention scores are always
@@ -32,18 +45,36 @@ Run the test on every attention block and the mask setup falls out of it. You do
 | Block | Columns hold | Mask |
 |---|---|---|
 | Encoder self-attn | source tokens | padding |
-| Decoder self-attn | target tokens (only `< t` exist) | padding + causal |
+| Decoder self-attn | target-side decoder inputs (positions after the current query are hidden) | padding + causal |
 | Cross-attn (in decoder) | source tokens (encoder output, all available) | padding only |
+
+This table assumes full-source encoder-decoder generation, as in ordinary
+translation. A streaming model may have only part of the source available and
+would mask source keys according to that availability.
 
 **Mask shapes.** Each `1` means "the mask is the same along this axis":
 
 ```
 (B, 1, 1,   L_k)   pad mask     → kills columns; same for every head and every query
 (1, 1, L_q, L_k)   causal mask  → kills upper triangle; same for every batch and head
-(B, 1, L_q, 1  )   row mask     → don't. Fully masked rows give NaN.
+(B, 1, L_q, 1  )   row mask     → avoid fully masked rows; ordinary softmax is undefined there
 ```
 
 Combine with `keep_pad & keep_causal` → broadcasts to `(B, 1, L_q, L_k)`.
+
+**Trace one batch through a decoder layer.** Suppose there are two heads, three
+decoder input positions, and four source positions (the fourth is `<pad>`):
+
+| Operation | Score shape | Readable key columns |
+|---|---|---|
+| Decoder self-attention | `(1, 2, 3, 3)` | Query rows `0`, `1`, `2` may read input columns `0`; `0–1`; `0–2`, respectively. A target pad column, if present, is removed too. |
+| Cross-attention | `(1, 2, 3, 4)` | Every target query may read source columns `0–2`; source column `3` is pad. |
+
+The causal triangle belongs to the first matrix because its row and column axes
+both index decoder positions. It does not belong to the rectangular cross-attention
+matrix: those axes index different sequences. In teacher forcing, decoder inputs
+are shifted right, so input positions through `t` contain target tokens from
+*before* the next token being predicted at position `t`.
 
 ______________________________________________________________________
 
@@ -58,7 +89,8 @@ Same machinery, different pool of neighbours.
 ### Why Q is the one that stays home
 
 The output has **one row per query**. Scores are `(B, h, L_q, L_k)`, and the output is
-`(B, h, L_q, d_k)`. The softmax-weighted average sums the `L_k` axis away.
+`(B, h, L_q, d_v)`; `d_v = d_k` in this repo's attention layer. The
+softmax-weighted average sums the `L_k` axis away.
 
 So whoever supplies **Q is the thing being represented**. Whoever supplies **K and V is
 the material** it's built from. In translation you're building a better vector for the
@@ -118,7 +150,8 @@ beautiful French that translates a different sentence.
 
 ### Nothing here is specific to language
 
-Q and K only need to live in the same vector space so the dot product means something:
+The query and key projections produce compatible vectors for the dot product;
+their original inputs need not be the same kind of data:
 
 | Task | Q | K / V |
 |---|---|---|
@@ -144,7 +177,7 @@ Run that on the two decoder blocks:
 
 | Block | Columns hold | Available when generating token `t`? |
 |---|---|---|
-| Decoder self-attn | target tokens | Only those `< t`. The rest don't exist yet → **causal mask** |
+| Decoder self-attn | shifted target inputs | Only input positions through the current query position are available → **causal mask** |
 | Cross-attn | source tokens | All of them, always. The encoder ran once, before decoding started → **nothing to hide** |
 
 Cross-attention sits *inside* the decoder, but its keys are the *encoder's* output. The
@@ -162,12 +195,12 @@ The autoregressive constraint is already fully enforced earlier in the layer. Fo
 position `t`:
 
 ```
-target tokens ≤ t  →  [decoder self-attn, causally masked]  →  query vector q_t
+decoder inputs at positions ≤ t  →  [decoder self-attn, causally masked]  →  query vector q_t
 ```
 
-`q_t` depends only on past targets, by construction. It then reads the whole source.
-The result depends on (past targets, full source), which is exactly what you have
-at inference. Nothing leaks.
+With shifted decoder inputs, `q_t` depends only on target tokens before the one
+being predicted at `t`. It then reads the whole source. The result depends on
+(past targets, full source), exactly what is available at inference. Nothing leaks.
 
 Masking cross-attention too would enforce the same constraint twice, on an axis where it
 doesn't apply.
@@ -196,10 +229,11 @@ The alignment crosses:
 A causal mask would let row `chat` (index 1) see only columns 0 and 1. Column 2, the word
 it actually needs, would be forbidden. The mask would make the translation impossible.
 
-That example is the easy case, because the lengths are equal. Real pairs differ, e.g. `L_src = 9`,
-`L_tgt = 14`. The score matrix is `(B, h, L_tgt, L_src)`, and `tril` only makes sense on
-a square where both axes index the same sequence. A square triangular mask doesn't even have
-the right shape here.
+That example is the easy case, because the lengths are equal. Real pairs differ,
+e.g. `L_src = 9`, `L_tgt = 14`, so the score matrix is
+`(B, h, L_tgt, L_src)`. A rectangular triangle can be constructed, but it still
+has **no causal meaning** here: its two axes index different sequences, not two
+positions on one timeline.
 
 ### So what is the source padding mask doing?
 
@@ -247,9 +281,11 @@ by key position only, and that's the whole reason for its shape.
 
 ### "So shouldn't the last row be zeroed?" No, for two reasons
 
-**Practical:** row 3's output is garbage, and nobody reads it. The loss ignores pad positions
-(`ignore_index=PAD`), and the next layer masks column 3 again, so the garbage can never
-reach a real position.
+**Practical:** row 3's output is irrelevant to the task when padded query
+positions are excluded from the loss (`ignore_index=PAD`) and every later
+attention layer continues masking padded keys. Real query positions then cannot
+read that row through attention. Other operations that mix positions would need
+their own padding treatment.
 
 **Fatal:** if you mask row 3 entirely, the row becomes all `-inf`:
 
@@ -257,13 +293,18 @@ reach a real position.
 softmax([-inf, -inf, -inf, -inf]) = 0 / 0 = NaN
 ```
 
-NaN spreads through the backward pass into every weight in the model. Masking an entire
-query row is the classic way to blow up training. The pad row is left to compute
-meaningless but finite numbers on purpose.
+NaNs can spread through later computation and gradients. Masking an entire query
+row is a common way to break ordinary softmax attention. The pad row is left to
+compute meaningless but finite numbers on purpose. Some specialized attention
+kernels define a safe result for fully masked rows; the simple `masked_fill` plus
+softmax path shown here does not.
 
 ______________________________________________________________________
 
 ## Q: I can't get past the syntax of `padding_keep_mask`
+
+The concepts above are enough for a theory pass. The next two questions unpack
+the tensor syntax used to express those masks in PyTorch.
 
 ```python
 def padding_keep_mask(token_ids: torch.Tensor, pad_id: int) -> torch.Tensor:
@@ -395,9 +436,11 @@ and `float("nan")` are the special values the constructor accepts. Equivalent:
 
 Why not a large negative number like `-1e9`? It only works by accident. `exp(-1e9)`
 underflows to exactly `0.0` in fp32, so you get the right answer. In fp16 the largest
-magnitude is about 65504, and `-1e9` overflows to `-inf` anyway. In the additive style
+finite magnitude is about 65504, so `-1e9` cannot be represented as a finite value.
+In the additive style
 `scores + (~keep) * -1e9` that's worse: kept positions compute `0 * -inf = NaN`.
-`float("-inf")` through `masked_fill` is correct in every dtype.
+`float("-inf")` through `masked_fill` is the intended sentinel for excluded keys
+in the ordinary softmax path, provided every query row retains at least one key.
 
 ### Putting it together
 
@@ -429,28 +472,33 @@ ______________________________________________________________________
 
 ## Q: Does `float("-inf")` work on Mac MPS?
 
-**Yes.** `-inf` is an ordinary fp32/fp16/bf16 value, and MPS handles it. The well-known dtype gap on MPS
-is float64, which it doesn't support at all. That's unrelated to infinities.
+**Yes.** `-inf` is representable in fp32/fp16/bf16, and MPS supports using it
+in these tensors. MPS does not support float64 tensors; that is unrelated to
+infinities.
 
-MPS does have a history of bugs around masking. The points below come from PyTorch issues
-as reported when these notes were written. Recheck them against your installed version.
+MPS has had version-specific masking and softmax bugs. These are **issue reports
+from particular PyTorch versions**, not claims about every current release.
+Recheck the linked issue and your installed version when diagnosing a mismatch.
 
-1. **Causal SDPA can leak future tokens in half precision** (pytorch#195910, reported
-   against 2.11). `scaled_dot_product_attention(..., is_causal=True)` on MPS in
+1. **Causal SDPA leaked future tokens in half precision** ([pytorch#195910](https://github.com/pytorch/pytorch/issues/195910), reported
+   against 2.11). `scaled_dot_product_attention(..., is_causal=True)` on the reported MPS setup in
    float16/bfloat16 let query `i` attend through key `(i//4)*4+3`. float32 was
    unaffected, and passing the same causal mask explicitly via `attn_mask` gave correct results.
-   → On a Mac, don't trust `is_causal=True` in half precision. Build the bool mask
-   yourself, as this repo already does.
-1. **Fully masked rows behave differently on MPS than on CPU/CUDA** (pytorch#111416). CPU returns NaN and MPS returns
-   0\. MPS's behaviour looks nicer, and that's the danger: an all-pad row that silently gives zeros on
-   your Mac will produce NaN when the same code runs on CUDA.
-1. **`masked_fill` has a size limit** (pytorch#143477). Tensors with ≥ 2³² elements crash
-   the MPS backend, e.g. `(48, 25, 1024, 1024)`. That's unlikely at learning-scale sizes, but it
-   crashes instead of raising an error.
-1. **Softmax on large tensors has returned NaN** on MPS, in both fp16 and fp32 (pytorch#96602).
+   An explicit Boolean causal mask avoids that reported path, as this repo does.
+1. **A fully masked `masked.log_softmax` differed across devices** ([pytorch#111416](https://github.com/pytorch/pytorch/issues/111416), reported in 2023).
+   The reported CPU result was NaN and the MPS result was `0` for a masked scalar.
+   This illustrates why a fully masked row should be treated as an error in the
+   ordinary attention formulation, even if one backend yields a finite value.
+1. **A very large `masked_fill` allocation failed** ([pytorch#143477](https://github.com/pytorch/pytorch/issues/143477), reported against a 2.6 development build).
+   The limit in the reported failure was **2³² bytes**, not elements; the example
+   score tensor had shape `(48, 25, 1024, 1024)`. This is far beyond these
+   tutorials' tensor sizes.
+1. **Softmax on a large tensor returned NaN** in both fp16 and fp32 on a reported MPS setup
+   ([pytorch#96602](https://github.com/pytorch/pytorch/issues/96602), reported against a 2.1 development build).
 
-**Practical advice:** use `float("-inf")`, stay in fp32 while learning on MPS, and keep a
-CPU parity check in your tests. Treat CPU as ground truth whenever a number looks strange.
+**Practical check:** use `float("-inf")` for excluded keys, avoid fully masked
+rows, and compare a small example on CPU if MPS results look strange. CPU is a
+useful independent reference, not an infallible ground truth.
 
 ```python
 def assert_device_parity(fn, *args, atol=1e-4):
@@ -492,6 +540,38 @@ if mask is not None:
 
 ______________________________________________________________________
 
+## Common confusions
+
+| Tempting shortcut | Better question |
+|---|---|
+| “The decoder needs a causal mask everywhere.” | Which sequence supplies this attention matrix's **keys**? The whole source is available to cross-attention. |
+| “Padding means the pad query should read nothing.” | Which **key columns** are meaningless? Remove those from every query's reading pool; do not make a softmax row all `-inf`. |
+| “A triangle works whenever there are target rows.” | Do rows and columns index the **same ordered sequence**? If they index target and source, a triangle would impose a false alignment. |
+| “True means masked.” | Check the convention at the API boundary. Here `keep=True` means readable; `masked_fill(~keep, -inf)` flips it. |
+
+## Recall check
+
+1. In decoder cross-attention with `L_tgt = 3` and `L_src = 4`, what is the score shape, and which axis holds source padding?
+1. Why may target query position `1` read source column `2` in translation, even though it may not read a future target position?
+1. A score row is `[-inf, -inf, -inf]`. What goes wrong with ordinary softmax, and how should a padded query be handled in this example?
+
+<details markdown="1">
+<summary>Answers</summary>
+
+1. `(B, h, 3, 4)`. Source padding removes columns on the final `L_src` axis, with a keep mask shaped `(B, 1, 1, 4)`.
+1. The entire source exists before decoding; source index `2` is not a future target. The causal constraint applies to target-side decoder inputs.
+1. The denominator is zero, so ordinary softmax is undefined and often returns NaN. Keep at least one readable key for that row, ignore the padded query in the loss, and keep masking its key column in later attention layers.
+
+</details>
+
+**One-minute recap:** The score matrix has one row per query and one column per
+key. A padding mask removes meaningless **columns** wherever padded keys appear.
+A causal mask removes future **target columns** in decoder self-attention.
+Cross-attention reads the fully available source, so it uses source padding but
+no target causal triangle.
+
+______________________________________________________________________
+
 ## References
 
 - Vaswani et al., *"Attention Is All You Need"* (2017), §3.2.3. Masking only inside
@@ -506,5 +586,8 @@ ______________________________________________________________________
 - PyTorch docs: `Tensor.masked_fill`, `torch.where`, broadcasting semantics
   (docs.pytorch.org/docs/stable/notes/broadcasting.html)
 - NumPy indexing with `newaxis` (PyTorch reuses the `None` convention)
-- MPS issues: pytorch#195910 (causal SDPA leak), pytorch#111416 (masked softmax CPU/MPS
-  mismatch), pytorch#143477 (`masked_fill` 2³² limit), pytorch#96602 (softmax NaN)
+- MPS issues: [pytorch#195910](https://github.com/pytorch/pytorch/issues/195910)
+  (causal SDPA leak), [pytorch#111416](https://github.com/pytorch/pytorch/issues/111416)
+  (masked log-softmax CPU/MPS mismatch), [pytorch#143477](https://github.com/pytorch/pytorch/issues/143477)
+  (`masked_fill` 2³²-byte limit in the report), [pytorch#96602](https://github.com/pytorch/pytorch/issues/96602)
+  (softmax NaN in a reported setup)

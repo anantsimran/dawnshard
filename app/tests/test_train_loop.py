@@ -10,9 +10,10 @@ from training.metrics.loss_only_metrics import (
     reduce_metrics,
 )
 from training.train.model import EpochRecord, EpochSpec, Metrics, SystemMetrics, TrainState
-from training.train.train_loop import eval_step, load, run_epoch, train_step
+from training.train.serialization import serialize_epoch_record
+from training.constants import TEST_SEED, VAL_SEED
+from training.train.train_loop import eval_step, fit, load, run_epoch, train_step
 from training.train.utils import save_history, save_state
-from training.utils.serialization import serialize_epoch_record
 
 
 def make_state_and_config():
@@ -44,7 +45,7 @@ def test_train_state_create_moves_model_to_device():
 def test_train_step_returns_loss_and_batch_size():
     state, config = make_state_and_config()
     batch = (torch.randn(4, 2), torch.randn(4, 1))  # noqa: NAR001
-    metrics = train_step(train_state=state, epoch_spec=config, batch=batch, epoch=1, batch_index=0)
+    metrics = train_step(train_state=state, epoch_spec=config, batch=batch, epoch=1, batch_index=0, seed=0)
     assert isinstance(metrics.loss, float)  # noqa: NAR001
     assert metrics.count == 4
 
@@ -53,7 +54,7 @@ def test_train_step_updates_weights():
     state, config = make_state_and_config()
     weights_before = state.model.weight.clone()
     batch = (torch.randn(4, 2), torch.randn(4, 1))  # noqa: NAR001
-    train_step(train_state=state, epoch_spec=config, batch=batch, epoch=1, batch_index=0)
+    train_step(train_state=state, epoch_spec=config, batch=batch, epoch=1, batch_index=0, seed=0)
     assert not torch.equal(weights_before, state.model.weight)  # noqa: NAR001
 
 
@@ -61,14 +62,14 @@ def test_eval_step_does_not_update_weights():
     state, config = make_state_and_config()
     weights_before = state.model.weight.clone()
     batch = (torch.randn(4, 2), torch.randn(4, 1))  # noqa: NAR001
-    eval_step(train_state=state, epoch_spec=config, batch=batch, epoch=1, batch_index=0)
+    eval_step(train_state=state, epoch_spec=config, batch=batch, epoch=1, batch_index=0, seed=0)
     assert torch.equal(weights_before, state.model.weight)  # noqa: NAR001
 
 
 def test_eval_step_returns_loss_and_batch_size():
     state, config = make_state_and_config()
     batch = (torch.randn(4, 2), torch.randn(4, 1))  # noqa: NAR001
-    metrics = eval_step(train_state=state, epoch_spec=config, batch=batch, epoch=1, batch_index=0)
+    metrics = eval_step(train_state=state, epoch_spec=config, batch=batch, epoch=1, batch_index=0, seed=0)
     assert isinstance(metrics.loss, float)  # noqa: NAR001
     assert metrics.count == 4
 
@@ -86,6 +87,7 @@ def test_run_epoch_returns_nonnegative_loss():
         step_fn=train_step,
         epoch=1,
         train=True,
+        seed=0,
     )
     assert isinstance(metrics.loss, float)  # noqa: NAR001
     assert metrics.loss >= 0.0
@@ -103,6 +105,7 @@ def test_run_epoch_starts_each_epoch_with_a_fresh_accumulator():
             step_fn=eval_step,
             epoch=1,
             train=False,
+            seed=0,
         )
         assert metrics.count == 4
 
@@ -112,17 +115,19 @@ def test_eval_step_passes_batch_prediction_and_position_to_eval_probe():
     calls = []
     batch = (torch.randn(4, 2), torch.randn(4, 1))  # noqa: NAR001
 
-    def probe(model, input_tensor, target_tensor, predicted, epoch, batch_index):
-        calls.append((model, input_tensor, target_tensor, predicted, epoch, batch_index))  # noqa: NAR001
+    def probe(model, input_tensor, target_tensor, predicted, epoch, batch_index, seed):
+        calls.append(  # noqa: NAR001
+            (model, input_tensor, target_tensor, predicted, epoch, batch_index, seed)
+        )
 
     config.eval_probe = probe
-    eval_step(train_state=state, epoch_spec=config, batch=batch, epoch=3, batch_index=2)
-    [(model, input_tensor, target_tensor, predicted, epoch, batch_index)] = calls
+    eval_step(train_state=state, epoch_spec=config, batch=batch, epoch=3, batch_index=2, seed=7)
+    [(model, input_tensor, target_tensor, predicted, epoch, batch_index, seed)] = calls
     assert model is state.model
     assert torch.equal(input_tensor, batch[0])  # noqa: NAR001
     assert torch.equal(target_tensor, batch[1])  # noqa: NAR001
     assert torch.equal(predicted, state.model(batch[0]).detach())  # noqa: NAR001
-    assert (epoch, batch_index) == (3, 2)
+    assert (epoch, batch_index, seed) == (3, 2, 7)
 
 
 def test_run_epoch_calls_only_the_matching_probe_with_epoch_and_batch_index():
@@ -132,10 +137,22 @@ def test_run_epoch_calls_only_the_matching_probe_with_epoch_and_batch_index():
     config.eval_probe = lambda *args: calls.append(("eval", args[4], args[5]))  # noqa: NAR001
     batches = [(torch.randn(4, 2), torch.randn(4, 1))] * 3  # noqa: NAR001
     run_epoch(
-        state=state, epoch_spec=config, loader=batches, step_fn=train_step, epoch=2, train=True
+        state=state,
+        epoch_spec=config,
+        loader=batches,
+        step_fn=train_step,
+        epoch=2,
+        train=True,
+        seed=0,
     )
     run_epoch(
-        state=state, epoch_spec=config, loader=batches, step_fn=eval_step, epoch=2, train=False
+        state=state,
+        epoch_spec=config,
+        loader=batches,
+        step_fn=eval_step,
+        epoch=2,
+        train=False,
+        seed=0,
     )
     assert calls == [
         ("train", 2, 0),
@@ -145,6 +162,100 @@ def test_run_epoch_calls_only_the_matching_probe_with_epoch_and_batch_index():
         ("eval", 2, 1),
         ("eval", 2, 2),
     ]
+
+
+def test_fit_seeds_the_global_rng_with_train_seed(tmp_path):
+    state, config = make_state_and_config()
+    batches = [(torch.randn(4, 2), torch.randn(4, 1))]  # noqa: NAR001
+    torch.manual_seed(seed=999)
+    fit(
+        state=state,
+        epoch_spec=config,
+        train_loader=batches,
+        val_loader=batches,
+        num_epochs=1,
+        val_epoch_list=[],
+        train_seed=1234,
+        val_seed=VAL_SEED,
+        test_seed=TEST_SEED,
+        history_path=tmp_path / "history.json",
+    )
+    assert torch.initial_seed() == 1234
+
+
+def test_fit_repeats_dropout_draws_from_train_seed_whatever_the_rng_state_was(tmp_path):
+    # The two runs enter fit with different global RNG states, so identical losses
+    # can only come from fit reseeding it with train_seed.
+    losses = []
+    for extra_draws in (0, 100):  # noqa: NAR001
+        torch.manual_seed(seed=0)
+        state, config = make_state_and_config()
+        state.model = nn.Sequential(  # noqa: NAR001
+            nn.Linear(in_features=2, out_features=2),
+            nn.Dropout(p=0.5),
+            nn.Linear(in_features=2, out_features=1),
+        )
+        state.optimizer = torch.optim.SGD(params=state.model.parameters(), lr=0.01)
+        torch.randn(extra_draws)  # noqa: NAR001
+        batches = [(torch.ones(4, 2), torch.ones(4, 1))]  # noqa: NAR001
+        history = fit(
+            state=state,
+            epoch_spec=config,
+            train_loader=batches,
+            val_loader=batches,
+            num_epochs=3,
+            val_epoch_list=[],
+            train_seed=42,
+            val_seed=VAL_SEED,
+            test_seed=TEST_SEED,
+            history_path=tmp_path / "history.json",
+        )
+        losses.append([record.train_loss for record in history])  # noqa: NAR001
+    assert losses[0] == losses[1]
+
+
+def test_fit_hands_train_probes_no_seed_and_eval_probes_the_val_seed(tmp_path):
+    state, config = make_state_and_config()
+    seeds = []
+    config.train_probe = lambda *args: seeds.append(("train", args[6]))  # noqa: NAR001
+    config.eval_probe = lambda *args: seeds.append(("eval", args[6]))  # noqa: NAR001
+    batches = [(torch.randn(4, 2), torch.randn(4, 1))]  # noqa: NAR001
+    fit(
+        state=state,
+        epoch_spec=config,
+        train_loader=batches,
+        val_loader=batches,
+        num_epochs=1,
+        val_epoch_list=[1],
+        train_seed=11,
+        val_seed=22,
+        test_seed=33,
+        history_path=tmp_path / "history.json",
+    )
+    assert seeds == [("train", None), ("eval", 22)]
+
+
+def test_fit_records_all_three_seeds_in_the_history_meta(tmp_path):
+    state, config = make_state_and_config()
+    batches = [(torch.randn(4, 2), torch.randn(4, 1))]  # noqa: NAR001
+    history_path = tmp_path / "history.json"
+    fit(
+        state=state,
+        epoch_spec=config,
+        train_loader=batches,
+        val_loader=batches,
+        num_epochs=1,
+        val_epoch_list=[1],
+        train_seed=5,
+        val_seed=VAL_SEED,
+        test_seed=TEST_SEED,
+        history_path=history_path,
+    )
+
+    with open(file=history_path) as history_file:
+        data = json.load(fp=history_file)
+
+    assert data["meta"]["seeds"] == {"train": 5, "val": VAL_SEED, "test": TEST_SEED}
 
 
 def test_save_and_load_roundtrip(tmp_path):
@@ -188,6 +299,24 @@ def test_save_history_includes_train_state_meta(tmp_path):
     assert "train_state" in data["meta"]
     assert "train_config" in data["meta"]
     assert data["meta"]["train_state"]["model"] == "Linear"
+
+
+def test_save_history_records_model_shape(tmp_path):
+    state, config = make_state_and_config()
+    history_path = tmp_path / "history.json"
+    save_history(
+        history=[],
+        history_path=history_path,
+        train_state=state,
+        epoch_spec=config,
+    )
+
+    with open(file=history_path) as history_file:
+        data = json.load(fp=history_file)
+
+    train_state_meta = data["meta"]["train_state"]
+    assert train_state_meta["parameter_shapes"] == {"weight": [1, 2], "bias": [1]}
+    assert train_state_meta["num_parameters"] == 3
 
 
 def test_serialize_epoch_record_flattens_and_drops_unset_fields():

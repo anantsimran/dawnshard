@@ -19,18 +19,14 @@ ______________________________________________________________________
 
 ## Why the name
 
-In Brandon Sanderson's Cosmere, a **Dawnshard** is one of the ancient Commands
-that predate creation itself — a fragment of Adonalsium, the god whose power
+In Brandon Sanderson's Cosmere, a **Dawnshard** is one of the ancient Commands: a fragment of Adonalsium, the god whose power
 shattered into the Shards that now shape every world. Dawnshards are not
-weapons or artifacts; they are *access*. A mortal who carries one holds a
-sliver of divine creative force — the ability to reshape reality at a
-fundamental level.
+weapons or artifacts; they are *access*.
 
 Deep learning is the same idea, expressed in math. A neural network is a mortal
-tool for accessing something that otherwise looks god-like: the ability to
+tool for accessing something that looks god-like and magical: the ability to
 compress, generalize, and understand patterns at scales no human could process
-unaided. The library's name is a reminder that the real goal isn't to run
-training loops — it's to build the infrastructure that lets humans reach for
+unaided. The library's name is a reminder to build the infrastructure that lets humans reach for
 that kind of power responsibly.
 
 ______________________________________________________________________
@@ -60,16 +56,20 @@ history = fit(
     val_loader=val_loader,
     num_epochs=15,
     val_epoch_list=[5, 10, 15],
+    train_seed=random.getrandbits(32),
+    val_seed=VAL_SEED,
+    test_seed=TEST_SEED,
 )
 ```
 
 Three objects, three jobs:
 
-- `TrainState` is what training changes: the model, the optimizer, the loss, and an
-  optional scheduler.
+- `TrainState` is the state: the model, the optimizer, the loss, and an optional
+  scheduler.
 - `EpochSpec` is the policy: which device, how to score a batch, what to watch.
-- `fit` is a function over the two. It returns one `EpochRecord` per epoch and writes
-  a history file with the git commit and the machine's CPU, RAM, and GPU usage.
+- `fit` is the mechanism, a function over the two. It returns one `EpochRecord` per
+  epoch and writes a history file with the git commit and the machine's CPU, RAM, and
+  GPU usage.
 
 That is the entire API. The rest of this page explains why it is built this way.
 
@@ -87,7 +87,8 @@ hides in `self`, and everything the loop mutates is passed in and handed back. F
 even calls its struct `TrainState`.
 
 Dawnshard applies all three to a PyTorch training loop, and every component maps to
-exactly one of them.
+exactly one of them. The intro's configuration, state, and computation are these three
+: policy, state, and mechanism.
 
 ### State: `TrainState`
 
@@ -103,6 +104,42 @@ batch and reduce an epoch, and two optional probes. The loop reads it and never
 writes to it. Swap `ClassificationMetrics` for `Metrics` and the same loop trains a
 regressor. Set `train_probe` and the same loop dumps gradient norms. Nothing in
 `EpochSpec` knows which model it will drive.
+
+### Mechanism: the functions
+
+Defined in [train_loop.py](app/src/training/train/train_loop.py). Every step has the
+same signature:
+
+```python
+Batch = tuple[Tensor, Tensor]
+StepFn = Callable[["TrainState", "EpochSpec", Batch, int, int, Optional[int]], "Metrics"]
+```
+
+state in, policy in, data in, metrics out. The trailing ints are the epoch, the
+batch's index, and the seed of the pass, passed through for probes: `val_seed` on a
+validation pass, None on a training pass.
+
+`train_step` and `eval_step` are the two `StepFn`s. `run_epoch` walks a loader with
+whichever one it is handed, `fit` runs the epochs and writes the history, and
+`profiled_fit` does the same with a profiler on the epochs you pick. None of them keeps
+anything between calls, and the only argument they mutate is the `TrainState`.
+
+### What that buys you
+
+- **One loop for train and eval.** `run_epoch` takes the step as an argument, so
+  `fit` hands it `train_step` for training and `eval_step` for validation. The same
+  loop body switches the model's mode, accumulates, and reduces for both.
+- **Tests need no `DataLoader`.** `run_epoch` only iterates its loader, so
+  [test_train_loop.py](app/tests/test_train_loop.py) passes it a plain list of
+  `(input, target)` tuples.
+- **No `self` to grep.** A step reads its arguments and nothing else. To see what it
+  depends on, read its signature.
+- **Every piece is replaceable alone.** The MNIST CNN in
+  [mnist.py](app/src/training/model/mnist.py) and the AG News transformer in
+  [ag_news_classifier.py](app/src/training/model/ag_news_classifier.py) call the same
+  `fit`. What changes between them is what goes in: the model, the metrics, a probe,
+  and the data. `profiled_fit` changed the mechanism instead, reusing `train_step` and
+  `eval_step` untouched.
 
 ______________________________________________________________________
 
@@ -131,6 +168,10 @@ norms, activations for a fixed input: same signature, same slot on `EpochSpec`.
 
 - Need to resume? `save_state` and `load`, called where you decide.
 - What happened in your run? The history file every run writes on its own.
+- Who controls randomness? `train_seed`, seeded once in `main` before the model is
+  built and once more by `fit`; the global RNG does the rest. Eval randomness comes from
+  `VAL_SEED` and `TEST_SEED` in
+  [constants.py](app/src/training/constants.py).
 
 ### No hidden complexity
 
@@ -147,29 +188,55 @@ done that way. Here is what that looks like.
 
 ### The layout enforces the boundaries
 
-`app/src/training/` has one package per concern, and dependencies point downward,
-never sideways.
+The same separation holds one level up. `app/src/training/` has one package per
+concern, and imports point downward.
 
 | Package | Owns |
 |---|---|
-| `train/` | the loop: `TrainState`, `EpochSpec`, the step functions, `fit`, checkpoints, history |
+| `train/` | the loop: `TrainState`, `EpochSpec`, the step functions, `fit`, checkpoints, history and its serialization |
 | `metrics/` | the `Metrics` subclasses and their three functions |
 | `transformer/` | attention, the encoder block, masks, probes, axis names |
 | `common/` | the BPE tokenizer and the indexed max-heap it trains with |
 | `dataload/` | the dataset cache and the AG News pipeline |
 | `model/` | the MNIST classifiers and the AG News classifier |
 | `viz/` | every plot |
-| `utils/` | the git commit and state serialization |
+| `analytics/` | printed dataset statistics |
+| `utils/` | the git commit, `log_elapsed` step timing |
 
 Four rules fall out of that layout:
 
-- `train/` never imports `transformer/`, and `transformer/` never imports `train/`.
-  The only modules that import both are the models.
+- `train/` never imports `transformer/`, and `transformer/` never imports `train/`:
+  the loop doesn't know which model it drives, and attention doesn't know a loop
+  exists. The only modules that import both are the models.
 - Paths live in one `constants.py`. Device selection lives in one `setup.py`.
 - Everything a run produces lands in `app/history/` or `app/datasets/`, both
   gitignored.
 - Tests live in `app/tests/`, one file per module. The tests for `mask.py` are in
   `test_mask.py` and nowhere else.
+
+The [interactive code graph](graphify-out/graph.html) makes those boundaries
+visible. Its busiest connections run through `TrainState`, `EpochSpec`, and `fit`:
+models and batches meet the loop through state, while scoring functions arrive
+through policy. The tokenizer and attention code feed models without making the
+training loop depend on either one.
+
+```mermaid
+flowchart LR
+  common["common: BPE"] --> data["dataload: batches"]
+  data --> loop["fit / run_epoch"]
+  transformer["transformer: attention + masks"] --> model["model: nn.Module"]
+  model --> state["TrainState"]
+  state --> loop
+  metrics["metrics: scoring functions"] --> policy["EpochSpec"]
+  policy --> loop
+  loop --> history["history JSON"]
+  history --> viz["viz: plots"]
+```
+
+Arrows show how pieces feed a run, not Python import direction. The
+[graph report](graphify-out/GRAPH_REPORT.md) and [source graph](graphify-out/graph.json)
+provide the detailed relationships; Graphify marks inferred connections separately
+from relationships found directly in source.
 
 ### Every rule has a tool behind it
 
@@ -178,9 +245,11 @@ Four rules fall out of that layout:
 | Every command runs through `uv run`. No bare `python`, no `pip`, no `sys.path` edits. | [.env](.env) sets `PYTHONPATH=app/src`, the [Dockerfile](Dockerfile) sets the same `UV_ENV_FILE`, and both run the same `uv sync --frozen` against the same lockfile. Imports resolve identically on a laptop and in a container. |
 | Every workflow is a Make target. | The [Makefile](Makefile). Nobody remembers flags, and nobody's local variation drifts. |
 | Every function call uses keyword arguments. | [check_named_args.py](scripts/check_named_args.py), an AST linter that fails on any positional argument. `# noqa: NAR001` is the escape for C builtins and `nn.Module.__call__`, where keywords don't exist. |
+| Every import between packages points downward. | [test_layout.py](app/tests/test_layout.py) lists which packages each package may import, and fails on any import outside that list, type-only imports included. It also fails if the list has a cycle, so "downward" can't quietly turn into a loop. The pre-PR hook runs it with the rest of the suite. |
 | Every function has a docstring. | [check_docstrings.py](scripts/check_docstrings.py), installed as a git pre-commit hook. Tests are exempt; nothing else is. |
 | Every tensor has a declared shape. | `jaxtyping` annotations enforced at call time by `beartype` on every `forward` and every transformer function. Shape strings come from one set of axis names in [constants.py](app/src/training/transformer/constants.py), so `B`, `L`, `d_model`, `h`, and `d_k` mean the same thing everywhere. A mismatch raises at the call that made it. |
 | Every run is recorded. | `fit` writes a history file with the git commit, the optimizer's hyperparameters, and per-epoch resource usage. A result you can't trace to a commit doesn't exist here. |
+| Every code commit refreshes the code graph. | `make install-hooks` installs Graphify's post-commit and post-checkout hooks alongside the versioned pre-commit check. The graph remains a navigable snapshot of the code. |
 | Every PR passes the same gate. | `make precheck` runs pyright, ruff, and mdformat. A pre-PR hook ([check_tests_before_pr.py](.claude/hooks/check_tests_before_pr.py)) refuses to open the PR until the named-argument check and the tests pass, and until the README changed whenever `app/src/` did. |
 
 ______________________________________________________________________
@@ -207,8 +276,9 @@ Three functions build it:
    the top level and dropping anything unset.
 1. When `fit` returns, `save_history` writes the records to
    `app/history/<run-uuid>.json` under a `meta` block with the git commit, a summary
-   of the `TrainState` (type names and the optimizer's parameter groups, never
-   weights), and the device.
+   of the `TrainState` (type names, the model's parameter count and the shape of
+   every named parameter, and the optimizer's parameter groups, never weights), the
+   device, and the run's three seeds.
 
 This is the run the screenshot below comes from, trimmed to its first epoch and
 rounded:
@@ -223,7 +293,8 @@ rounded:
       "criterion": "CrossEntropyLoss",
       "scheduler": null
     },
-    "train_config": {"device": "mps"}
+    "train_config": {"device": "mps"},
+    "seeds": {"train": 2847715383, "val": 1, "test": 2}
   },
   "history": [
     {
@@ -288,14 +359,16 @@ ______________________________________________________________________
 | Part | What it is | Where |
 |---|---|---|
 | Training loop | `fit`, `profiled_fit`, `run_epoch`, `train_step`, `eval_step`; checkpoints, probes, and a history file per run | [train/](app/src/training/train/) |
-| Metrics | loss-only, and classification with accuracy and macro-averaged precision and recall, each as three functions the loop injects | [metrics/](app/src/training/metrics/) |
-| Attention | scaled dot-product attention, multi-head self-attention with optional QK norm, a pre-norm encoder block, padding and causal masks; design notes and axis names in the [transformer README](app/src/training/transformer/README.md) | [transformer/](app/src/training/transformer/) |
+| Metrics | loss-only; classification with accuracy and macro-averaged precision and recall; masked-token accuracy and perplexity for per-position targets; each as three functions the loop injects | [metrics/](app/src/training/metrics/) |
+| Attention | scaled dot-product attention, multi-head self-attention with optional QK norm, fixed sinusoidal position encodings, a pre-norm encoder block, padding and causal masks; design notes and axis names in the [transformer README](app/src/training/transformer/README.md) | [transformer/](app/src/training/transformer/) |
 | Tokenizer | byte-level BPE, written from scratch, with an indexed max-heap so each merge updates pair counts in O(log n) | [common/](app/src/training/common/) |
-| Data | MNIST through torchvision; AG News sampled, tokenized, and cached | [dataload/](app/src/training/dataload/), [mnist.py](app/src/training/model/mnist.py) |
+| Data | MNIST through torchvision; AG News sampled, tokenized, and cached; how a `DataLoader` is built in the [dataload README](app/src/training/dataload/README.md) | [dataload/](app/src/training/dataload/), [mnist.py](app/src/training/model/mnist.py) |
 | Models | three MNIST classifiers (two MLPs and a CNN) and a transformer classifier for AG News | [model/](app/src/training/model/) |
 | Visualization | a run's metrics, two runs side by side, a model's autograd graph, attention heatmaps, BPE sequence length against merges | [viz/](app/src/training/viz/) |
+| Analytics | BPE length stats (mean, min, max, percentiles) for each Multi30k EN split | [analytics/](app/src/training/analytics/) |
+| Code graph | an interactive map of source symbols, documentation concepts, and their connections | [graphify-out/graph.html](graphify-out/graph.html) |
 | Tests | a pytest suite; `attention` is checked against `torch.nn.functional.scaled_dot_product_attention` | [tests/](app/tests/) |
-| Tutorials | a learning track from tensors to attention masks, published as a website | [tutorials/](tutorials/) |
+| Tutorials | theory and revision notes from tensors to attention masks, published as a website | [tutorials/](tutorials/) |
 
 Logs go through loguru, Weights & Biases is optional, and everything runs with `uv`
 locally or in Docker.
@@ -312,8 +385,11 @@ batches are `(input, target)` tuples.
 ### Train and validate
 
 ```python
+import random
+
 import torch
 from torch import nn
+from training.constants import TEST_SEED, VAL_SEED
 from training.metrics.classification_metrics import (
     ClassificationMetrics,
     accumulate_metrics,
@@ -340,6 +416,135 @@ can choose with `history_path=`. [Debuggability](#debuggability) shows what the 
 holds and how to plot it. To use a learning-rate scheduler, pass `scheduler=` to
 `TrainState`. For a model that doesn't classify, import the same three functions from
 `training.metrics.loss_only_metrics` and set `metrics_type=Metrics`.
+
+### Seed a run
+
+```python
+import random
+
+from training.constants import TEST_SEED, VAL_SEED
+
+train_seed = random.getrandbits(32)
+torch.manual_seed(seed=train_seed)  # weight init, which fit is too late to cover
+model = MyModel()
+...
+history = fit(
+    state=train_state,
+    epoch_spec=epoch_spec,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    num_epochs=15,
+    val_epoch_list=[5, 10, 15],
+    train_seed=train_seed,
+    val_seed=VAL_SEED,
+    test_seed=TEST_SEED,
+)
+```
+
+All three seeds are required, and none of them defaults: a run that cannot say how it
+was seeded cannot be repeated, and a default is the easiest way to stop noticing which
+seed a number came from. The train seed is drawn fresh each run so results are not
+read off one lucky draw; the two eval seeds are the fixed constants, so val and test
+numbers stay comparable. Both seeding calls in the diagram below are shown here, and
+that diagram is worth reading before relying on them together.
+
+The three seeds do three different jobs, and the split is the point:
+
+- **`train_seed` owns the global RNG.** `fit` calls `torch.manual_seed` with it once,
+  before the first epoch, so shuffling, dropout, and anything a collate draws repeat
+  across runs. One call covers every device: it seeds CPU, CUDA, MPS, and XPU. Weight
+  init happens before `fit` ever sees the model, so each `main` seeds with the same
+  value just before constructing it. Those two calls are the only `torch.manual_seed`
+  in `app/src`, and together they make a run reproduce end to end — with one wrinkle,
+  below.
+- **The train seed is drawn fresh for every run.** Each `main` sets
+  `train_seed = random.getrandbits(32)` rather than pinning a literal, so no single
+  lucky draw gets trained on forever and a result that only holds for one seed shows
+  itself. Reproducibility does not depend on the seed being fixed, only on its being
+  recorded: `fit` writes it to `meta.seeds`, so any past run can be rerun by passing
+  its seed back.
+- **`val_seed` and `test_seed` are fixed repo-wide**, as `VAL_SEED` and `TEST_SEED` in
+  [constants.py](app/src/training/constants.py), and only `train_seed` varies per run.
+  Eval randomness that changes between runs makes `val_loss` incomparable: with masked
+  language modelling, a drop from 2.31 to 2.29 could be a better model or an easier
+  mask. Fixing the eval seeds takes that term out. The caller passes the constants
+  rather than the signature defaulting to them, so a run states every seed it used.
+- **Only `val_seed` travels.** `fit` hands `train_seed` to nothing but
+  `torch.manual_seed`: a training pass passes `seed=None` to its step and probe, and
+  any randomness they draw comes from the global RNG that seed set. A validation pass
+  gets `val_seed`, threaded by `run_epoch` to the step and on to the probe without
+  reseeding anything, so an eval probe that draws randomness of its own draws the
+  same thing for every model. The train seed makes a run reproducible; the val seed
+  makes two runs comparable. A loader's own randomness stays the loader's job; see
+  [Random collates](app/src/training/dataload/README.md#random-collates-mask-validation-and-test-once).
+
+All three land in the history file's `meta.seeds`, so a run says how to repeat itself.
+
+Seeding is complete now — init, training, validation, and test all have a seed — but
+the global generator does something worth knowing before you read a curve. A seed does
+not name a value, it selects a stream; every draw moves a position along it. Seeding
+twice with the same number does not continue the stream, it returns to position zero:
+
+```
+  main()
+    │  torch.manual_seed(train_seed)
+    ▼
+  ┌─────────────────────┐
+  │ S(train_seed)  n=0  │ ◄─────────────────────────────────┐
+  └──────────┬──────────┘                                   │
+             │  Model()                weight init draws    │
+             ▼                                              │
+  ┌─────────────────────┐                                   │
+  │ S(train_seed)  n=k  │  k is set by the architecture     │
+  └──────────┬──────────┘                                   │
+             │  loaders, tokenizer, anything else random    │
+             ▼                                              │
+  ┌─────────────────────┐                                   │
+  │ S(train_seed)  n=m  │                                   │
+  └──────────┬──────────┘                                   │
+             │  fit() calls torch.manual_seed(train_seed) ──┘
+             │  the stream rewinds; it does not carry on from n=m
+             ▼
+  ┌─────────────────────┐
+  │ S(train_seed)  n=0  │  every epoch's shuffle, dropout, and collate
+  └─────────────────────┘  draws from here on
+```
+
+`S(x)` is the stream seeded with `x`, and `n` is how many draws have been taken from
+it. Three consequences fall out of that back edge:
+
+- **Training draws are a pure function of `train_seed`.** Add a layer, change the
+  vocabulary, load the data differently: init consumes a different number of draws,
+  but `fit` rewinds, so epoch 1 sees the same shuffle order and the same dropout
+  masks as before. Pin the same seed in two runs and they compare two architectures
+  on identical randomness, whatever else moved.
+- **Training replays the draws init just used.** Both start at `n=0` of the same
+  stream, so the numbers that set the weights are the numbers that later mask the
+  activations. It is harmless in practice, but init and training are not independent
+  streams, and anything that assumes they are is wrong here.
+- **Two `fit` calls in one process are not independent.** The second rewinds to `n=0`
+  as well, so it replays the first one's draws exactly. For a genuine repeat, vary
+  `train_seed` rather than calling `fit` twice with the same one.
+
+Workers are covered: a `DataLoader` draws its base seed from this generator, and each
+worker derives its own from that, so the rewind reaches them too. See
+[the dataload README](app/src/training/dataload/README.md#seeding) for what that means
+inside `__getitem__`.
+
+### Repeat a past run
+
+```bash
+jq '.meta.seeds' app/history/<run-uuid>.json
+# { "train": 2847715383, "val": 1, "test": 2 }
+```
+
+```python
+train_seed = 2847715383  # from that run's meta.seeds, in place of a fresh draw
+```
+
+Everything `fit` drives repeats: the shuffle order, the dropout masks, and whatever a
+collate draws. Weight init repeats too, as long as that seed reaches
+`torch.manual_seed` before the model is built.
 
 ### Add a metric
 
@@ -389,6 +594,13 @@ class is its own constructor and there is no init function.
 [classification_metrics.py](app/src/training/metrics/classification_metrics.py) do,
 so a smaller last batch doesn't skew the epoch loss.
 
+[masked_token_metrics.py](app/src/training/metrics/masked_token_metrics.py) is for
+per-position targets where only some positions are scored and the rest hold
+`CROSS_ENTROPY_IGNORE_INDEX`. The batch loss is then a mean over scored positions, not
+over rows, so it weights by a `masked` field it counts itself and leaves `count` to the
+step. The epoch loss comes out as one mean over every scored position, and
+perplexity is its exponential.
+
 `EpochSpec` is generic over its metrics type, written `EpochSpec[M: Metrics]`.
 Callable parameters are contravariant, so a function that only accepts `MAEMetrics`
 is not a `Callable[[Metrics], ...]`. Without the type parameter, pyright rejects every
@@ -400,6 +612,7 @@ This probe logs the gradient norm on every `every_n`-th training batch:
 
 ```python
 from functools import partial
+from typing import Optional
 
 from loguru import logger
 
@@ -411,6 +624,7 @@ def log_grad_norm(
     predicted: Tensor,
     epoch: int,
     batch_index: int,
+    seed: Optional[int],
     *,
     every_n: int,
 ) -> None:
@@ -434,8 +648,9 @@ epoch_spec = EpochSpec(
 `eval_step` calls `eval_probe` after the forward pass. `train_step` calls
 `train_probe` after the optimizer step, while the batch's gradients are still on the
 parameters, which is what `log_grad_norm` reads. Both call it as
-`probe(model, input, target, predicted, epoch, batch_index)` with a detached
-`predicted`, so a probe never costs an extra forward pass.
+`probe(model, input, target, predicted, epoch, batch_index, seed)` with a detached
+`predicted`, so a probe never costs an extra forward pass. `seed` is `val_seed` on a
+validation pass and `None` on a training pass; [Seed a run](#seed-a-run) says why.
 
 A probe keeps no state between calls. It gets `epoch` and `batch_index` every time, so
 one that only wants the first batch checks `batch_index == 0`. Settings such as
@@ -465,6 +680,9 @@ profiled_fit(
     num_epochs=5,
     val_epoch_list=[5],
     profile_epoch_list=[2],
+    train_seed=random.getrandbits(32),
+    val_seed=VAL_SEED,
+    test_seed=TEST_SEED,
 )
 ```
 
@@ -506,7 +724,9 @@ ______________________________________________________________________
 ## The BPE tokenizer
 
 The tokenizer is byte-pair encoding, written from scratch. It works on UTF-8 bytes, so
-any text can be encoded without an unknown token.
+any text can be encoded without an unknown token. It splits text with GPT-4's
+pre-tokenization pattern first, and merges never cross those chunks. Usage lives in
+[common/README.md](app/src/training/common/README.md).
 
 ```python
 from common import bpe
@@ -516,7 +736,7 @@ ids = bpe.encode(text="Stocks rally as tech earnings beat forecasts", merges=mer
 ```
 
 On the AG News train split, 2,000 merges bring the average sample down from 236 bytes
-to 77 tokens.
+to 79 tokens.
 
 ______________________________________________________________________
 
@@ -571,6 +791,9 @@ uv run python app/src/training/viz/compare_runs.py app/history/<run-a>.json app/
 # Plot mean BPE tokens per sample against the number of merges (AG News train)
 uv run python app/src/training/viz/bpe_seq_len.py
 
+# Print BPE length stats (mean, min, max, percentiles) for each Multi30k EN split
+uv run python app/src/training/analytics/multi30ken_bpe_len.py
+
 # Run the test suite
 make test
 ```
@@ -610,6 +833,26 @@ visualize_model(model=ConvolutionalMNISTClassifier(), input_shape=(1, 1, 28, 28)
 
 For a quick layer-by-layer parameter table, `torchinfo.summary(...)` is the
 faster check. See the module docstring for both.
+
+### Explore the codebase graph
+
+Open the [interactive code graph](graphify-out/graph.html) to search symbols and
+follow connections across packages. The [report](graphify-out/GRAPH_REPORT.md)
+highlights central abstractions and records where relationships were inferred.
+The committed snapshot is available immediately after cloning. To refresh it,
+install the CLI and the repo's hooks:
+
+```bash
+uv tool install graphifyy
+graphify install --platform codex --project
+make install-hooks
+```
+
+The hooks update code relationships after commits and branch changes. Run
+`graphify update .` before staging if the graph should be in the same commit as
+the code change. Run `/graphify . --update` in Codex after changing documentation.
+Only `graph.html`, `graph.json`, and `GRAPH_REPORT.md` belong in Git; the Codex
+skill copy, hook launchers, caches, and local scan state are ignored.
 
 ### Visualizing attention
 
@@ -663,7 +906,7 @@ you never have to remember the underlying flags:
 | `make precheck` | `pyright` + `ruff check --fix` + `ruff format` + `mdformat`. Run it before every PR |
 | `make check-named-args` | Enforce the keyword-argument rule (see [CLAUDE.md](CLAUDE.md)) |
 | `make check-docstrings` | Enforce the docstring rule (see [CLAUDE.md](CLAUDE.md)) |
-| `make install-hooks` | Run the docstring check as a git pre-commit hook (once after cloning) |
+| `make install-hooks` | Install the docstring pre-commit check and Graphify's graph refresh hooks (once after cloning) |
 | `make docker-build*` / `make docker-run*` | Build and run the Docker images (above) |
 | `make nb-to-py NB=…` / `make py-to-nb PY=…` | Convert between notebooks and scripts |
 
@@ -671,10 +914,11 @@ ______________________________________________________________________
 
 ## Tutorials
 
-The [tutorials/](tutorials/) directory is a learning track that builds the same
-concepts the library uses, from the ground up. Its
-[index](tutorials/index.md) lists every page and maps specific questions to the
-section that answers them.
+The [tutorials/](tutorials/) directory explains the theory behind the code as
+revision notes. Its [guide](tutorials/index.md) offers question-led revision
+routes, a page list, and a map from specific questions to the sections that
+answer them. Pages begin with the central idea and end with a quick recall check;
+the longer derivations remain available when you need them.
 
 - [tutorials/pytorch/](tutorials/pytorch/) — a PyTorch series: tensors, shapes and
   broadcasting, autograd and gradient descent, `nn.Module` and multi-layer
@@ -687,7 +931,7 @@ section that answers them.
   from Parr & Howard with PyTorch checks.
 - [tutorials/vision/](tutorials/vision/) — convolutional networks for MNIST.
 - [tutorials/transformer/](tutorials/transformer/) — attention masks and
-  cross-attention, and pre-norm vs post-norm.
+  cross-attention, pre-norm vs post-norm, and compute and memory planning.
 
 The tutorials and this README are also published as a website at
 [anantsimran.github.io/dawnshard](https://anantsimran.github.io/dawnshard/), rebuilt
@@ -718,34 +962,45 @@ dawnshard/
 │   │       │   ├── model.py          # TrainState, EpochSpec, Metrics, Probe, EpochRecord, SystemMetrics
 │   │       │   ├── train_loop.py     # fit/profiled_fit/run_epoch/step
 │   │       │   ├── environment.py    # per-epoch CPU/RAM/GPU snapshot
+│   │       │   ├── serialization.py  # TrainState, EpochSpec, EpochRecord → history-JSON dicts
 │   │       │   └── utils.py          # save_state, save_history
 │   │       ├── metrics/              # Metrics subclasses + calculate/accumulate/reduce functions
 │   │       ├── transformer/          # attention built from scratch
 │   │       │   ├── README.md         # attention design choices and axis names
 │   │       │   ├── functions.py      # scaled dot-product attention
-│   │       │   ├── modules.py        # MultiHeadAttentionLayer (optional QK norm), EncoderBlock
+│   │       │   ├── modules.py        # SinusoidalEmbedding, MultiHeadAttentionLayer (optional QK norm), EncoderBlock
 │   │       │   ├── probes.py         # save_attention_maps: probe that saves attention maps per epoch
 │   │       │   ├── mask.py           # padding and causal keep masks, pad-masked mean pool
 │   │       │   └── constants.py      # axis names for shape strings: B, L, D_MODEL, H, D_K
 │   │       ├── common/
-│   │       │   ├── bpe.py            # byte-level BPE: train, encode, decode
+│   │       │   ├── README.md         # BPE usage: batching, saving, translation, chunking
+│   │       │   ├── bpe.py            # byte-level BPE with GPT-4 pre-tokenization
+│   │       │   ├── constants.py      # protected token ids: PAD, MASK, CLS, SEP
 │   │       │   └── priority_queue.py # indexed max-heap with O(log n) priority updates
 │   │       ├── dataload/             # dataset cache location + AG News pipeline
+│   │       │   ├── README.md         # DataLoader internals: collate, shuffling, seeding, chunks
+│   │       │   ├── ag_news.py        # AG News: sample, tokenize, cache, one DataLoader per split
+│   │       │   └── constants.py      # DATASETS_CACHE_DIR
 │   │       ├── model/                # MNIST classifiers; AG News classifier (in progress)
 │   │       ├── viz/                  # metrics, run comparison, model graph, attention, BPE length
-│   │       ├── utils/                # git commit + state/config serialization
+│   │       ├── analytics/            # printed stats: Multi30k EN BPE length percentiles
+│   │       ├── utils/                # git commit, log_elapsed timing
 │   │       ├── setup.py              # device selection + wandb init
 │   │       └── constants.py          # repo-root-relative paths (CHECKPOINTS_PATH, HISTORY_PATH, TRACES_PATH, ATTENTION_PROBES_PATH)
-│   ├── tests/                    # pytest suite
+│   ├── tests/                    # pytest suite; test_layout.py checks imports between packages
 │   ├── history/                  # per-run history JSON; traces/ and attention_probes/ (gitignored)
 │   └── datasets/                 # downloaded dataset cache (gitignored)
-├── tutorials/                    # learning track: pytorch/, training/, math/, vision/, transformer/; index.md
+├── tutorials/                    # theory and revision: pytorch/, training/, math/, vision/, transformer/; index.md
 ├── pages/                        # MkDocs hooks and theme overrides for the website
 ├── scripts/
 │   ├── check_named_args.py       # keyword-argument linter
 │   └── check_docstrings.py       # docstring-presence linter
 ├── .claude/hooks/                # pre-PR gate: named args, tests, README touched when source changed
 ├── .githooks/pre-commit          # runs the docstring check (make install-hooks)
+├── AGENTS.md                     # Codex instructions for using the graph
+├── graphify-out/                # shareable graph, interactive viewer, and report
+├── .graphifyignore              # keeps Graphify's own skill files out of the graph
+├── .gitattributes               # merge driver for the shared graph JSON
 ├── .github/workflows/pages.yml   # builds and deploys the website on push to main
 ├── mkdocs.yml                    # website config and navigation
 ├── Dockerfile                    # uv-based prod/dev image

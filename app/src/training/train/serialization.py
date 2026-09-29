@@ -8,13 +8,25 @@ if TYPE_CHECKING:
 
 
 def serialize_train_state(state: TrainState) -> dict:
-    """Summarize a TrainState as JSON-serializable metadata (type names only, no weights)."""
+    """Summarize a TrainState as JSON-serializable metadata, never weights.
+
+    The model is recorded as its class name, its parameter count, and the shape of
+    every named parameter, so two runs can be told apart by architecture even when
+    they share a class.
+    """
     optimizer_param_groups = [
         {key: value for key, value in group.items() if key != "params"}
         for group in state.optimizer.state_dict()["param_groups"]
     ]
     return {
         "model": type(state.model).__name__,  # noqa: NAR001
+        "num_parameters": sum(  # noqa: NAR001
+            parameter.numel() for parameter in state.model.parameters()
+        ),
+        "parameter_shapes": {
+            name: list(parameter.shape)  # noqa: NAR001
+            for name, parameter in state.model.named_parameters()
+        },
         "optimizer": {
             "type": type(state.optimizer).__name__,  # noqa: NAR001
             "param_groups": optimizer_param_groups,

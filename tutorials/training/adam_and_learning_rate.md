@@ -1,6 +1,10 @@
 # Adam and the Learning Rate
 
-[training_loop.md](training_loop.md) gave Adam in four lines, and [optimizer_and_scheduler.md](optimizer_and_scheduler.md) showed where its state lives. This file is about the numbers: what the learning rate physically controls, what Adam does to it, and how to pick one without guessing.
+**Revision question:** Why can a learning rate that works for SGD fail for Adam, and why does Adam still need a learning-rate schedule?
+
+Think of the gradient as a **local direction**, the learning rate as the **overall step scale**, and Adam's moments as a **per-coordinate adjustment** based on recent gradients. Adam changes how the gradient becomes an update; it does not choose a safe global scale for every model or training phase.
+
+**Reading map:** [The one-dimensional loss](#the-1-d-picture) makes large and small steps visible. [Momentum](#momentum-remembering-the-direction) and [Adam's update](#adam-line-by-line) explain how history changes an update. [AdamW](#adam-vs-adamw-where-weight-decay-goes), [learning-rate selection](#picking-a-learning-rate), and [warmup and decay](#warmup-and-decay) are reference sections for diagnosing a run. See [optimizer and scheduler](optimizer_and_scheduler.md) for where these values live in PyTorch.
 
 Every output shown below was produced by running the code with `torch==2.12.1`.
 
@@ -32,7 +36,7 @@ Every step multiplies `w` by the same factor `(1 − lr·a)`. The whole story is
 | 0.4 | −0.6 | −0.6, 0.36, −0.216, 0.130 | overshoots, flips sign, still converges |
 | 0.6 | −1.4 | −1.4, 1.96, −2.744, 3.842 | overshoots further each time: **diverges** |
 
-So there is a hard ceiling: **gradient descent on this parabola converges only if `lr < 2/a`**. Steeper curvature means a lower ceiling.
+So there is a hard ceiling: **gradient descent on this parabola converges when `0 < lr < 2/a`**. Steeper curvature means a lower ceiling.
 
 ### Why one global `lr` is a compromise
 
@@ -44,7 +48,7 @@ That mismatch is the problem both momentum and Adam attack.
 
 | What the loss curve does | Likely cause |
 |---|---|
-| `nan` or `inf` within the first few hundred steps | `lr` far too high |
+| `nan` or `inf` within the first few hundred steps | `lr` may be too high; also check invalid operations and masking |
 | Drops, then jumps up and oscillates at a high value | `lr` too high |
 | Drops fast, then plateaus above where a smaller `lr` ends up | `lr` too high to settle; decay it (see [Schedules](#warmup-and-decay)) |
 | Decreases in a slow, straight, boring line | `lr` too low |
@@ -64,7 +68,7 @@ w   ← w − lr · buf
 - In a direction where the gradient keeps the same sign, `buf` grows to `grad / (1 − μ)`. With `μ = 0.9` that's a **10× longer step**, for free.
 - In a direction where the gradient flips sign every step (the oscillating, steep direction), the terms cancel and `buf` stays small.
 
-So momentum speeds up the flat directions and damps the steep ones. The catch: it effectively multiplies your learning rate by `1/(1 − μ)`. Changing `momentum` from 0.9 to 0.99 is a 10× larger effective step, so the `lr` that worked before may now diverge.
+In this constant-gradient picture, momentum speeds up the persistent direction and cancels alternating directions. The steady-state buffer scales as `1/(1 − μ)`: changing `momentum` from 0.9 to 0.99 makes that scale 10× larger. Real gradients change over time, but the `lr` that worked before may no longer be safe.
 
 ______________________________________________________________________
 
@@ -85,23 +89,25 @@ These live in `optimizer.state[param]` under the keys `step`, `exp_avg` (`m`), a
 
 ### The key ratio: `m̂ / √v̂`
 
-Read the last line as `w ← w − lr · (a number that is usually between −1 and 1)`.
+Read the last line as `w ← w − lr · (a normalized direction)`. That direction is often near `−1` to `1`, but it is not strictly bounded there.
 
 - **Consistent gradient** (the same value `g` every step): `m̂ → g` and `√v̂ → |g|`, so the ratio is `±1`. The parameter moves by exactly `lr`.
-- **Pure noise** (the gradient's sign keeps flipping, mean ≈ 0): `m̂` averages toward 0 but `√v̂` stays at the typical magnitude, so the ratio is small. The parameter barely moves.
+- **Alternating gradients** (the sign keeps flipping, mean ≈ 0): `m̂` tends toward 0 but `√v̂` stays at the typical magnitude, so the systematic update is small. Individual noisy steps can still move the parameter.
 
-So **Adam's step is roughly `lr` times the gradient's signal-to-noise ratio.** That has two consequences you'll use constantly.
+**Follow two gradients:** start with zero moments and `lr=0.01`. A first gradient of `+2` gives bias-corrected `m̂=2`, `√v̂=2`, and an update of about `−0.01`. If the next gradient is `−2`, the first moment nearly cancels (`m̂≈−0.105`) while `√v̂` remains `2`; the update is only about `+0.00053`. Adam remembers the disagreement between those directions.
 
-**1. `lr` is measured in parameter units, not gradient units.** With SGD, the step is `lr · grad`, so the right `lr` depends on how big your gradients happen to be. With Adam, `lr = 1e-3` means "move each weight by about 0.001 per step, at most." That's why the same default works across very different models.
+So **Adam's step is roughly `lr` times the gradient's persistent direction relative to its recent magnitude.** That has two consequences you'll use constantly.
 
-**2. Adam doesn't care how the loss is scaled** (as long as gradients stay well above `ε`). Multiply the loss by 100: `grad`, `m`, and `√v` all scale by 100, and the ratio is unchanged. On a small linear regression, 50 steps:
+**1. `lr` scales a normalized update.** With SGD, the step is `lr · grad`, so the right `lr` depends strongly on gradient magnitude. With Adam, a consistent gradient often gives a coordinate update near `lr`, regardless of that gradient's size. Transient updates can exceed `lr`, so it is a scale, not a cap.
+
+**2. Adam is approximately insensitive to scaling the loss** when `ε` is negligible, weight decay is absent, and numeric precision is adequate. Multiply the loss by 100: `grad`, `m`, and `√v` all scale by 100, and the ratio stays nearly unchanged. On a small linear regression, 50 steps:
 
 | | loss × 1 | loss × 100 |
 |---|---|---|
 | Adam, `lr=1e-2` | final weights match to 4e-8 | ← same |
 | SGD, `lr=1e-2` | converging (first weights `≈ [0.42, −1.07]`) | diverged (`≈ 3.8e8`) |
 
-The "usually between −1 and 1" is a rule of thumb, not a guarantee. The paper's worst case, a sudden large gradient after a long run of tiny ones, allows a step of up to `lr · (1 − β1)/√(1 − β2)`, which is about `3.2 · lr` with default betas.
+A sudden large gradient after a long run of tiny ones illustrates why `lr` is not a hard cap: the ratio can reach about `(1 − β1)/√(1 − β2)`, or `3.2` with default betas.
 
 ### Why bias correction exists
 
@@ -119,7 +125,7 @@ w = torch.nn.Parameter(torch.tensor([1.0, -2.0, 3.0]))
 opt = torch.optim.Adam(params=[w], lr=0.01)
 w.grad = torch.tensor([0.5, -300.0, 1e-3])   # wildly different magnitudes
 opt.step()
-# every coordinate moved by exactly 0.01, against the sign of its gradient
+# every coordinate moves approximately 0.01, against the sign of its gradient
 ```
 
 The correction fades as `β^t → 0`, but slowly for `β2 = 0.999`: `1 − 0.999^1000 ≈ 0.63`, so it's still doing real work after a thousand steps.
@@ -143,7 +149,7 @@ ______________________________________________________________________
 
 Weight decay pulls every weight toward zero a little each step, which discourages the model from relying on a few huge weights. There are two ways to add it, and in Adam they are **not** the same.
 
-**`Adam(weight_decay=λ)`: L2 penalty, coupled.** PyTorch adds `λ·w` to the gradient *before* the moments:
+**`Adam(weight_decay=λ)`: L2 penalty, coupled** with the default `decoupled_weight_decay=False`. PyTorch adds `λ·w` to the gradient *before* the moments:
 
 ```
 grad ← grad + λ·w
@@ -162,7 +168,7 @@ w ← w · (1 − lr·λ)
 ... then the normal Adam update, using the raw grad
 ```
 
-The difference is stark on a single weight `w = 2.0` with zero gradient, `lr = 0.1`, `λ = 0.01`, after one step:
+The difference is stark on a single weight `w = 2.0` with an explicit zero gradient tensor, `lr = 0.1`, `λ = 0.01`, after one step:
 
 | Optimizer | `w` after one step | Why |
 |---|---|---|
@@ -171,7 +177,7 @@ The difference is stark on a single weight `w = 2.0` with zero gradient, `lr = 0
 
 **Use `AdamW` whenever you want weight decay.** Its PyTorch default is `weight_decay=1e-2`, while `Adam`'s is `0`. `Adam(..., decoupled_weight_decay=True)` is the same algorithm as `AdamW`.
 
-Common practice is to **not decay biases and normalization weights** (LayerNorm's `γ`/`β`). They're few, they don't cause overfitting, and pulling LayerNorm's scale toward zero fights the normalization. Use two param groups:
+Common practice is to **not decay biases and normalization weights** (LayerNorm's `γ`/`β`). Their role differs from weight matrices, and pulling LayerNorm's scale toward zero can fight the normalization. Use two param groups:
 
 ```python
 decay, no_decay = [], []
@@ -299,7 +305,7 @@ ______________________________________________________________________
 
 ```python
 optimizer.param_groups[0]["lr"]                   # the current base lr (what a scheduler edits)
-state = optimizer.state[model.fc.weight]          # empty until the first step()
+state = optimizer.state[model.fc.weight]          # buffers populated after the first step()
 state["step"], state["exp_avg"], state["exp_avg_sq"]
 ```
 
@@ -321,14 +327,42 @@ ______________________________________________________________________
 
 | Question | Answer |
 |---|---|
-| What does `lr` mean for Adam? | Roughly the maximum amount each weight moves per step |
+| What does `lr` mean for Adam? | The scale of a normalized update; it is not a strict cap |
 | First thing to try | `AdamW(lr=1e-3)` for small models; `3e-4` + warmup for transformers |
-| Loss is `nan` | Lower `lr` by 10×, add warmup, check for fully masked rows |
+| Loss is `nan` | Check invalid operations and masking, then try a lower `lr` or warmup |
 | Want weight decay | `AdamW`, not `Adam(weight_decay=...)`; skip biases and norms |
-| Changed batch size | Rescale `lr`: √k for Adam, k for SGD |
+| Changed batch size | Recheck `lr`; √k for Adam and k for SGD are starting heuristics |
 | Unsure about `lr` | Run the LR range test, pick ~10× below the minimum |
 | Loss plateaus early | Add decay (cosine), or lower `lr` late in training |
 | No fixed end to training | Noam: linear warmup, then `lr ∝ 1/√step`; step it per batch |
+
+______________________________________________________________________
+
+## Common Confusions
+
+| Easy to mix up | What to remember |
+|---|---|
+| Gradient magnitude versus Adam update size | The first Adam step with a consistent nonzero gradient is near `lr` per coordinate, regardless of raw gradient scale. Later steps depend on moment history. |
+| Bias correction versus warmup | Bias correction removes the zero-initialization bias of the moments; warmup limits the global learning rate while early estimates are still noisy. |
+| L2 decay versus AdamW decay | Coupled L2 enters Adam's moments; AdamW shrinks weights separately from gradient normalization. |
+| A plateau versus overfitting | A high training loss that will not settle may call for decay; rising validation loss while training improves usually points to generalization. |
+
+## Check Your Recall
+
+1. Why does doubling a consistent gradient double an SGD step but often barely change an Adam step?
+1. At the first Adam update, what does bias correction remove—and what does it leave uncertain?
+1. Why does decoupled weight decay behave differently from adding `λ·w` to Adam's gradient?
+
+<details markdown="1">
+<summary>Answers</summary>
+
+1. SGD multiplies the raw gradient by `lr`; Adam divides its smoothed gradient by the square root of smoothed squared gradients, so the common scale mostly cancels when `ε` is negligible.
+1. It removes the systematic shrinkage caused by initializing `m` and `v` at zero. One gradient is still a noisy estimate of what future gradients will look like.
+1. Adding `λ·w` changes Adam's moment estimates and is normalized with the task gradient. AdamW applies a separate weight shrinkage proportional to `lr·λ`.
+
+</details>
+
+**One-minute recap:** For a fixed loss curvature, too large an `lr` overshoots and too small an `lr` crawls. Adam uses gradient history to adjust each coordinate, but its global `lr` still controls overall step scale. Bias correction, warmup, decay, and AdamW solve different problems; choose them by the behavior you need to explain.
 
 ______________________________________________________________________
 

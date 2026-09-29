@@ -13,11 +13,11 @@ from typing import List
 
 import matplotlib.pyplot as plt
 import numpy as np
+from loguru import logger
 from training.common import bpe
 from training.constants import HISTORY_PATH
 from training.dataload.ag_news import _download_csv, _load_merges, _read_raw_rows, _save_merges
 from training.dataload.constants import DATASETS_CACHE_DIR
-from loguru import logger
 
 MIN_MERGES = 50
 MAX_MERGES = 20_000

@@ -1,5 +1,17 @@
 # Shapes and Broadcasting — Q&A
 
+**One rule to carry through the page:** align shapes from the right. Equal sizes match; a size-1 axis can be reused; missing axes act like size 1. When a value was reused in the forward pass, its gradient adds those uses together on the way back.
+
+| If the question is… | Read |
+|---|---|
+| Why `(3,)` differs from `(1,3)` | [shape notation](#q--shape-3-what-does-this-mean) |
+| Whether two shapes combine | [broadcastability](#q-what-does-broadcastable-mean) and [`dim=k`](#q-what-does-dimk-actually-mean) |
+| Whether expansion allocates | [`expand` versus `repeat`](#q-what-is-the-difference-between-expand-and-repeat) |
+| Why attention masks need extra axes | [attention masks](#q-how-does-broadcasting-apply-to-attention-masks) |
+| Why a bias gradient sums over examples | [broadcast gradients](#q-what-happens-to-gradients-when-a-tensor-is-broadcast) |
+
+The sections are independent Q&A references. For a quick revision, follow the shape notation, broadcastability, and broadcast gradients questions in that order.
+
 ______________________________________________________________________
 
 ## Q: `# shape (3,)`. What does this mean?
@@ -123,8 +135,7 @@ row + col
 
 Both get stretched: `row` repeats down and `col` repeats across.
 
-**Nothing is copied in memory.** PyTorch sets the stretched axis's stride to 0, so every
-index along it reads the same memory:
+**The stretched operand is not copied in memory.** PyTorch can set the stretched axis's stride to 0, so every index along it reads the same memory. An arithmetic result such as `row + col` still allocates its output:
 
 ```python
 torch.randn(3, 1).expand(3, 4).stride()   # (1, 0)
@@ -142,6 +153,167 @@ torch.randn(3, 1).expand(3, 4).stride()   # (1, 0)
 
 Row 3 is the one that catches people: `(5,)` doesn't match `(5, 4)` even though both contain 5,
 because alignment starts from the right.
+
+______________________________________________________________________
+
+## Q: What is the difference between `expand` and `repeat`?
+
+Both turn `(3, 1)` into `(3, 4)`. Only one of them allocates.
+
+```python
+t = torch.randn(3, 1)
+
+e = t.expand(3, 4)   # a view: stride (1, 0), still 3 floats of storage
+r = t.repeat(1, 4)   # a copy: stride (4, 1), 12 floats of storage
+
+e.data_ptr() == t.data_ptr()   # True  — same memory
+r.data_ptr() == t.data_ptr()   # False — new memory
+```
+
+**`expand` is what broadcasting does under the hood.** It sets the stretched axis's stride
+to 0, so every index along that axis reads the same element. Writing `a + b` on
+broadcastable shapes performs this expansion for you, which is why you rarely call
+`expand` by hand: you need it only when an op *doesn't* broadcast, such as the index
+argument of `gather`, or `torch.cat`, which requires real sizes in every slot.
+
+### What each one accepts
+
+`expand` stretches size-1 axes and nothing else:
+
+```python
+torch.randn(3, 2).expand(3, 4)
+# RuntimeError: The expanded size of the tensor (4) must match the existing size (2)
+#               at non-singleton dimension 1.
+```
+
+`-1` keeps an axis as it is, and new axes may be added on the left, matching the
+right-alignment rule:
+
+```python
+torch.randn(3, 1).expand(-1, 4).shape      # (3, 4)
+torch.randn(3, 1).expand(5, 3, 4).shape    # (5, 3, 4)
+```
+
+`repeat` tiles the **whole tensor** a given number of times per axis. It is not NumPy's
+`np.repeat`; the element-wise one is `repeat_interleave`:
+
+```python
+v = torch.tensor([1, 2, 3])
+v.repeat(2)              # tensor([1, 2, 3, 1, 2, 3])
+v.repeat_interleave(2)   # tensor([1, 1, 2, 2, 3, 3])
+```
+
+### The two gotchas of the cheap one
+
+**An expanded view aliases.** Every stretched position is the same element, so one
+in-place write lands in all of them, with no error:
+
+```python
+t = torch.zeros(3, 1)
+e = t.expand(3, 4)
+e[0, 0] = 5.0
+e[0]          # tensor([5., 5., 5., 5.])  ← wrote one value, changed four
+```
+
+**An expanded view isn't contiguous.** `view` walks memory in order and refuses;
+`reshape` silently falls back to a copy, which is the allocation you were avoiding:
+
+```python
+e.is_contiguous()   # False
+e.view(12)          # RuntimeError: view size is not compatible with input tensor's
+                    #               size and stride ...
+e.reshape(12)       # works — copies
+```
+
+### Which to reach for
+
+| You want | Use | Because |
+|---|---|---|
+| To line shapes up for an elementwise op | nothing | `+`, `*`, `where` broadcast already |
+| A read-only stretch for an op that won't broadcast | `expand` | zero-copy |
+| To write into the result, or hand it to `view` | `repeat` | you need real, independent elements |
+| Each element duplicated in place (`[1,1,2,2]`) | `repeat_interleave` | `repeat` tiles, it doesn't interleave |
+
+______________________________________________________________________
+
+## Q: Does matmul broadcast the same way?
+
+Almost. `@` splits the shape in two: **the last two slots are the matrix, and everything
+to the left of them is batch and broadcasts by the usual right-to-left rule.**
+
+```python
+A = torch.randn(10, 3, 4)
+B = torch.randn(4, 5)
+(A @ B).shape                                          # (10, 3, 5)
+
+torch.randn(10, 1, 3, 4) @ torch.randn(2, 4, 5)        # (10, 2, 3, 5)
+```
+
+In the second line, `(3, 4) @ (4, 5)` is the matrix part, and the batch parts `(10, 1)`
+and `(2,)` broadcast to `(10, 2)`.
+
+**The inner dimension never broadcasts.** The matrix rule is exact: the `4` in `(3, 4)`
+must equal the `4` in `(4, 5)`. A size-1 inner dim is not stretched to fit.
+
+```python
+torch.randn(10, 3, 4) @ torch.randn(10, 5)
+# RuntimeError: mat1 and mat2 shapes cannot be multiplied (30x4 and 10x5)
+```
+
+That error message is worth reading closely: the `10` on the right was treated as a
+matrix row count, not a batch, because the right operand has only two dims. Batch dims
+that genuinely conflict fail differently:
+
+```python
+torch.randn(2, 3, 4) @ torch.randn(3, 4, 5)
+# RuntimeError: The size of tensor a (2) must match the size of tensor b (3)
+#               at non-singleton dimension 0
+```
+
+### 1-D operands
+
+A 1-D operand gets a dimension added for the duration and removed afterwards — prepended
+on the left, appended on the right:
+
+```python
+torch.randn(3) @ torch.randn(3)          # ()      dot product
+torch.randn(3) @ torch.randn(3, 5)       # (5,)    row vector times matrix
+torch.randn(10, 3, 4) @ torch.randn(4)   # (10, 3) batched matrix times column
+```
+
+### Where this repo uses it
+
+[modules.py:140](../../app/src/training/transformer/modules.py#L140) projects all heads
+in one call instead of looping over them:
+
+```python
+v = batch.unsqueeze(dim=1) @ self.w_v
+# (B, 1, L, d_model) @ (h, d_model, d_k) -> (B, h, L, d_k)
+```
+
+The matrix part is `(L, d_model) @ (d_model, d_k)`. The batch part is `(B, 1)` against
+`(h,)`, which broadcasts to `(B, h)`: the `1` says "the same tokens go to every head" and
+the `h` says "each head has its own weight." The head axis appears in the output without
+a single reshape. It is exactly equal to stacking a per-head loop:
+
+```python
+torch.allclose(v, torch.stack([batch @ w_v[i] for i in range(h)], dim=1))   # True
+```
+
+The scores then use the same rule with no broadcasting at all, since `q` and `k` already
+agree on `(B, h)`:
+
+```python
+q @ k.transpose(-2, -1)   # (B,h,L,d_k) @ (B,h,d_k,L) -> (B, h, L, L)
+```
+
+**`bmm` and `mm` do not broadcast.** They are the strict versions, which makes them a
+useful assertion when you want a shape mistake to be loud:
+
+```python
+torch.bmm(torch.randn(10, 3, 4), torch.randn(4, 5))
+# RuntimeError: batch2 must be a 3D tensor
+```
 
 ______________________________________________________________________
 
@@ -385,12 +557,124 @@ but not a mix of the two.
 
 ______________________________________________________________________
 
+## Q: What happens to gradients when a tensor is broadcast?
+
+**Forward stretches, backward sums.** A gradient always has the shape of the tensor it
+belongs to, so the extra entries produced by stretching have to be folded back up.
+
+```python
+b = torch.zeros(3, requires_grad=True)   # (3,)
+out = torch.ones(4, 3) + b               # (4, 3) — b stretched down 4 rows
+out.sum().backward()
+
+b.grad          # tensor([4., 4., 4.])
+b.grad.shape    # (3,)  — not (4, 3)
+```
+
+`b` appears in 4 places in the output, each with an incoming gradient of 1, so its
+gradient is their sum: 4. This is not a special case in autograd. Broadcasting inserts a
+real `expand` node into the graph, and the backward of `expand` is a sum over the
+stretched axes with `keepdim`, which restores the original shape by construction.
+
+The sum is over exactly the axes that were stretched, weighted by whatever came back:
+
+```python
+g = torch.tensor([[1., 2., 3.],
+                  [10., 20., 30.]])      # the incoming gradient
+
+b = torch.zeros(3, requires_grad=True)   # (3,) stretched down -> column sums
+# b.grad == tensor([11., 22., 33.])
+
+c = torch.zeros(2, 1, requires_grad=True)  # (2,1) stretched across -> row sums
+# c.grad == tensor([[6.], [60.]])
+```
+
+A `(3,)` operand varies along the last axis, so it sums down the rows. A `(2, 1)` operand
+varies down the rows, so it sums across. **The axis with the `1` is the axis you sum
+over**, which is the same reading as the forward rule: a `1` means "this value does not
+vary along this axis," so every position along it contributed the same parameter.
+
+### Why a bias grad grows with the batch
+
+That is the rule behind one of the most-asked training questions. A bias is broadcast over
+the batch, so its gradient is the *sum* over the batch, not the mean. Double the batch
+size and the raw bias gradient roughly doubles.
+
+Losses often offset this by reducing with `mean`, which divides by the number of examples in the ordinary unweighted case — the
+default for common losses such as `MSELoss` and `CrossEntropyLoss`. Switch a loss to `reduction="sum"` and
+every gradient in the model scales with batch size, so the learning rate that worked at
+batch 32 blows up at batch 256. See
+[training_loop.md › Aggregating Loss](../training/training_loop.md#aggregating-loss-correctly-across-an-epoch).
+
+### The bug this makes silent
+
+Because backward always repairs the shape, a wrong broadcast in the forward pass produces
+a perfectly valid gradient of the right shape. Nothing downstream complains.
+
+```python
+pred = torch.randn(8, 1)   # model output kept its trailing dim
+targ = torch.randn(8)      # labels came out of the loader flat
+
+(pred - targ).shape        # (8, 8)  ← 64 pairwise differences, not 8 errors
+
+F.mse_loss(pred, targ)              # averages pairwise errors (and warns about shape)
+F.mse_loss(pred, targ.unsqueeze(1)) # averages the 8 aligned errors you meant
+```
+
+Backward on the wrong one returns a `(8, 1)` gradient for `pred`, exactly as a correct
+run would. The model trains, the loss descends, and it is optimizing the wrong objective.
+
+The built-in losses warn here (`Using a target size that is different to the input size...`), and that warning is worth treating as an error. Elementwise arithmetic gives
+you nothing. The habit that catches it is the one from the top of this page: assert the
+shape where it is produced.
+
+```python
+assert pred.shape == targ.shape, (pred.shape, targ.shape)
+```
+
+______________________________________________________________________
+
+## Common confusions
+
+- `(B,)` is aligned against the **last** axis of `(B, D)`, not the first. Add a singleton axis when the values belong to batch rows: `(B, 1)`.
+- `expand` creates an aliased view; `repeat` creates independent storage. An elementwise operation may still allocate its own result after either kind of expansion.
+- For `matmul`, only batch axes broadcast. Matrix inner dimensions must match exactly.
+- A gradient with the expected shape does not prove the forward broadcast matched the intended meaning.
+
+## Check your understanding
+
+1. What shape results from `(4, 1, 3) + (2, 3)`? Which axis is reused?
+1. Why does a `(3,)` bias used across 4 rows receive a gradient summed over those rows?
+1. Why is a padding mask `(B, L)` ambiguous against scores `(B, h, L_q, L_k)`?
+
+<details markdown="1"><summary>Answers</summary>
+
+1. `(4, 2, 3)`. The `1` in the middle of the left operand is reused across the size-2 axis; the right operand is reused across the leading size-4 axis.
+1. Each bias value contributes to four output positions, so the chain rule adds their four contributions back into that one parameter.
+1. Right alignment puts `B` against `L_q`, not against the score tensor's batch axis. `(B, 1, 1, L_k)` expresses the intended axes.
+
+</details>
+
+**One-minute recap:** name axes, align from the right, treat singleton dimensions as reusable values, and expect backward to sum across axes that were reused.
+
+______________________________________________________________________
+
 ## References
 
 - NumPy, *Broadcasting*: numpy.org/doc/stable/user/basics.broadcasting.html (the
   right-to-left rule and the size-1 rule)
 - PyTorch, *Broadcasting semantics*: docs.pytorch.org/docs/stable/notes/broadcasting.html
   (follows NumPy; `expand` is a zero-copy, stride-0 view)
+- PyTorch, `torch.Tensor.expand`:
+  docs.pytorch.org/docs/stable/generated/torch.Tensor.expand.html (size-1 axes only, `-1`
+  to keep, new axes prepend)
+- PyTorch, `torch.Tensor.repeat`:
+  docs.pytorch.org/docs/stable/generated/torch.Tensor.repeat.html (tiles the tensor;
+  contrast `torch.repeat_interleave`)
+- PyTorch, `torch.matmul`: docs.pytorch.org/docs/stable/generated/torch.matmul.html (the
+  batch-broadcast rule and the 1-D promotion rules)
+- PyTorch, *Autograd mechanics*: docs.pytorch.org/docs/stable/notes/autograd.html (a
+  gradient has the shape of its tensor)
 - Python docs, *Tuples and Sequences*:
   docs.python.org/3/tutorial/datastructures.html#tuples-and-sequences (the one-element
   trailing-comma rule)

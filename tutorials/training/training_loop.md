@@ -1,21 +1,39 @@
 # The Training Loop
 
+**Revision question:** How does one batch change the model, and what state carries over to the next batch?
+
+Think of a batch as a short chain: **predictions → loss → gradients → updated weights**. The model owns the weights, autograd writes their gradients, and the optimizer reads those gradients to update the weights. The next batch sees the updated model.
+
+**Reading map:** Start with [the five-step rhythm](#the-5-step-rhythm) and [the two-batch trace](#follow-two-batches). Then use [train versus eval](#train-and-eval) and [epoch aggregation](#aggregating-loss-correctly-across-an-epoch) to explain what changes outside an individual update. [Loop structure](#structuring-the-loop--two-shapes) is a deeper design reference.
+
 ## The 5-Step Rhythm
 
-Every training loop in PyTorch follows **this exact pattern**, per batch:
+For an ordinary training batch, these operations have to happen in this causal order (clearing gradients may also happen before the forward pass):
 
 ```
 1. forward(x)             →  get predictions ŷ
 2. loss(ŷ, y)             →  compute scalar loss L
-3. optimizer.zero_grad()  →  CLEAR old gradients (easy to forget)
-4. loss.backward()        →  compute ∂L/∂w for all params
-5. optimizer.step()       →  w ← w − lr · ∂L/∂w
+3. optimizer.zero_grad()  →  clear gradients left by earlier batches
+4. loss.backward()        →  compute ∂L/∂w for used trainable params
+5. optimizer.step()       →  update weights using the optimizer's rule
 ```
 
-**Why `zero_grad()`?** PyTorch *accumulates* gradients by default. If you don't zero them, gradients from the previous batch add to the current one — silent bug, wrong updates.
+**Why `zero_grad()`?** PyTorch *accumulates* gradients by default. Without clearing them, gradients from previous batches add to the current one. That is useful when you intentionally accumulate gradients over several batches; otherwise it changes the update you meant to make.
 
-- `backward()` = chain rule over the computation graph → fills `.grad` on every parameter
+- `backward()` = chain rule over the computation graph → fills `.grad` on the leaf parameters that contributed to the loss
 - `optimizer.step()` = applies the update rule (Adam, SGD, etc.) using those `.grad` values
+
+### Follow two batches
+
+For a one-weight model with prediction `w·x`, let every batch contain `x=1`, target `0`, and loss `L=½(w·x)²`. Start at `w=2` with SGD learning rate `0.1`:
+
+| Event | Weight before update | Gradient used | Weight after update |
+|---|---:|---:|---:|
+| Batch 1 | 2.00 | 2.00 | 1.80 |
+| Batch 2, after `zero_grad()` | 1.80 | 1.80 | 1.62 |
+| Batch 2, if gradients were **not** cleared | 1.80 | 2.00 + 1.80 = 3.80 | 1.42 |
+
+The second forward pass uses `w=1.80`, not the original `2.00`. The last row shows why `.grad` is state: `backward()` adds the new `1.80` to the old `2.00` unless that field is cleared.
 
 ______________________________________________________________________
 
@@ -26,16 +44,16 @@ model = MLP().to(device)
 ```
 
 - `MLP()` — instantiates the module; all `nn.Linear` weights are created on **CPU** by default.
-- `.to(device)` — walks every registered parameter and moves its storage to that device. Mutates in place, returns the same model.
+- `.to(device)` — moves registered parameters and buffers to that device and returns the module. Device conversions can affect parameter objects, so optimizer references deserve attention.
 
 ```python
 opt = torch.optim.Adam(model.parameters(), lr=1e-3)
 ```
 
-- `model.parameters()` — a generator yielding every learnable tensor (weights + biases).
+- `model.parameters()` — an iterator over registered parameters (weights, biases, and any other `nn.Parameter`s), including ones you may later freeze.
 - The optimizer stores *references* to those tensors — it doesn't copy them. `opt.step()` mutates them in place.
 
-**Critical ordering gotcha:** call `.to(device)` *before* creating the optimizer, so the optimizer captures the GPU tensors, not stale CPU ones.
+**Safe ordering:** move the model before creating the optimizer, so the optimizer receives the parameters in their final placement. This project's `TrainState.create()` currently moves the model after optimizer construction; that pattern relies on the parameter references remaining valid for the chosen conversion. If changing devices or optimizer types, check the references rather than assuming every conversion behaves identically.
 
 ______________________________________________________________________
 
@@ -54,7 +72,7 @@ v ← β2·v + (1−β2)·grad²          # smoothed magnitude
 w ← w − lr · m / (√v + ε)        # per-parameter adaptive step
 ```
 
-Parameters with consistently large gradients get smaller steps; noisy ones get damped. This is why Adam "just works" with `lr=1e-3` and needs little tuning. (Kingma & Ba, *Adam*, 2014.)
+Adam normalizes each coordinate by its recent squared gradients, so the size of a raw gradient alone does not determine its step. `lr=1e-3` is a common starting point, but the loss curve still decides whether it fits the model and batch size. (Kingma & Ba, *Adam*, 2014.)
 
 For bias correction, AdamW, and how to pick a learning rate, see [adam_and_learning_rate.md](adam_and_learning_rate.md).
 
@@ -68,10 +86,10 @@ ______________________________________________________________________
 | `model.parameters()` | Getter returning refs to those fields | The tensors themselves |
 | `forward(x)` | Pure-ish function: input → output | Reads weights, returns prediction |
 | `loss` | Scalar + hidden DAG | Graph references intermediate tensors |
-| `loss.backward()` | Traversal that writes into `.grad` fields | Mutates `param.grad` on each leaf |
+| `loss.backward()` | Traversal that writes into `.grad` fields | Mutates `param.grad` on used trainable leaf parameters |
 | `optimizer` | Controller holding refs + its own buffers | `m`, `v` buffers per param (Adam) |
-| `opt.step()` | Reads `.grad`, mutates weights in place | Writes new values into `param.data` |
-| `opt.zero_grad()` | Clears the `.grad` fields | Resets accumulator to 0 |
+| `opt.step()` | Reads `.grad`, mutates weights in place | Changes parameter values without adding this update to the forward graph |
+| `opt.zero_grad()` | Clears the `.grad` fields | Resets or removes the accumulator |
 
 **The data flow as a pipeline:**
 
@@ -83,7 +101,7 @@ xb ──forward──► pred ──loss_fn──► loss
                                     ▼
 weights ◄──step() reads .grad────  optimizer (uses m, v state)
    │
-   └──zero_grad() clears .grad, ready for next batch
+   └──zero_grad() clears .grad before the next backward pass
 ```
 
 The thing that confuses SEs: **gradients are stored on the parameters, not returned.** `backward()` returns nothing — it's a side-effecting traversal that deposits `.grad` onto each leaf tensor. The optimizer then reads those `.grad` fields. Three objects (model, loss graph, optimizer) communicate through shared mutable tensor state, not through return values.
@@ -94,7 +112,7 @@ ______________________________________________________________________
 
 Mostly two practical reasons:
 
-**1. Multi-GPU efficiency.** `DataParallel` splits a batch across GPUs and runs `forward` on each. If loss is inside `forward`, the expensive computation gets parallelized and only a small scalar is gathered back. If loss is outside, the full logits tensor must be gathered to one GPU first — a memory bottleneck.
+**1. Multi-GPU efficiency.** `DataParallel` splits a batch across GPUs and runs `forward` on each. If loss is inside `forward`, loss computation also happens on each device, and only small per-device loss values need gathering. The caller must still combine those losses correctly. If loss is outside, the full logits tensor is gathered first, which can be a memory bottleneck.
 
 **2. Encapsulation for frameworks.** HuggingFace models return loss directly when you pass labels:
 
@@ -116,7 +134,7 @@ model.train()   # enables dropout, batch norm training behavior
 model.eval()    # disables them for inference
 ```
 
-Forgetting `model.eval()` during validation is a classic bug. Always pair it with `torch.no_grad()` to skip graph construction during inference:
+These control different things: `eval()` changes modules such as dropout and batch norm; `no_grad()` stops autograd from recording operations. Forgetting either can make validation misleading or waste memory. Pair them for ordinary validation:
 
 ```python
 model.eval()
@@ -154,7 +172,7 @@ ______________________________________________________________________
 
 Two separate collapses happen, and conflating them causes a real bug.
 
-**Collapse A — samples → one number (the criterion).** The loss compares each prediction to its target, giving one value *per sample*; `reduction='mean'` (the default) averages those into one number for the batch. `loss.item()` pulls out that float. So `loss.item()` already means "average loss per sample, for this one batch."
+**Collapse A — samples → one number (the criterion).** For a per-sample loss configured with `reduction='mean'` (the default for many PyTorch criteria), the criterion averages sample losses into one number for the batch. `loss.item()` pulls out that float. Under this assumption, `loss.item()` means "average loss per sample, for this one batch." Losses reduced over tokens or elements need a matching count instead.
 
 **Collapse B — batches → one number (the epoch loss).** The naive move — averaging the per-batch means — **breaks when batches differ in size** (the last batch is usually smaller):
 
@@ -165,7 +183,7 @@ naive (mean of means):      (0.5 + 1.0) / 2            = 0.75   ← wrong
 correct (sample-weighted):  (0.5*32 + 1.0*8) / (32+8)  = 0.60   ← right
 ```
 
-The fix is a small sample-weighted accumulator. It also generalizes to accuracy, F1 — any "accumulate per batch, compute at the end" metric:
+The fix is a small sample-weighted accumulator. It also works for accuracy when each batch reports its fraction correct. **F1 is different:** aggregate true positives, false positives, and false negatives first, then compute F1 from those totals; averaging batch F1 scores can still be wrong.
 
 ```python
 class MeanMetric:
@@ -254,3 +272,31 @@ class Trainer:
 In a real codebase, `Trainer.train_step` would **delegate** to the free `train_step` from Path C rather than re-implement it — keep the batch logic in one place and let the `Trainer` be a thin stateful shell.
 
 **Which to use:** the dataclass-vs-class choice *is* the C-vs-D fork. Reach for C while learning (the mutation is named and isolated in `state`); reach for D once you need orchestration with state.
+
+______________________________________________________________________
+
+## Common Confusions
+
+| Easy to mix up | What to remember |
+|---|---|
+| `backward()` versus `step()` | `backward()` computes and stores gradients; `step()` changes weights. |
+| `zero_grad()` versus `no_grad()` | The first clears stored gradients; the second prevents graph recording. |
+| `eval()` versus `no_grad()` | The first changes model behavior; the second changes autograd behavior. |
+| Batch loss versus epoch loss | A mean for each batch needs sample weighting before it becomes a mean for the epoch. |
+
+## Check Your Recall
+
+1. If two identical batches follow one SGD update, why is their second gradient different even when gradients are cleared?
+1. What changes if `backward()` runs twice without `zero_grad()`?
+1. Why do validation passes commonly use both `eval()` and `no_grad()`?
+
+<details markdown="1">
+<summary>Answers</summary>
+
+1. The first update changes the weight, so the second forward pass and its gradient use a new value.
+1. The second gradient is added to the first in each parameter's `.grad`; the following step uses their sum.
+1. `eval()` sets inference behavior for modules such as dropout and batch norm, while `no_grad()` avoids recording a backward graph.
+
+</details>
+
+**One-minute recap:** A forward pass builds a temporary computation graph; `backward()` deposits gradients on persistent parameters; `step()` changes those parameters. Clear gradients unless accumulation is intentional. An epoch is many such updates, followed by correctly aggregated metrics and usually a separate evaluation pass.

@@ -1,5 +1,11 @@
 # Gradients and Gradient Descent
 
+**The question:** how can a single loss tell each weight which way to move? Every forward operation records a local connection. Backward follows those connections in reverse, multiplying local derivatives and adding contributions wherever paths meet.
+
+For a quick revision, read the [chain rule trace](#chain-rule-trace) first; then use the sections on leaves and differentiability to explain where gradients appear and when they stop carrying useful information.
+
+______________________________________________________________________
+
 ## The Computation Graph
 
 When you create a tensor with `requires_grad=True`, PyTorch tracks all operations on it. Each resulting tensor gets a `grad_fn` attribute referencing the operation that created it. These link together into an acyclic graph encoding the full computation history.
@@ -45,7 +51,7 @@ Take one neuron: `z = w·x + b`. The gradient of the loss with respect to weight
 
 **The input directly scales the gradient.**
 
-**Intuition:** if all your inputs are large positive numbers (e.g. raw pixels 0–255), then for every weight feeding into a neuron, `∂L/∂w` has the same sign as `∂L/∂z` — because `x` is always positive. So *all weights into that neuron move in the same direction* every step. They can't move independently. The optimizer is forced to zig-zag:
+**Intuition:** for one example with positive inputs, every incoming weight gradient has the sign of `∂L/∂z`. Across examples, the sum can still have different signs, but strongly correlated input features can make weight updates poorly conditioned and cause a zig-zag path:
 
 ```
 Uncentered inputs (all positive):     Centered inputs (mix of ±):
@@ -58,7 +64,7 @@ weights forced to move together        weights move independently
            → slow                              → fast
 ```
 
-Centering inputs around 0 means `x` is sometimes positive, sometimes negative → gradients for different weights can have different signs → independent movement → straighter, faster descent.
+Centering inputs around 0 allows positive and negative contributions to each weight gradient. It often reduces correlations and makes descent better conditioned; it does not guarantee a straight path or independent updates.
 
 **Second effect — scale:** if `x` is huge, `∂L/∂w` is huge → giant weight jumps → instability. Dividing by std keeps gradient magnitudes in a sane range. This is the same reasoning behind BatchNorm. (LeCun et al., *Efficient BackProp*, 1998.)
 
@@ -68,7 +74,7 @@ ______________________________________________________________________
 
 Autograd is the chain rule, automated. For `L = f(g(h(w)))`:
 
-$$\\frac{\\partial L}{\\partial w} = \\frac{\\partial L}{\\partial f}\\cdot\\frac{\\partial f}{\\partial g}\\cdot\\frac{\\partial g}{\\partial h}\\cdot\\frac{\\partial h}{\\partial w}$$
+∂L/∂w = (∂L/∂f) · (∂f/∂g) · (∂g/∂h) · (∂h/∂w)
 
 Each factor is **local** — it only depends on one operation. Autograd computes each independently, then multiplies them walking backward. The loss starts the relay by handing back `1.0` (since `∂L/∂L = 1`).
 
@@ -144,7 +150,11 @@ ______________________________________________________________________
 
 `ReLU`, `abs` — undefined at exactly one point.
 
-$$\\frac{d}{dx}\\text{relu}(x) = \\begin{cases} 1 & x > 0 \\ 0 & x < 0 \\ ? & x = 0 \\end{cases}$$
+| Input | ReLU derivative |
+|---|---:|
+| x > 0 | 1 |
+| x < 0 | 0 |
+| x = 0 | undefined mathematically; PyTorch chooses 0 |
 
 PyTorch resolves the tie by convention (returns `0` for `relu'(0)`). This is a **subgradient** — legitimate for convex kinks. In practice it never matters since you almost never land exactly on `x=0` in floating point.
 
@@ -158,7 +168,7 @@ x.grad   # tensor([0.])  ← chosen subgradient
 
 `argmax`, `round`, `floor`, sampling.
 
-These are flat or jump functions. Gradient is `0` almost everywhere — technically defined, but carries **no signal**. The graph doesn't error; it silently transmits zeros backward.
+These do not provide a useful path for ordinary backpropagation. `floor` and `round` have zero derivatives almost everywhere in autograd. `argmax` returns integer indices with no gradient path, so trying to backpropagate through the indices raises rather than silently returning zeros. Sampling a discrete choice similarly needs a special estimator if its choice affects the loss.
 
 ```python
 x = torch.tensor([2.7], requires_grad=True)
@@ -167,6 +177,28 @@ y.backward()
 x.grad   # tensor([0.])  ← defined but useless
 ```
 
-**Why this matters for Transformers:** picking a token is `argmax(logits)` — case 3, gradient zero, untrainable. Cross-entropy instead operates on the full softmax distribution (case 1), so gradient flows back into every logit. The `argmax` is deferred to *inference only*.
+**Why this matters for Transformers:** picking a token with `argmax(logits)` does not carry a gradient to the logits. Cross-entropy instead operates on the full logit vector, so gradient flows back into the scores. Token selection is usually deferred to generation or inference.
 
 When you need to backprop through a discrete choice: **straight-through estimator** (pretend the non-differentiable op was identity on the backward pass) and **Gumbel-softmax** (smooth, temperature-controlled approximation) exist for this.
+
+## Common confusions
+
+- A gradient is a **slope at the current values**, not an update. The optimizer uses it to choose an update.
+- Gradients **accumulate** in leaf `.grad` fields. A second backward pass adds to an existing gradient unless it is cleared.
+- `torch.no_grad()` stops recording new operations; it does not change the `requires_grad` setting of an existing parameter.
+
+## Check your understanding
+
+1. In `L = (w·x − y)²` with `w=2`, `x=3`, `y=10`, why is `∂L/∂w = −24`?
+1. After `loss.backward()`, which tensor normally stores a parameter's derivative?
+1. Why can cross-entropy train a classifier while `argmax(logits)` cannot carry its training signal?
+
+<details markdown="1"><summary>Answers</summary>
+
+1. The error is `−4`; squaring contributes `2(−4)=−8`, and multiplying by `x=3` gives `−24`.
+1. The leaf parameter's `.grad` field.
+1. Cross-entropy uses the continuous scores; `argmax` produces a discrete index with no gradient path.
+
+</details>
+
+**One-minute recap:** a forward pass builds a graph; backward applies local chain rules; leaf gradients accumulate; the optimizer makes the actual update.

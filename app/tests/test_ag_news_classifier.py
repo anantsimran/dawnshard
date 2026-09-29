@@ -15,6 +15,8 @@ from training.dataload.ag_news import (
     _write_split,
 )
 from training.common import bpe
+from training.common.constants import PAD_ID
+from training.constants import TEST_SEED, VAL_SEED
 from training.dataload.constants import DATASETS_CACHE_DIR
 from training.metrics.classification_metrics import (
     ClassificationMetrics,
@@ -98,7 +100,7 @@ def test_encode_rows_pads_to_max_len_with_pad_id():
     assert isinstance(dataset, AGNewsDataset)
     assert len(dataset) == 1
     ids, label = dataset[0]
-    pad = bpe.PAD_ID
+    pad = PAD_ID
     assert torch.equal(ids, torch.tensor([97, 98, pad, pad, pad]))
     assert label == 0
 
@@ -111,14 +113,14 @@ def test_encode_rows_truncates_to_max_len():
 
 
 def _padded_ids(batch_size, length):
-    ids = torch.randint(low=0, high=bpe.PAD_ID, size=(batch_size, length))
-    ids[:, -2:] = bpe.PAD_ID
+    ids = torch.randint(low=0, high=PAD_ID, size=(batch_size, length))
+    ids[:, -2:] = PAD_ID
     return ids
 
 
 def test_classifier_forward_stores_detached_attention_map_per_block():
     torch.manual_seed(seed=0)
-    model = AGNewsClassifier(vocab_size=bpe.PAD_ID + 1)
+    model = AGNewsClassifier(vocab_size=PAD_ID + 1)
     model(_padded_ids(batch_size=3, length=12))  # noqa: NAR001
     assert len(model.attention_map) == NUM_BLOCKS  # noqa: NAR001
     for weights in model.attention_map:
@@ -126,9 +128,21 @@ def test_classifier_forward_stores_detached_attention_map_per_block():
         assert not weights.requires_grad
 
 
+def test_classifier_is_sensitive_to_token_order():
+    torch.manual_seed(seed=0)
+    model = AGNewsClassifier(vocab_size=PAD_ID + 1).eval()
+    ids = _padded_ids(batch_size=3, length=12)
+    reversed_ids = ids.clone()
+    reversed_ids[:, :-2] = ids[:, :-2].flip(dims=(1,))
+    with torch.no_grad():
+        logits = model(ids)  # noqa: NAR001
+        reversed_logits = model(reversed_ids)  # noqa: NAR001
+    assert not torch.allclose(logits, reversed_logits, atol=1e-5)  # noqa: NAR001
+
+
 def test_save_attention_maps_writes_first_batch_rows_once_per_epoch(tmp_path):
     torch.manual_seed(seed=0)
-    model = AGNewsClassifier(vocab_size=bpe.PAD_ID + 1)
+    model = AGNewsClassifier(vocab_size=PAD_ID + 1)
     first = _padded_ids(batch_size=5, length=12)
     second = _padded_ids(batch_size=5, length=12)
     for epoch in (1, 3):
@@ -141,6 +155,7 @@ def test_save_attention_maps_writes_first_batch_rows_once_per_epoch(tmp_path):
                 predicted=predicted,
                 epoch=epoch,
                 batch_index=batch_index,
+                seed=VAL_SEED,
                 out_dir=tmp_path,
                 num_sentences=2,
             )
@@ -196,6 +211,9 @@ def test_small_training_run_reduces_train_loss(tmp_path):
         val_loader=val_loader,
         num_epochs=3,
         val_epoch_list=[1, 2, 3],
+        train_seed=0,
+        val_seed=VAL_SEED,
+        test_seed=TEST_SEED,
         history_path=tmp_path / "history.json",
     )
 
@@ -212,6 +230,7 @@ def test_save_attention_maps_rejects_model_without_attention_map(tmp_path):
             predicted=ids.float(),
             epoch=1,
             batch_index=0,
+            seed=VAL_SEED,
             out_dir=tmp_path,
             num_sentences=1,
         )

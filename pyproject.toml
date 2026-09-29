@@ -12,6 +12,7 @@ dependencies = [
     "loguru",
     "matplotlib",
     "sortedcontainers",
+    "regex",
 ]
 
 [dependency-groups]

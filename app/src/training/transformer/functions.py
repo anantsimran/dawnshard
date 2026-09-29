@@ -10,7 +10,6 @@ from typing import Optional
 import torch
 from beartype import beartype
 from jaxtyping import Bool, Float, jaxtyped
-
 from training.transformer.constants import D_K, B, H, L
 
 

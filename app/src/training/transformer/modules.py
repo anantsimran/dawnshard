@@ -1,19 +1,112 @@
-"""Encoder building blocks: multi-head self-attention and a pre-norm block.
+"""Encoder building blocks: position encodings, self-attention, a pre-norm block.
 
 Shapes use the axis vocabulary in this package's README: B batch, L sequence
 length, d_model embedding width, h heads, d_k = d_model // h.
 """
 
 import math
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 from beartype import beartype
 from jaxtyping import Bool, Float, jaxtyped
 from torch import nn
-
 from training.transformer.constants import D_MODEL, B, H, L
 from training.transformer.functions import attention
+
+
+class SinusoidalEmbedding(nn.Module):
+    """Add fixed sinusoidal position encodings to token embeddings.
+
+    Attention is permutation invariant: it sees a set of vectors, not a
+    sequence. This is what tells it where each token sat, by adding a
+    position-dependent vector to every embedding. In and out are both
+    (B, L, d_model), so it drops in front of an encoder stack.
+
+    The table is built once at construction and never trained:
+
+    ```
+        positions p = 0 … L-1          feature pairs i = 0 … d_model/2-1
+                    │                        d_model_by_2_arr (d_model/2,)
+                    │                                │
+                    │        10000 ** (-2i / d_model)│
+                    └────────────► outer product ◄───┘
+                                        │  angles (L, d_model/2)
+                    ┌───────────────────┴───────────────────┐
+                    ▼                                       ▼
+                sin(angles)                            cos(angles)
+                    │                                       │
+                    ▼  even columns                         ▼  odd columns
+                pe[:, 0::2]                             pe[:, 1::2]
+                    └───────────────────┬───────────────────┘
+                                        │  pe (L, d_model)
+    batch (B, L, d_model) ─────────────► + ──────────► (B, L, d_model)
+    ```
+
+    Each feature *pair* `(2i, 2i+1)` shares one frequency and differs by a
+    quarter turn, so the pair traces a circle as `p` advances — which is what
+    makes a shift in position a fixed rotation of that pair, the property the
+    encoding exists for. The frequencies span wavelengths from 2π at `i = 0` to
+    10000·2π at the last pair, so one table carries both adjacent-token order
+    and sentence-scale position.
+
+    Every entry is a sine or a cosine, so the table is bounded in [-1, 1] and
+    sits on the same scale as an `nn.Embedding` output. The paper's `√d_model`
+    scaling of the embeddings is not needed here, because `nn.Embedding`
+    initializes to N(0, 1) rather than to something smaller.
+
+    Fixed, not learned: no parameters, and any position below `seq_length`
+    works whether or not training ever saw a sequence that long. `forward`
+    refuses anything above it rather than reading off the end of the table.
+
+    `pe` is a non-persistent buffer: it moves with `.to(device)` like a
+    parameter, but stays out of `state_dict`, because it is a pure function of
+    `seq_length` and `d_model` and there is nothing in it to checkpoint.
+    """
+
+    pe: torch.Tensor
+
+    def __init__(self, seq_length: int, d_model: int) -> None:
+        """Precompute the (seq_length, d_model) position table.
+
+        Args:
+            seq_length: Longest sequence the table covers. `forward` raises
+                above it, so this is the model's hard context limit.
+            d_model: Embedding width, matching the embeddings this is added to.
+                Even widths only: the sine half and the cosine half have to be
+                the same size.
+        """
+        super().__init__()
+        d_model_by_2_arr = torch.arange(0, d_model, 2)  # noqa: NAR001
+        d_model_by_2_arr = 10000 ** (-d_model_by_2_arr / d_model)
+        pos_arr = torch.arange(0, seq_length)  # noqa: NAR001
+        angles = pos_arr.unsqueeze(dim=1) * d_model_by_2_arr
+        pe = torch.empty(seq_length, d_model)  # noqa: NAR001
+        pe[:, 0::2] = torch.sin(input=angles)
+        pe[:, 1::2] = torch.cos(input=angles)
+        self.register_buffer(name="pe", tensor=pe, persistent=False)
+
+    @jaxtyped(typechecker=beartype)
+    def forward(
+        self, batch: Float[torch.Tensor, f"{B} {L} {D_MODEL}"]
+    ) -> Float[torch.Tensor, f"{B} {L} {D_MODEL}"]:
+        """Add the position table to `batch`, broadcasting over the batch.
+
+        Args:
+            batch: Token embeddings. Positions are read off the sequence axis,
+                so a right-padded row gets encodings on its pad positions too;
+                the padding mask is what keeps those out of attention and the
+                pool.
+
+        Raises:
+            ValueError: If the sequence is longer than the table.
+        """
+        seq_length = batch.shape[1]
+        if seq_length > self.pe.shape[0]:
+            raise ValueError(  # noqa: NAR001
+                f"sequence length {seq_length} exceeds table {self.pe.shape[0]}"
+            )
+        return batch + self.pe[0:seq_length, :]
 
 
 class MultiHeadAttentionLayer(nn.Module):
@@ -142,58 +235,63 @@ class EncoderBlock(nn.Module):
     reach early blocks undamped. The trade is that block outputs grow with
     depth, which a final norm outside the stack is expected to absorb.
 
+    One `dropout` module serves both sublayers. A Dropout holds no state — it
+    samples a fresh mask on every call — so a second instance would add an entry
+    to `named_modules` and nothing else.
+
+    `norm` picks the class behind both `attn_in_norm` and `ffn_norm`, so a block
+    never mixes the two kinds. `nn.LayerNorm` is the default; `nn.RMSNorm` drops
+    the mean-centering and the bias, which is cheaper and usually just as stable.
+
     Attention is the only place positions talk to each other; the norms, the
     FFN and the dropout all act per position.
     """
 
-    def __init__(self,
-                 d_model: int, 
-                 h: int,
-                 qk_norm: bool = False,
-                 d_ff_multiplier: int = 4,
-                 dropout: float = 0.1,
-                 norm: type[nn.LayerNorm] | type[nn.RMSNorm] = nn.LayerNorm ,
-                 ) -> None:
+    def __init__(
+        self,
+        d_model: int,
+        h: int,
+        qk_norm: bool = False,
+        d_ff_multiplier: int = 4,
+        dropout: float = 0.1,
+        norm: type[nn.LayerNorm] | type[nn.RMSNorm] = nn.LayerNorm,
+    ) -> None:
         """Build the block's two sublayers and their norms.
 
         Args:
             qk_norm: Forwarded to `MultiHeadAttentionLayer`; RMSNorms queries
                 and keys per head before the dot product.
             d_ff_multiplier: FFN hidden width as a multiple of `d_model`.
-            dropout: One `nn.Dropout` shared by both sublayer outputs. Shared
-                rather than duplicated because a Dropout holds no state — it
-                samples a fresh mask per call.
-            norm: Norm class to instantiate for both sublayers. `nn.RMSNorm`
-                drops the mean-centering and the bias, which is cheaper and
-                usually just as stable here.
+            dropout: Drop probability on each sublayer's output, before its
+                residual add.
+            norm: Class instantiated for `attn_in_norm` and `ffn_norm`, called
+                as `norm(normalized_shape=d_model)`.
 
         Raises:
             ValueError: If `d_model` is not divisible by `h`.
         """
         super().__init__()
 
-        self.attn_in_norm = norm(normalized_shape = d_model)
+        self.attn_in_norm = norm(normalized_shape=d_model)
 
-        self.attn = MultiHeadAttentionLayer(d_model=d_model, h = h, qk_norm = qk_norm)
+        self.attn = MultiHeadAttentionLayer(d_model=d_model, h=h, qk_norm=qk_norm)
 
-
-        self.ffn = nn.Sequential(
-            nn.Linear(in_features=d_model, out_features=d_ff_multiplier* d_model),
+        self.ffn = nn.Sequential(  # noqa: NAR001
+            nn.Linear(in_features=d_model, out_features=d_ff_multiplier * d_model),
             nn.ReLU(),
-            nn.Linear(in_features=d_ff_multiplier* d_model, out_features=d_model),
+            nn.Linear(in_features=d_ff_multiplier * d_model, out_features=d_model),
         )
-        self.ffn_norm = norm(normalized_shape = d_model)
-        self.dropout = nn.Dropout(p = dropout)
-
+        self.ffn_norm = norm(normalized_shape=d_model)
+        self.dropout = nn.Dropout(p=dropout)
 
     def forward(
-            self, 
-            batch: Float[torch.Tensor, f"{B} {L} {D_MODEL}"],
-            pad_mask: Optional[Bool[torch.Tensor, f"#{B} #{H} #{L} {L}"]]
-        ) -> tuple[
-            Float[torch.Tensor, f"{B} {L} {D_MODEL}"],
-            Float[torch.Tensor, f"{B} {H} {L} {L}"],
-        ]:
+        self,
+        batch: Float[torch.Tensor, f"{B} {L} {D_MODEL}"],
+        pad_mask: Optional[Bool[torch.Tensor, f"#{B} #{H} #{L} {L}"]],
+    ) -> tuple[
+        Float[torch.Tensor, f"{B} {L} {D_MODEL}"],
+        Float[torch.Tensor, f"{B} {H} {L} {L}"],
+    ]:
         """Run `batch` through the attention sublayer, then the FFN sublayer.
 
         Args:
@@ -206,15 +304,9 @@ class EncoderBlock(nn.Module):
             (out, weights): the block output, same shape as `batch`, and the
             attention sublayer's weights.
         """
-        attn_in_normalized = self.attn_in_norm(batch)
-        attn, weights = self.attn(
-            batch = attn_in_normalized,
-            pad_mask = pad_mask
-        )
-        batch = batch + self.dropout(attn) # attn layer is completed
-        ffn_in_normalized = self.ffn_norm(batch)
-        ffn_output = self.ffn(ffn_in_normalized)
-        return batch + self.dropout(ffn_output), weights
-
-    
-
+        attn_in_normalized = self.attn_in_norm(batch)  # noqa: NAR001
+        attn, weights = self.attn(batch=attn_in_normalized, pad_mask=pad_mask)
+        batch = batch + self.dropout(attn)  # attn layer is completed  # noqa: NAR001
+        ffn_in_normalized = self.ffn_norm(batch)  # noqa: NAR001
+        ffn_output = self.ffn(ffn_in_normalized)  # noqa: NAR001
+        return batch + self.dropout(ffn_output), weights  # noqa: NAR001

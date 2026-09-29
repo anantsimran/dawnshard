@@ -14,11 +14,11 @@ from torch.utils.data import DataLoader
 from training.constants import HISTORY_PATH, TRACES_PATH
 from training.train.environment import collect_system_metrics
 from training.train.model import EpochRecord, EpochSpec, Metrics, TrainState
+from training.train.serialization import serialize_epoch_record
 from training.train.utils import save_history
-from training.utils.serialization import serialize_epoch_record
 
 Batch = tuple[Tensor, Tensor]
-StepFn = Callable[["TrainState", "EpochSpec", Batch, int, int], "Metrics"]
+StepFn = Callable[["TrainState", "EpochSpec", Batch, int, int, Optional[int]], "Metrics"]
 
 
 def train_step(
@@ -27,15 +27,19 @@ def train_step(
     batch: Batch,
     epoch: int,
     batch_index: int,
+    seed: Optional[int],
 ) -> Metrics:
     """One optimization step. Returns batch metrics with mean batch loss and batch size.
 
     If `epoch_spec.train_probe` is set, it is called after the optimizer step with
-    this batch's input, target, detached predictions, `epoch`, and `batch_index`.
+    this batch's input, target, detached predictions, `epoch`, `batch_index`, and
+    `seed`.
 
     Args:
         epoch: 1-based epoch number, passed through to the probe.
         batch_index: 0-based position of `batch` in the epoch, passed through to the probe.
+        seed: Seed of this pass, passed through to the probe. `fit` passes None on a
+            training pass. The step draws no randomness of its own.
     """
     input_tensor, target_tensor = (tensor.to(device=epoch_spec.device) for tensor in batch)
     train_state.optimizer.zero_grad(set_to_none=True)
@@ -43,7 +47,8 @@ def train_step(
     loss = train_state.criterion(predicted, target_tensor)  # noqa: NAR001
     loss.backward()
     train_state.optimizer.step()
-    metrics = epoch_spec.calculate_metrics(predicted.detach(), target_tensor)  # noqa: NAR001
+    predicted = predicted.detach()
+    metrics = epoch_spec.calculate_metrics(predicted, target_tensor)  # noqa: NAR001
     metrics.loss = loss.item()
     metrics.count = target_tensor.size(dim=0)
     if epoch_spec.train_probe is not None:
@@ -51,9 +56,10 @@ def train_step(
             train_state.model,
             input_tensor,
             target_tensor,
-            predicted.detach(),
+            predicted,
             epoch,
             batch_index,
+            seed,
         )
     return metrics
 
@@ -65,15 +71,18 @@ def eval_step(
     batch: Batch,
     epoch: int,
     batch_index: int,
+    seed: Optional[int],
 ) -> Metrics:
     """One forward-only step. Returns batch metrics with mean batch loss and batch size.
 
     If `epoch_spec.eval_probe` is set, it is called after the forward pass with this
-    batch's input, target, predictions, `epoch`, and `batch_index`.
+    batch's input, target, predictions, `epoch`, `batch_index`, and `seed`.
 
     Args:
         epoch: 1-based epoch number, passed through to the probe.
         batch_index: 0-based position of `batch` in the epoch, passed through to the probe.
+        seed: Seed of this pass, passed through to the probe. The step draws no
+            randomness of its own.
     """
     input_tensor, target_tensor = (tensor.to(device=epoch_spec.device) for tensor in batch)
     predicted = train_state.model(input_tensor)  # noqa: NAR001
@@ -89,6 +98,7 @@ def eval_step(
             predicted,
             epoch,
             batch_index,
+            seed,
         )
     return metrics
 
@@ -101,16 +111,23 @@ def run_epoch(
     *,
     epoch: int,
     train: bool,
+    seed: Optional[int],
 ) -> Metrics:
     """Drive one pass over loader with step_fn; return the reduced epoch metrics.
 
-    Builds a fresh metrics accumulator for the epoch and passes `epoch` and each
-    batch's index to the step.
+    Builds a fresh metrics accumulator for the epoch and passes `epoch`, each batch's
+    index, and `seed` to the step.
+
+    Args:
+        seed: Seed of this pass, threaded to the step and on to its probe, or None
+            when the pass has none. `run_epoch` does not reseed anything with it.
     """
     state.model.train(mode=train)
     accumulator = epoch_spec.metrics_type()
     for batch_index, batch in enumerate(loader):  # noqa: NAR001
-        batch_metrics = step_fn(state, epoch_spec, batch, epoch, batch_index)  # noqa: NAR001
+        batch_metrics = step_fn(  # noqa: NAR001
+            state, epoch_spec, batch, epoch, batch_index, seed
+        )
         epoch_spec.accumulate_metrics(accumulator, batch_metrics)  # noqa: NAR001
     return epoch_spec.reduce_metrics(accumulator)  # noqa: NAR001
 
@@ -131,20 +148,50 @@ def fit(
     val_loader: DataLoader,
     num_epochs: int,
     val_epoch_list: list[int],
+    train_seed: int,
+    val_seed: int,
+    test_seed: int,
     history_path: Optional[Path] = None,
     wandb_run: Optional[Any] = None,
+    run_uuid: Optional[str] = None,
 ) -> list[EpochRecord]:
     """Run num_epochs of training; validate only on epochs in val_epoch_list.
 
-    Returns per-epoch history.
+    Args:
+        train_seed: Seeds the global torch RNG once, before the first epoch, so
+            shuffling, dropout, and any randomness a collate draws repeat across runs.
+            The caller builds the model before `fit` sees it, so weight init is not
+            covered: seed before constructing the model if you want that too. It is
+            not handed to training steps or their probe; they get None, and any
+            randomness they need comes from the global RNG this seeds.
+        val_seed: Handed to every validation step and on to its probe, so a probe that
+            draws randomness draws the same thing on each validation pass. Pass the
+            repo-wide `VAL_SEED` unless a run has a reason not to; `fit` does not
+            reseed the global RNG with it.
+        test_seed: Recorded in the history file. `fit` runs no test pass, so nothing
+            reads it yet; it is here so a run's three seeds are written down together.
+        run_uuid: Identifies this run when `history_path` is not given, so the
+            history file lands at `HISTORY_PATH / f"{run_uuid}.json"`. Defaults to a
+            fresh uuid4.
+
+    Returns:
+        Per-epoch history.
+
+    Side effects:
+        Seeds the global torch RNG from `train_seed`, and writes the history file.
     """
-    run_uuid = str(uuid4())  # noqa: NAR001
+    if run_uuid is None:
+        run_uuid = str(uuid4())  # noqa: NAR001
     if history_path is None:
         history_path = HISTORY_PATH / f"{run_uuid}.json"
+    torch.manual_seed(seed=train_seed)
     logger.info(  # noqa: NAR001
-        "fit | epochs {} | val_epochs {} | device {} | wandb {} | history {}",
+        "fit | epochs {} | val_epochs {} | seeds {}/{}/{} | device {} | wandb {} | history {}",
         num_epochs,
         val_epoch_list,
+        train_seed,
+        val_seed,
+        test_seed,
         epoch_spec.device,
         wandb_run is not None,
         history_path,
@@ -162,6 +209,7 @@ def fit(
             step_fn=train_step,
             epoch=epoch_number,
             train=True,
+            seed=None,
         )
         if state.scheduler is not None:
             state.scheduler.step()
@@ -177,6 +225,7 @@ def fit(
                 step_fn=eval_step,
                 epoch=epoch_number,
                 train=False,
+                seed=val_seed,
             )
             val_loss = val_metrics.loss
             logger.info(  # noqa: NAR001
@@ -205,6 +254,7 @@ def fit(
         history_path=history_path,
         train_state=state,
         epoch_spec=epoch_spec,
+        seeds={"train": train_seed, "val": val_seed, "test": test_seed},
     )
     return history
 
@@ -217,6 +267,7 @@ def _profiled_run_epoch(
     *,
     epoch: int,
     train: bool,
+    seed: Optional[int],
 ) -> Metrics:
     """Like run_epoch but with record_function labels so the profiler can attribute time."""
     from torch.profiler import record_function
@@ -233,7 +284,7 @@ def _profiled_run_epoch(
                 break
         with record_function(name="step"):
             batch_metrics = step_fn(  # noqa: NAR001
-                state, epoch_spec, batch, epoch, batch_index
+                state, epoch_spec, batch, epoch, batch_index, seed
             )
             epoch_spec.accumulate_metrics(accumulator, batch_metrics)  # noqa: NAR001
         batch_index += 1
@@ -271,29 +322,49 @@ def profiled_fit(
     num_epochs: int,
     val_epoch_list: list[int],
     profile_epoch_list: list[int],
+    train_seed: int,
+    val_seed: int,
+    test_seed: int,
     history_path: Optional[Path] = None,
     history_detailed_path: Optional[Path] = None,
     wandb_run: Optional[Any] = None,
+    run_uuid: Optional[str] = None,
 ) -> list[EpochRecord]:
     """Like fit, but wraps profiling epochs with torch.profiler.profile.
 
     Writes history.json (base metrics, same as fit) and history_detailed.json
     (same records, with profiling metrics and trace_path merged in on
     profiling epochs). Returns the base per-epoch history list.
+
+    Args:
+        train_seed: As in `fit`; seeds the global torch RNG for the run.
+        val_seed: As in `fit`; handed to every validation step and its probe.
+        test_seed: As in `fit`; recorded in both history files, read by nothing.
+        run_uuid: As in `fit`; also names the trace directory,
+            `TRACES_PATH / run_uuid`. Defaults to a fresh uuid4.
+
+    Side effects:
+        Seeds the global torch RNG from `train_seed`, and writes both history files
+        and one Chrome trace per profiled epoch.
     """
     from torch.profiler import ProfilerActivity, profile
 
-    run_uuid = str(uuid4())  # noqa: NAR001
+    if run_uuid is None:
+        run_uuid = str(uuid4())  # noqa: NAR001
     if history_path is None:
         history_path = HISTORY_PATH / f"{run_uuid}.json"
     if history_detailed_path is None:
         history_detailed_path = HISTORY_PATH / f"{run_uuid}_detailed.json"
     traces_dir = TRACES_PATH / run_uuid
+    torch.manual_seed(seed=train_seed)
     logger.info(  # noqa: NAR001
-        "profiled_fit epochs={} val={} profile={} device={} history={} detailed={}",
+        "profiled_fit epochs={} val={} profile={} seeds={}/{}/{} device={} history={} detailed={}",
         num_epochs,
         val_epoch_list,
         profile_epoch_list,
+        train_seed,
+        val_seed,
+        test_seed,
         epoch_spec.device,
         history_path,
         history_detailed_path,
@@ -323,6 +394,7 @@ def profiled_fit(
                     step_fn=train_step,
                     epoch=epoch_number,
                     train=True,
+                    seed=None,
                 )
             profiling_metrics = _extract_profiler_metrics(
                 prof=prof,
@@ -337,6 +409,7 @@ def profiled_fit(
                 step_fn=train_step,
                 epoch=epoch_number,
                 train=True,
+                seed=None,
             )
             profiling_metrics = None
         if state.scheduler is not None:
@@ -353,6 +426,7 @@ def profiled_fit(
                 step_fn=eval_step,
                 epoch=epoch_number,
                 train=False,
+                seed=val_seed,
             )
             val_loss = val_metrics.loss
             logger.info(  # noqa: NAR001
@@ -382,16 +456,19 @@ def profiled_fit(
             {**record_dict, **profiling_metrics} if profiling_metrics is not None else record_dict
         )
         history_detailed.append(detailed_record)  # noqa: NAR001
+    seeds = {"train": train_seed, "val": val_seed, "test": test_seed}
     save_history(
         history=[serialize_epoch_record(record=record) for record in history],
         history_path=history_path,
         train_state=state,
         epoch_spec=epoch_spec,
+        seeds=seeds,
     )
     save_history(
         history=history_detailed,
         history_path=history_detailed_path,
         train_state=state,
         epoch_spec=epoch_spec,
+        seeds=seeds,
     )
     return history

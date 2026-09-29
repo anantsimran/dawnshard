@@ -2,6 +2,15 @@
 
 Most PyTorch bugs are silent shape/dtype/device mismatches that either crash 50 layers later or — worse — *broadcast successfully into wrong results*.
 
+**Question to ask before inspecting code:** which boundary first changes the tensor from the shape or type you expected? Follow one batch from input to output, naming each axis. If that trace is correct, inspect parameter registration and then gradients.
+
+| Symptom | First thing to inspect | Why |
+|---|---|---|
+| Loss computes but seems wrong | Prediction and target shapes together | Broadcasting can create pairwise comparisons |
+| Model moves device but a tensor does not | `named_parameters()` and `named_buffers()` | A plain tensor attribute is not registered |
+| Gradient missing | Leaf parameters, graph path, then hooks | The path may be unused or gradient recording disabled |
+| Architecture hard to follow | Module tree or `grad_fn` graph | They show different structures |
+
 ______________________________________________________________________
 
 ## Shape Checking
@@ -22,7 +31,7 @@ Usage: `assert_shape(logits, (batch, -1, vocab), "logits")`. Use `-1` as a wildc
 
 **Name dimensions in comments** on every line that reshapes: `# x: (B, T, C)`. Reshape/permute bugs are the #1 time sink.
 
-**Write a shape smoke-test before training.** Run one forward+backward on a random batch — catches 90% of wiring bugs in under a second:
+**Check a representative batch before training.** One forward and backward pass can catch many wiring mistakes early:
 
 ```python
 x = torch.randn(4, 8)
@@ -185,3 +194,25 @@ print_graph(y)
 `AccumulateGrad` nodes are leaf parameters (where `.grad` lands). `*Backward0` nodes are operations. This is the same structure `torchviz` renders, just as text.
 
 **Recommendation:** option 3 to understand graph structure, `torchview` for day-to-day architecture + shape debugging, `torchviz` only when you need backward/saved-tensor detail.
+
+## Common confusions
+
+- A **module tree** shows registered layers and parameters. An **autograd graph** shows operations from one particular forward call. A module can appear in many forward graphs.
+- A shape assertion tells you whether dimensions match your expectation. It cannot tell you whether labels or masking values have the right meaning.
+- A missing `.grad` may mean the parameter was unused, the graph was not recorded, or it was inspected before backward; a hook is useful after checking those basics.
+
+## Check your understanding
+
+1. Why might `(32, 1)` predictions and `(32,)` targets produce a loss without a shape error?
+1. Which view would you inspect to see saved operations for backward: `torchview`'s module diagram or a `grad_fn`/`torchviz` graph?
+1. What does `named_parameters()` reveal about a learnable tensor assigned as an ordinary attribute?
+
+<details markdown="1"><summary>Answers</summary>
+
+1. Broadcasting can expand them to `(32, 32)`, comparing every prediction with every target.
+1. The autograd graph from `grad_fn` or `torchviz`.
+1. It is absent, so an optimizer built from `model.parameters()` will not receive it.
+
+</details>
+
+**One-minute recap:** trace shapes at boundaries first, verify registered state second, and inspect the graph or hooks when a gradient path remains unclear.

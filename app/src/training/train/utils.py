@@ -7,8 +7,8 @@ from typing import Optional
 import torch
 from loguru import logger
 from training.train.model import EpochSpec, TrainState
+from training.train.serialization import serialize_epoch_spec, serialize_train_state
 from training.utils.git import get_git_commit
-from training.utils.serialization import serialize_epoch_spec, serialize_train_state
 
 
 def save_state(state: TrainState, checkpoint_path: Path) -> None:
@@ -27,14 +27,22 @@ def save_history(
     history_path: Path,
     train_state: Optional[TrainState] = None,
     epoch_spec: Optional[EpochSpec] = None,
+    seeds: Optional[dict[str, int]] = None,
 ) -> None:
-    """Write per-epoch history and optional run metadata to a JSON file."""
+    """Write per-epoch history and optional run metadata to a JSON file.
+
+    Args:
+        seeds: The run's seeds, as `fit` passes them: `{"train": ..., "val": ...,
+            "test": ...}`. Written under `meta.seeds` so a run can be repeated.
+    """
     history_path.parent.mkdir(parents=True, exist_ok=True)
     meta: dict = {"git_commit": get_git_commit()}
     if train_state is not None:
         meta["train_state"] = serialize_train_state(state=train_state)
     if epoch_spec is not None:
         meta["train_config"] = serialize_epoch_spec(spec=epoch_spec)
+    if seeds is not None:
+        meta["seeds"] = seeds
     payload = {"meta": meta, "history": history}
     with open(file=history_path, mode="w") as history_file:
         json.dump(obj=payload, fp=history_file, indent=2)

@@ -1,7 +1,7 @@
 """Probes that record attention from a model during `run_epoch`."""
 
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Optional, Protocol, runtime_checkable
 
 import torch
 from torch import nn
@@ -21,6 +21,7 @@ def save_attention_maps(
     predicted: torch.Tensor,
     epoch: int,
     batch_index: int,
+    seed: Optional[int],
     *,
     out_dir: Path,
     num_sentences: int,
@@ -28,7 +29,8 @@ def save_attention_maps(
     """Save the first batch's attention maps for one epoch to `out_dir`.
 
     A probe for `EpochSpec`: bind `out_dir` and `num_sentences` with
-    `functools.partial`. Acts only on batch 0 and writes
+    `functools.partial`. `seed` is part of the probe signature and unused here,
+    because saving a tensor draws no randomness. Acts only on batch 0 and writes
     `epoch_<NNN>.pt` holding `{"token_ids": (n, L), "weights": [(n, h, L, L) per
     block]}` on the cpu, for the first `num_sentences` rows.
 

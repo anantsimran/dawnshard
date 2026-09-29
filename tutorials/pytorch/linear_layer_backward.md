@@ -1,5 +1,9 @@
 # Where the Transpose Comes From
 
+**Remember the cause, not just the formula:** one weight is reused across every example, so its gradient sums over the batch. A transpose puts that batch index in the inner slot where matrix multiplication can perform the sum.
+
+Read the [concrete numbers](#concrete-numbers) once, then use the [shape shortcut](#the-shortcut-everyone-actually-uses) for revision.
+
 Take a linear layer `Y = X W` with a batch of inputs `X` (`n×d`), weights `W` (`d×k`), and output `Y` (`n×k`). Write `G = ∂L/∂Y` (`n×k`) for the gradient arriving from above. Backprop gives:
 
 ```
@@ -115,6 +119,30 @@ torch.allclose(lin.bias.grad, g.sum(dim=0))        # True: shared across the bat
 ```
 
 Same derivation, same shape-matching shortcut. Only the storage layout differs.
+
+______________________________________________________________________
+
+## Common confusions
+
+- `XᵀG` comes from the convention `Y=XW`. `nn.Linear` stores weights as `(out, in)` and uses `XWᵀ`, so its stored weight gradient is `GᵀX`.
+- The transpose changes which index matmul sums over. It does not mean the forward pass literally switched rows and columns in memory.
+- A bias shared across `n` examples receives a sum of `n` contributions; a mean-reduced loss may already scale each contribution by `1/n`.
+
+## Check your understanding
+
+1. If `X` is `(5, 3)` and `G` is `(5, 2)`, what shape must `∂L/∂W` have for `Y=XW`?
+1. Which index is summed in `∂L/∂W[a,j]`?
+1. Why is `∂L/∂X = GWᵀ`?
+
+<details markdown="1"><summary>Answers</summary>
+
+1. `(3, 2)`, the shape of `W`; `XᵀG` has that shape.
+1. The batch index `i`, because the same weight is used for every example.
+1. Each input feature contributes to all output features, so the output index `j` is summed; `Wᵀ` puts `j` in matmul's inner position.
+
+</details>
+
+**One-minute recap:** forward sums over input features; weight backward sums over examples; input backward sums over output features. The required sum determines each transpose.
 
 ______________________________________________________________________
 

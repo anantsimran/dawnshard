@@ -1,5 +1,18 @@
 # `nn.Module` and Multi-Layer Networks
 
+**The mental model:** a module is a persistent tree of registered state and a callable description of data flow. With gradient recording enabled, each call creates a fresh autograd graph. Keeping those two lifetimes separate explains parameter registration, repeated calls, `state_dict()`, and why gradients accumulate.
+
+**Reading route:** start with [parameters, buffers, and state](#parameters-buffers-and-state), then [what the graph saves](#the-module-doesnt-save-forward-results--the-graph-does). The sections on `Sequential`, hooks, and loss modules answer specific interface questions once that distinction is clear.
+
+| At this point | What exists |
+|---|---|
+| After `__init__` | Registered parameters, buffers, and child modules |
+| After `model(x)` | Those same objects plus this call's graph when gradients are recorded |
+| After `loss.backward()` | Gradients accumulated on leaf parameters |
+| After `optimizer.step()` | Updated parameter values for the next call |
+
+______________________________________________________________________
+
 ## What `nn.Module` Is
 
 `nn.Module` is the base class every layer and every model subclasses. You subclass it, fill `__init__` with layers, and write `forward()`. The backward pass is defined automatically by autograd.
@@ -61,7 +74,7 @@ ______________________________________________________________________
 
 **Buffers** are persistent state the model *doesn't learn* — must be saved and moved to GPU, but not trained. Register with `self.register_buffer("name", tensor)`.
 
-**State** = parameters + buffers. `state_dict()` returns everything needed to fully reconstruct the model.
+**Tensor state** = parameters + persistent buffers. `state_dict()` saves those tensors; the model class and its configuration must also be available to reconstruct the model.
 
 ```
 state  (everything in state_dict — saved & device-moved)
@@ -143,15 +156,15 @@ ______________________________________________________________________
 
 ## Why You Need Nonlinearity
 
-A single `nn.Linear` computes `y = xW^T + b` — purely linear. Stack two with nothing between:
+A single `nn.Linear` computes `y = xW^T + b` for row-shaped batches — an affine map. Writing one example as a column vector, two layers without an activation give:
 
-$$W_2(W_1 x) = (W_2 W_1)x = W\_{\\text{combined}},x$$
+W₂(W₁x + b₁) + b₂ = (W₂W₁)x + (W₂b₁ + b₂)
 
 It collapses to *one* linear layer. **Depth buys nothing without nonlinearity.**
 
 **The fix:** activation functions between layers:
 
-$$h = \\sigma(W_1 x + b_1), \\qquad y = W_2 h + b_2$$
+h = σ(W₁x + b₁), then y = W₂h + b₂.
 
 The `σ` bends the space — the composition can't be flattened. Stacking nonlinear warps lets you carve arbitrarily complex decision boundaries.
 
@@ -278,7 +291,7 @@ ______________________________________________________________________
 
 ## `model(x)` vs `model.forward(x)` — Never Call `forward` Directly
 
-`self.net(x)` goes through `__call__`, which wraps `forward` with hook machinery:
+`self.net(x)` goes through `__call__`, which wraps `forward` with hook machinery and other module call behavior:
 
 ```python
 # Pseudo-internals of nn.Module.__call__
@@ -289,15 +302,15 @@ def __call__(self, *args):
     return out
 ```
 
-Calling `model.forward(x)` directly bypasses all of that. The silent failure:
+Calling `model.forward(x)` directly bypasses module hooks. For example, a forward hook registered for shape inspection will fire for `model(x)` but not for `model.forward(x)`.
 
 ```python
 with torch.no_grad():
-    out = model(x)         # ✅ no_grad respected — no graph built
-    out = model.forward(x) # ❌ no_grad bypassed — gradients computed anyway
+    out = model(x)         # no graph built
+    direct = model.forward(x) # also no graph: no_grad is a thread-local context
 ```
 
-`no_grad` works via a hook registered on `__call__`. Bypass `__call__` and it silently breaks. Same applies to gradient checkpointing, `torch.jit`, and any hooks you've registered yourself.
+`no_grad` is a context setting, so it applies to either call. The practical reason to use `model(x)` is that it respects module call machinery, including hooks and framework wrappers that depend on `__call__`.
 
 **One line:** always use `model(x)`, never `model.forward(x)`.
 
@@ -312,10 +325,10 @@ loss_fn = nn.CrossEntropyLoss()
 loss = loss_fn(pred, yb)   # calls loss_fn.forward(pred, yb) under the hood
 ```
 
-Some loss functions have **learnable parameters or persistent state:**
+Some loss functions have **persistent state**, such as fixed class weights:
 
 ```python
-loss_fn = nn.CrossEntropyLoss(weight=torch.tensor([1.0, 2.0, ...]))
+loss_fn = nn.CrossEntropyLoss(weight=torch.tensor([1.0, 2.0]))
 loss_fn.to(device)   # moves the weight tensor to GPU — works because it's a Module
 ```
 
@@ -324,7 +337,8 @@ A plain function can't do `.to(device)`. And because it's a Module, you can **em
 ```python
 class ModelWithLoss(nn.Module):
     def __init__(self):
-        self.net = MLP()
+        super().__init__()
+        self.net = nn.Linear(8, 2)             # two class logits
         self.criterion = nn.CrossEntropyLoss()  # nested — fully tracked
 
     def forward(self, x, y):
@@ -349,3 +363,25 @@ W2:   (out_dim, hidden)  → fc2:    (B, out_dim)
 ```
 
 The batch dim `B` rides along untouched — layers operate on the last dim. Transformer tensors flow the same way, just with more dims: `(B, seq_len, d_model)`.
+
+## Common confusions
+
+- A plain tensor with `requires_grad=True` can receive a gradient but is not automatically a registered parameter. An optimizer built from `model.parameters()` will miss it.
+- A buffer moves and saves with the module, but the optimizer does not learn it. BatchNorm running statistics are the standard example.
+- `model.eval()` changes mode-sensitive modules such as Dropout and BatchNorm; it does not itself turn off autograd. Use `torch.no_grad()` or inference mode when gradients are unnecessary.
+
+## Check your understanding
+
+1. Why can one `nn.Linear` be called twice and still produce two independent forward graphs?
+1. What happens if `self.weight` is a plain `torch.Tensor(requires_grad=True)` rather than `nn.Parameter`?
+1. Why do two linear layers with no activation collapse into one affine transformation?
+
+<details markdown="1"><summary>Answers</summary>
+
+1. The module stores weights, while each call's output graph stores that call's operation history and saved values.
+1. It is not registered in `model.parameters()` or `state_dict()`, and `model.to(device)` will not move it.
+1. Composing affine maps gives another affine map: weights multiply and biases combine.
+
+</details>
+
+**One-minute recap:** modules own persistent registered state; graph nodes hold per-call backward information; nonlinear activations make stacked layers more expressive than one affine layer.

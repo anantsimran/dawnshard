@@ -26,11 +26,14 @@ type MetricsAccumulateFn[M: Metrics] = Callable[[M, M], None]
 type MetricsReduceFn[M: Metrics] = Callable[[M], M]
 
 # Called by the step on every batch after the forward pass with
-# (model, input, target, predicted, epoch, batch_index); `predicted` is detached.
-# The probe decides which calls to act on and where to store what it keeps; bind
-# its settings with functools.partial.
+# (model, input, target, predicted, epoch, batch_index, seed); `predicted` is
+# detached. `seed` is the fixed val seed on a validation pass, so a probe that draws
+# its own randomness draws the same thing on every validation pass, whatever model
+# it runs on. It is None on a train pass: training randomness comes from the global
+# RNG that fit seeds. The probe decides which calls to act on and where to store what
+# it keeps; bind its settings with functools.partial.
 Probe = Callable[
-    [nn.Module, torch.Tensor, torch.Tensor, torch.Tensor, int, int], None
+    [nn.Module, torch.Tensor, torch.Tensor, torch.Tensor, int, int, Optional[int]], None
 ]
 
 

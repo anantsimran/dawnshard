@@ -1,14 +1,16 @@
 # Optimizer & Scheduler — the Decoupling
 
-[training_loop.md](training_loop.md) showed the 5-step rhythm. This file answers the *architecture* question underneath it: **there is no god object.** There are three independent things — model, optimizer, scheduler — that share one set of tensors and never reach into each other. Your training loop is the only thing that sequences them.
+**Revision question:** When the learning rate changes, which object changed—and which weight update will see the new value?
 
-The second half is a practical guide to schedulers: the built-in schedules, warmup and decay, `ReduceLROnPlateau`, what works with `fit`, and checkpointing.
+[training_loop.md](training_loop.md) showed the five operations in a batch. The key relationship here is **model parameter → optimizer parameter group → scheduler**. The model owns parameters; the optimizer keeps references to them and their update state; the scheduler keeps a reference to the optimizer and edits its learning-rate field. The loop decides when each operation happens.
+
+**Reading map:** [Where parameters live](#where-parameters-live) through [the scheduler](#the-scheduler) explains the shared state. [Ordering and cadence](#ordering-rule-and-cadence) determines which learning rate an update uses. Use [the built-in schedules](#the-built-in-schedules), [warmup and decay](#warmup-and-decay), and [the `fit` compatibility table](#using-a-scheduler-with-fit) as references once that picture is clear.
 
 ______________________________________________________________________
 
 ## Where Parameters Live
 
-Parameters are owned by the **model**, full stop. Writing `self.fc = nn.Linear(10, 2)` makes `nn.Module.__setattr__` file each `nn.Parameter` into an internal `OrderedDict` (`_parameters`), with submodules nesting recursively. The model is a **tree**; params hang off its nodes.
+Parameters are owned by the **model**. Writing `self.fc = nn.Linear(10, 2)` registers `fc` as a child module; that `Linear` module registers its own `weight` and `bias` as parameters. Modules form a tree, and `model.parameters()` walks it recursively.
 
 The tensor *data* is just a buffer in CPU/GPU memory. The model holds a Python *reference* to it. That distinction is the whole key.
 
@@ -16,7 +18,7 @@ The tensor *data* is just a buffer in CPU/GPU memory. The model holds a Python *
 model.fc.weight        # the actual nn.Parameter object
 model.parameters()     # iterator over every param tensor (walks the tree)
 model.named_parameters()   # ('fc.weight', tensor), ('fc.bias', tensor), ...
-model.state_dict()     # OrderedDict {name -> tensor}, used for saving
+model.state_dict()     # name -> parameter/buffer tensor, used for saving
 ```
 
 ______________________________________________________________________
@@ -38,7 +40,7 @@ opt = torch.optim.SGD(model.parameters(), lr=0.1)
 model.weight is opt.param_groups[0]['params'][0]   # True
 ```
 
-Same object, two names — ordinary Python aliasing, exactly like `b = a` on a list. So when `optimizer.step()` runs `param.data -= lr * param.grad`, it mutates *the exact tensor* the model uses in its next forward pass, because it **is** that tensor. The optimizer never looks up the model. **The shared tensor *is* the link.**
+Same object, two names — ordinary Python aliasing, exactly like `b = a` on a list. For plain SGD without momentum or weight decay, `optimizer.step()` conceptually applies `param ← param − lr·param.grad` without tracking the update in autograd. It changes *the exact parameter* the model uses in its next forward pass. The optimizer never looks up the model. **The shared parameter is the link.**
 
 Each shared tensor carries **two slots**:
 
@@ -49,7 +51,7 @@ Two parties passing notes through one tensor's two pockets. Neither imports the 
 
 ### The compute graph is transient
 
-The graph is the *ephemeral* part. Each forward pass builds a fresh DAG (define-by-run); params are its **leaves** but are not *stored in* it. `backward()` walks the graph to write each leaf's `.grad`, then the graph is freed. The params and their fresh `.grad` remain on the model.
+The graph is the *ephemeral* part. Each recorded forward pass builds a fresh DAG (define-by-run); parameters are leaf tensors referenced by graph operations. Ordinarily `backward()` walks the graph, accumulates gradients on used leaf parameters, and releases the intermediate graph. The parameters and their `.grad` fields remain.
 
 ```
 model + params:  persist for the whole run            (the storage)
@@ -66,7 +68,7 @@ ______________________________________________________________________
 A model defines a *function*; an optimizer defines an *update rule*. They vary independently (the same ResNet trains under SGD/Adam/LAMB; the same Adam trains any model), so coupling them would multiply combinations. Four concrete reasons:
 
 1. **It operates on a flat view of tensors, not the module tree.** The constructor takes an iterable of tensors or param-group dicts — it can optimize a subset, params spanning *multiple* models (GANs), or a bare `nn.Parameter` in no module at all.
-1. **The interface is `.grad`, not each other.** `backward()` writes `.grad`; `step()` reads `.grad` and writes `.data`. They coordinate through the shared tensor.
+1. **The interface is `.grad`, not a model method.** `backward()` writes `.grad`; `step()` reads `.grad` and changes parameter values. They coordinate through the shared tensor.
 1. **Separately checkpointable state.** `model.state_dict()` is the learned function; `optimizer.state_dict()` is training scaffolding (Adam's `m`, `v`, which are *not* parameters). You often want weights for inference *without* dragging stale optimizer moments along.
 1. **Param groups need different policies.** `add_param_group(...)` lets you unfreeze a backbone mid-training or set a lower LR for pretrained layers vs the head — an optimizer concern with no home in the module.
 
@@ -76,21 +78,21 @@ ______________________________________________________________________
 
 ## What `step()` Actually Does — and Inspecting It
 
-`step()` alters the **parameters**, never the learning rate. The LR is a value it *reads* from `param_groups`. For vanilla SGD, `step()` is literally `param.data = param.data - lr * param.grad`, under `no_grad` (the update is not tracked).
+For standard optimizers, `step()` alters the **parameters**, not the scheduled learning rate. It reads the `lr` in `param_groups`. For vanilla SGD, the conceptual update is `param ← param − lr·param.grad`, performed without recording it in the forward graph.
 
 Adam has **two** kinds of "rate," and only one is the scheduler's business:
 
 - **Per-parameter adaptation** (`m`, `v` buffers in `optimizer.state[param]`) — automatic; each param gets its own effective step from its gradient history.
-- **The global base LR** (`lr` in `param_groups`) — one number multiplying everything. *This* is what a scheduler rewrites.
+- **The base LR** (`lr` in `param_groups`) — one number per parameter group scaling its updates. *This* is what a scheduler rewrites.
 
 So Adam adapts *relative* to a base LR; the scheduler moves the base. Two knobs, two objects.
 
 ```python
-opt.param_groups[0]['lr']     # the global base LR (what the scheduler edits)
+opt.param_groups[0]['lr']     # this group's base LR (what the scheduler edits)
 opt.state[model.weight]       # Adam's m, v for that one param
 ```
 
-**Gotcha:** `optimizer.state` is **empty until after the first `step()`** — the buffers are created lazily on the first update.
+**Gotcha:** for Adam, `optimizer.state` is usually **empty until after the first `step()`** — its moment buffers are created lazily on the first update.
 
 ______________________________________________________________________
 
@@ -103,7 +105,7 @@ scheduler.step()   →  writes  param_groups[i]['lr']
 optimizer.step()   →  reads   param_groups[i]['lr'],  writes  param.data
 ```
 
-So the full picture is three layers of one-directional message-passing, each through a shared slot, no object reaching into another:
+So the full picture is a chain of state changes. The scheduler *does* hold the optimizer and edit its parameter groups; the optimizer holds parameter references but no model reference:
 
 ```
 scheduler →[lr in param_groups]→ optimizer →[.data on param]→ model
@@ -112,11 +114,22 @@ scheduler →[lr in param_groups]→ optimizer →[.data on param]→ model
 
 and your loop is the conductor making them fire in order.
 
-**Why bother:** big steps when far from a good solution, small steps as you close in — coarse-to-fine. A high constant LR converges fast then bounces; a decaying LR lets it settle.
+### Follow two updates
+
+Suppose an SGD optimizer starts with `w=2` and `lr=0.1`, and the gradient on each update is `2`. A scheduler with `gamma=0.5` runs **after** each optimizer update:
+
+| Event | Learning rate read by optimizer | Weight after `optimizer.step()` | Learning rate after `scheduler.step()` |
+|---|---:|---:|---:|
+| First update | 0.10 | 1.80 | 0.05 |
+| Second update | 0.05 | 1.70 | 0.025 |
+
+The scheduler did not change `w` directly. It changed the value the *next* optimizer update reads. In a real model the second gradient would usually change with the new weight; holding it at `2` isolates the scheduling effect.
+
+**Why bother:** a schedule can make early updates large enough to move quickly and later updates small enough to settle. The useful shape depends on the optimizer, model, and run length.
 
 ### Ordering rule and cadence
 
-Since PyTorch 1.1, call `optimizer.step()` **before** `scheduler.step()`. Get it backwards and PyTorch warns `Detected call of lr_scheduler.step() before optimizer.step()`, and the first value of the schedule is skipped: a `StepLR(step_size=1, gamma=0.1)` built with `lr=0.1` hands the very first update `0.01`.
+For the usual schedules, call `optimizer.step()` **before** `scheduler.step()`. Reversing them makes the first update use an already advanced schedule: a `StepLR(step_size=1, gamma=0.1)` built with `lr=0.1` gives that update `0.01`, and PyTorch warns about the order.
 
 *How often* you call the scheduler is set by the schedule's design, not by SGD vs batch GD:
 
@@ -131,7 +144,7 @@ With mini-batches an epoch is many updates, so per-batch ≠ per-epoch and you m
 
 ```python
 for epoch in range(epochs):
-    for batch in loader:
+    for x, y in loader:
         optimizer.zero_grad()
         loss = criterion(model(x), y)
         loss.backward()
@@ -350,7 +363,7 @@ ______________________________________________________________________
 
 ## Checkpointing and Reading the LR
 
-A scheduler's `state_dict()` holds its counters and bookkeeping (`last_epoch`, `base_lrs`, `_last_lr`, plus its own arguments like `step_size`). It does **not** hold the current `lr`. That lives in the optimizer's `param_groups`, and the optimizer's `state_dict()` saves it.
+A scheduler's `state_dict()` holds its counters and bookkeeping (`last_epoch`, `base_lrs`, `_last_lr`, plus its own arguments like `step_size`). `_last_lr` records what the scheduler last calculated, but **the operative learning rate** lives in the optimizer's `param_groups`, and the optimizer's `state_dict()` saves it.
 
 So resume needs both. Restore only the scheduler on a fresh optimizer and the counters say "one decay has happened" while the optimizer still runs at the original `lr` (`get_last_lr()` says `0.05`, `param_groups` says `0.1`). Restore both and the resumed run follows the original exactly. `save_state` and `load` in `train_loop.py` already save and restore all three: model, optimizer, scheduler.
 
@@ -379,7 +392,35 @@ ______________________________________________________________________
 | Don't know when training ends | Noam, or `ReduceLROnPlateau` |
 | Using `fit` | Per-epoch schedules only; no `ReduceLROnPlateau` |
 | Resuming a run | Load optimizer **and** scheduler state |
-| Current `lr` | `optimizer.param_groups[i]["lr"]` or `scheduler.get_last_lr()` |
+| Current `lr` | `optimizer.param_groups[i]["lr"]`; `scheduler.get_last_lr()` is the last value the scheduler calculated |
+
+______________________________________________________________________
+
+## Common Confusions
+
+| Easy to mix up | What to remember |
+|---|---|
+| Optimizer state versus model weights | Adam moments live with the optimizer; learned weights live with the model. Save both to resume training. |
+| Scheduler count versus epoch count | A scheduler counts calls to `step()`. The loop gives those calls meaning as batches or epochs. |
+| Current `lr` versus `base_lrs` | The optimizer's `param_groups[i]["lr"]` is used by the next update; `base_lrs` is scheduler bookkeeping. |
+| Step-based versus metric-based schedules | `ReduceLROnPlateau` needs a validation metric; `fit` currently steps its scheduler before validation. |
+
+## Check Your Recall
+
+1. If `scheduler.step()` halves the learning rate after update 20, which update first uses the smaller rate?
+1. Why can a per-batch warmup silently fail when passed to this project's `fit()`?
+1. Why is restoring only scheduler state insufficient to resume at the same learning rate?
+
+<details markdown="1">
+<summary>Answers</summary>
+
+1. Update 21. Update 20 already read the old rate when its optimizer step ran.
+1. `fit()` steps the scheduler once per epoch, so a schedule parameterized in optimizer updates advances far too slowly.
+1. The actual `lr` used by the optimizer lives in its parameter groups. Scheduler counters alone do not restore that value or Adam's optimizer state.
+
+</details>
+
+**One-minute recap:** The model owns parameters, `backward()` fills their gradients, and the optimizer reads those gradients and the current `lr`. A scheduler edits the optimizer's `lr` for later updates. Match scheduler calls to the unit it was configured for, and restore both optimizer and scheduler state when resuming.
 
 ______________________________________________________________________
 

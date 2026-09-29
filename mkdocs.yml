@@ -1,5 +1,5 @@
 site_name: Dawnshard
-site_description: A top-down–designed ML infrastructure library, and a learning track that builds it from the ground up.
+site_description: A top-down–designed ML infrastructure library with theory and revision notes for its core ideas.
 site_url: https://anantsimran.github.io/dawnshard/
 repo_url: https://github.com/anantsimran/dawnshard
 repo_name: anantsimran/dawnshard
@@ -13,6 +13,7 @@ hooks:
 watch:
   - README.md
   - pages
+  - graphify-out/graph.html
 
 theme:
   name: material
@@ -54,6 +55,7 @@ extra_css:
 
 markdown_extensions:
   - tables
+  - md_in_html
   - toc:
       permalink: true
       slugify: !!python/object/apply:pymdownx.slugs.slugify
@@ -62,7 +64,11 @@ markdown_extensions:
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.inlinehilite
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
 
 validation:
   nav:
@@ -72,7 +78,7 @@ validation:
 
 nav:
   - Home: README.md
-  - Index: tutorials/index.md
+  - Revision guide: tutorials/index.md
   - PyTorch:
       - Overview: tutorials/pytorch/overview.md
       - Tensors: tutorials/pytorch/tensors.md
@@ -82,6 +88,7 @@ nav:
       - Linear-layer backward: tutorials/pytorch/linear_layer_backward.md
       - ReLU & dead neurons: tutorials/pytorch/relu_and_dead_neurons.md
       - Data loading: tutorials/pytorch/dataloading.md
+      - Randomness & workers: tutorials/pytorch/randomness_and_workers.md
       - Inspecting your model: tutorials/pytorch/inspecting_your_model_best_practices.md
   - Training:
       - The training loop: tutorials/training/training_loop.md
@@ -89,9 +96,12 @@ nav:
       - Adam & the learning rate: tutorials/training/adam_and_learning_rate.md
       - Observability: tutorials/training/observability.md
   - Transformers:
-      - Attention implementation: app/src/training/transformer/README.md
       - Attention masks: tutorials/transformer/attention_masks.md
       - Pre-norm vs post-norm: tutorials/transformer/norm.md
+      - Compute & memory: tutorials/transformer/compute_and_memory.md
   - Guides:
       - Matrix calculus: tutorials/math/matrix_calculus.md
       - Convolutional networks: tutorials/vision/cnn.md
+  - Code notes:
+      - DataLoader internals: app/src/training/dataload/README.md
+      - Attention implementation: app/src/training/transformer/README.md

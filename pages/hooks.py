@@ -17,7 +17,12 @@ from mkdocs.structure.pages import Page
 REPO_ROOT = Path(__file__).resolve().parent.parent  # noqa: NAR001
 BRANCH = "main"
 HOME_PAGE = "README.md"
-EXTRA_PAGES = [HOME_PAGE, "app/src/training/transformer/README.md"]
+EXTRA_PAGES = [
+    HOME_PAGE,
+    "app/src/training/transformer/README.md",
+    "app/src/training/dataload/README.md",
+]
+EXTRA_ASSETS = ["graphify-out/graph.html"]
 
 # Inline markdown link targets that are relative paths: ](path) or ](path#anchor).
 RELATIVE_LINK = re.compile(pattern=r"\]\((?![a-z]+:|#)([^)\s#]+)(#[^)\s]*)?\)")
@@ -37,6 +42,8 @@ def on_files(files: Files, config: MkDocsConfig) -> Files:
             files.remove(file=file)
             files.append(file=_repo_file(path=f"{docs_prefix}/{file.src_uri}", config=config))
     for path in EXTRA_PAGES:
+        files.append(file=_repo_file(path=path, config=config))
+    for path in EXTRA_ASSETS:
         files.append(file=_repo_file(path=path, config=config))
     return files
 

@@ -8,9 +8,9 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import torch
 from beartype import beartype
-from training.common import bpe
 from jaxtyping import Float, Int, jaxtyped
 from loguru import logger
+from training.common.constants import PAD_ID
 from training.transformer.constants import B, H, L
 
 MAX_TOKENS = 24
@@ -38,15 +38,16 @@ def plot_attention_heads(
     the labels legible, so a cropped row no longer sums to 1.
 
     Args:
-        weights: Attention weights from one layer, one batch row per sentence.
-        token_ids: The ids those weights came from, right-padded with bpe.PAD_ID.
-        vocab: Maps ids to token strings, as returned by get_ag_news_dataloader.
+        weights: Detached attention weights from one layer, one batch row per
+            sentence, as `save_attention_maps` stores them.
+        token_ids: The ids those weights came from, right-padded with PAD_ID.
+        vocab: Maps ids to token strings, as returned by bpe.train.
         title: Figure title, e.g. which layer the weights came from.
         path: Where to write the PNG; parent directories are created.
         max_tokens: Keep at most this many leading tokens per sentence.
     """
-    weights = weights.detach().float().cpu()
-    lengths = (token_ids != bpe.PAD_ID).sum(dim=1).clamp(max=max_tokens).tolist()
+    weights = weights.float().cpu()
+    lengths = (token_ids != PAD_ID).sum(dim=1).clamp(max=max_tokens).tolist()
     n_sentences, n_heads = weights.shape[0], weights.shape[1]
     vmax = max(weights[s, :, :n, :n].max().item() for s, n in enumerate(lengths))  # noqa: NAR001
     fig, axes = plt.subplots(
@@ -89,7 +90,7 @@ def plot_attention_probes(probe_dir: Path, vocab: dict[int, str]) -> None:
 
     Args:
         probe_dir: Directory the probe wrote to.
-        vocab: Maps ids to token strings, as returned by get_ag_news_dataloader.
+        vocab: Maps ids to token strings, as returned by bpe.train.
     """
     for capture_path in sorted(probe_dir.glob(pattern="*.pt")):  # noqa: NAR001
         capture = torch.load(f=capture_path)

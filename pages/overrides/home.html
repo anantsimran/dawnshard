@@ -1,200 +1,127 @@
 {% extends "main.html" %}
 
-{#-
-  Landing page for README.md (selected by pages/hooks.py). The hero, design-choice
-  cards, and revision cards summarize the README; the README itself renders
-  in full underneath, so keep the cards in step with it when the design changes.
--#}
+{# The landing page is a short guide to the implementation. Detailed explanations
+   remain in the repository README, linked below. #}
 
 {% block tabs %}
   {{ super() }}
 
-  <section class="ds-hero">
+  <section class="ds-hero" id="overview" tabindex="-1" aria-labelledby="ds-hero-title">
     <div class="md-grid ds-hero__inner">
       <div class="ds-hero__copy">
-        <p class="ds-eyebrow">ML infrastructure, designed top-down</p>
-        <h1 class="ds-hero__title">Dawnshard</h1>
-        <p class="ds-hero__lead">
-          Most ML code grows bottom-up: a script becomes a notebook becomes a tangle of
-          globals. Dawnshard goes the other way, with clean seams between state, policy,
-          and mechanism, and it's engineered like a real codebase.
-        </p>
-        <p class="ds-hero__goal">
-          The long-term goal is Constitutional AI and RLHF. The training loop,
-          observability, and reproducibility primitives here are the groundwork.
+        <p class="ds-eyebrow">PyTorch training systems</p>
+        <h1 class="ds-hero__title" id="ds-hero-title">Dawnshard</h1>
+        <p class="ds-hero__lead">A training system built to make experiments inspectable.</p>
+        <p class="ds-hero__description">
+          A reusable loop connects explicit training state to model-specific policy.
+          In the Multi30k pipeline, custom probes capture attention during evaluation,
+          while per-sample seeds keep validation masks stable across passes.
         </p>
         <div class="ds-hero__actions">
           <a class="ds-btn ds-btn--primary" href="#design">
-            See the design choices
+            Explore the design
             {% include ".icons/material/arrow-right.svg" %}
           </a>
-          <a class="ds-btn ds-btn--ghost" href="tutorials/">
-            {% include ".icons/material/school-outline.svg" %}
-            Revise the theory
-          </a>
-          <a class="ds-btn ds-btn--ghost" href="{{ config.repo_url }}">
+          <a class="ds-btn ds-btn--secondary" href="{{ config.repo_url }}">
             {% include ".icons/fontawesome/brands/github.svg" %}
-            GitHub
+            View the source
           </a>
         </div>
-        <ul class="ds-chips" aria-label="Engineering practices">
-          <li>typed</li><li>tested</li><li>linted</li><li>containerized</li>
-        </ul>
       </div>
 
-      <figure class="ds-code" aria-label="Training a model with Dawnshard">
-        <figcaption>
-          <span class="ds-code__name">train.py</span>
-        </figcaption>
-<pre><code><span class="c"># the state that mutates</span>
-train_state = <span class="n">TrainState</span>(
-    model=model.<span class="f">to</span>(device=DEVICE),
-    optimizer=torch.optim.<span class="n">Adam</span>(params=model.parameters(), lr=<span class="s">1e-3</span>),
-    criterion=nn.<span class="n">CrossEntropyLoss</span>(),
-)
-<span class="c"># the policy, injected</span>
-epoch_spec = <span class="n">EpochSpec</span>(
-    device=DEVICE,
-    metrics_type=ClassificationMetrics,
-    calculate_metrics=calculate_metrics,
-    accumulate_metrics=accumulate_metrics,
-    reduce_metrics=reduce_metrics,
-)
-<span class="c"># the mechanism: a function over both</span>
-history = <span class="f">fit</span>(
-    state=train_state,
-    epoch_spec=epoch_spec,
-    train_loader=train_loader,
-    val_loader=val_loader,
-    num_epochs=<span class="s">15</span>,
-    val_epoch_list=[<span class="s">5</span>, <span class="s">10</span>, <span class="s">15</span>],
-    train_seed=random.<span class="f">getrandbits</span>(<span class="s">32</span>),
-    val_seed=VAL_SEED,
-    test_seed=TEST_SEED,
-)</code></pre>
-      </figure>
+      <div class="ds-run" aria-label="Multi30k training run overview">
+        <div class="ds-run__header">
+          <span class="ds-run__label">In the code</span>
+          <span class="ds-run__file">multi30ken_predictor.py</span>
+        </div>
+        <ol class="ds-run__steps">
+          <li>
+            <span class="ds-run__number">01</span>
+            <div>
+              <strong>Prepare the data</strong>
+              <p>Train-only BPE vocabulary. Fresh training masks; fixed validation masks per sentence.</p>
+            </div>
+          </li>
+          <li>
+            <span class="ds-run__number">02</span>
+            <div>
+              <strong>Run the same loop</strong>
+              <p><code>TrainState</code> holds mutable state; <code>EpochSpec</code> supplies metrics and probes.</p>
+            </div>
+          </li>
+          <li>
+            <span class="ds-run__number">03</span>
+            <div>
+              <strong>Inspect what happened</strong>
+              <p>Attention captures and run history share an ID; history records seeds and metrics.</p>
+            </div>
+          </li>
+        </ol>
+        <a class="ds-run__source" href="{{ config.repo_url }}/blob/main/app/src/training/model/multi30ken_predictor.py">
+          Follow the implementation
+          {% include ".icons/material/arrow-up-right.svg" %}
+        </a>
+      </div>
     </div>
   </section>
 
-  <section class="ds-section" id="design">
+  <section class="ds-section" id="design" aria-labelledby="ds-design-title">
     <div class="md-grid ds-section__inner">
-      <p class="ds-eyebrow ds-eyebrow--accent">Design choices</p>
-      <h2 class="ds-section__title">Every seam is deliberate</h2>
+      <p class="ds-eyebrow ds-eyebrow--accent">What to inspect</p>
+      <h2 class="ds-section__title" id="ds-design-title">Three decisions that shape the system</h2>
       <p class="ds-section__lead">
-        Each choice below trades a little convenience for code you can reason about,
-        test, and reproduce. The full reasoning is in the README further down.
+        These are the parts worth opening in the source: where the loop can be extended,
+        what a probe can see, and how evaluation stays comparable.
       </p>
       <div class="ds-grid">
-        <a class="ds-card" href="#separate-state-policy-and-mechanism">
-          <span class="ds-card__icon">{% include ".icons/material/function-variant.svg" %}</span>
-          <h3>No Trainer god-class</h3>
+        <article class="ds-card">
+          <span class="ds-card__index">01 / Architecture</span>
+          <h3>State, policy, mechanism</h3>
           <p>
-            State (<code>TrainState</code>), policy (<code>EpochSpec</code>), and
-            mechanism (<code>fit</code>, <code>run_epoch</code>) are kept apart:
-            separation of policy and mechanism, plus explicit state as in JAX and
-            Flax. Nothing hides in <code>self</code>.
+            <code>TrainState</code> owns the model and optimizer. <code>EpochSpec</code> provides
+            metrics and probes. <code>fit</code> runs both without a model-specific trainer.
           </p>
-        </a>
-        <a class="ds-card" href="#train-and-validate">
-          <span class="ds-card__icon">{% include ".icons/material/swap-horizontal-circle-outline.svg" %}</span>
-          <h3>One loop for train and eval</h3>
+          <a class="ds-card__link" href="{{ config.repo_url }}/blob/main/app/src/training/train/model.py">
+            Inspect the contracts {% include ".icons/material/arrow-up-right.svg" %}
+          </a>
+        </article>
+        <article class="ds-card" id="probes">
+          <span class="ds-card__index">02 / Inspection</span>
+          <h3>Probes at batch time</h3>
           <p>
-            <code>run_epoch</code> takes the step function as an argument, so the same
-            code drives training and evaluation. Metrics are injected as a type and
-            three functions, so adding one never touches the loop.
+            A probe receives the model, batch, detached prediction, and run position.
+            The attention probe saves maps from the evaluation forward pass, without
+            another pass through the model.
           </p>
-        </a>
-        <a class="ds-card" href="#debuggability">
-          <span class="ds-card__icon">{% include ".icons/material/source-commit.svg" %}</span>
-          <h3>Every run is reproducible</h3>
+          <a class="ds-card__link" href="{{ config.repo_url }}/blob/main/app/src/training/transformer/probes.py">
+            See the attention probe {% include ".icons/material/arrow-up-right.svg" %}
+          </a>
+        </article>
+        <article class="ds-card">
+          <span class="ds-card__index">03 / Evaluation</span>
+          <h3>Stable masks, useful comparisons</h3>
           <p>
-            Each run writes a history file with its git commit, the optimizer's
-            hyperparameters, and per-epoch metrics, duration, CPU, RAM, and GPU
-            memory. Any result can be traced back, and any two runs can be compared.
+            Training draws new masks each batch. Validation uses a local generator
+            seeded by sentence index, so a sentence keeps the same mask across epochs
+            without drawing masking randomness from the global generator.
           </p>
-        </a>
-        <a class="ds-card" href="#the-repo-keeps-itself-clean">
-          <span class="ds-card__icon">{% include ".icons/material/ruler-square.svg" %}</span>
-          <h3>Shapes checked at runtime</h3>
-          <p>
-            Every <code>forward()</code> is annotated with <code>jaxtyping</code> and
-            enforced by <code>beartype</code>. A shape mismatch fails at the call site,
-            not as a cryptic error three layers downstream.
-          </p>
-        </a>
-        <a class="ds-card" href="#debuggability">
-          <span class="ds-card__icon">{% include ".icons/material/chart-timeline-variant.svg" %}</span>
-          <h3>Observability built in</h3>
-          <p>
-            loguru for humans, a history JSON for machines, probes that look inside
-            the model mid-run, optional Weights &amp; Biases, and Chrome profiler
-            traces from <code>profiled_fit</code>. None of it is bolted on later.
-          </p>
-        </a>
-        <a class="ds-card" href="#the-repo-keeps-itself-clean">
-          <span class="ds-card__icon">{% include ".icons/material/hammer-wrench.svg" %}</span>
-          <h3>Engineered like a codebase</h3>
-          <p>
-            <code>uv</code> for dependencies, Docker for prod/dev parity, keyword
-            arguments enforced by a custom linter, and <code>make precheck</code> before
-            every PR.
-          </p>
-        </a>
+          <a class="ds-card__link" href="{{ config.repo_url }}/blob/main/app/src/training/dataload/multi30ken.py">
+            Trace the data loader {% include ".icons/material/arrow-up-right.svg" %}
+          </a>
+        </article>
       </div>
     </div>
   </section>
 
-  <section class="ds-section">
-    <div class="md-grid ds-section__inner">
-      <p class="ds-eyebrow ds-eyebrow--accent">Code map</p>
-      <h2 class="ds-section__title">Trace the code from data to training</h2>
-      <p class="ds-section__lead">
-        The code graph connects tokenization, data loading, attention, model state,
-        metrics, and the training loop. Search a symbol to see what it touches.
-      </p>
-      <a class="ds-btn ds-btn--primary" href="graphify-out/graph.html">
-        Explore the interactive graph
-        {% include ".icons/material/arrow-right.svg" %}
-      </a>
-    </div>
-  </section>
-
-  <section class="ds-section ds-section--tinted">
-    <div class="md-grid ds-section__inner">
-      <p class="ds-eyebrow ds-eyebrow--accent">Theory &amp; revision</p>
-      <h2 class="ds-section__title">Reconnect the ideas behind the code</h2>
-      <p class="ds-section__lead">
-        Follow a short route through related ideas, or look up one question. Each page
-        starts with the main idea and ends with a quick recall check.
-      </p>
-      <div class="ds-grid ds-grid--three">
-        <a class="ds-card ds-card--track" href="tutorials/#a-batch-from-input-to-update">
-          <span class="ds-card__icon">{% include ".icons/material/fire.svg" %}</span>
-          <h3>One batch, one update</h3>
-          <p>Trace how shapes, a model, a loss, gradients, and an optimizer fit
-            together.</p>
-          <span class="ds-card__more">Follow the ideas {% include ".icons/material/arrow-right.svg" %}</span>
-        </a>
-        <a class="ds-card ds-card--track" href="tutorials/#a-gradient-back-through-the-model">
-          <span class="ds-card__icon">{% include ".icons/material/transit-connection-variant.svg" %}</span>
-          <h3>Follow a gradient</h3>
-          <p>Connect autograd, the chain rule, linear layers, and ReLU to see where
-            parameter gradients come from.</p>
-          <span class="ds-card__more">Review gradient flow {% include ".icons/material/arrow-right.svg" %}</span>
-        </a>
-        <a class="ds-card ds-card--track" href="tutorials/#attention-and-gradient-flow">
-          <span class="ds-card__icon">{% include ".icons/material/book-open-page-variant-outline.svg" %}</span>
-          <h3>Attention &amp; residuals</h3>
-          <p>Recall which tokens can interact, how masks act, and why normalization
-            placement changes gradient flow.</p>
-          <span class="ds-card__more">Review transformers {% include ".icons/material/arrow-right.svg" %}</span>
-        </a>
-      </div>
-    </div>
-  </section>
 {% endblock %}
 
 {% block content %}
-  <p class="ds-eyebrow ds-eyebrow--accent">The README</p>
-  {{ page.content }}
+  <div class="ds-readme-intro">
+    <p class="ds-eyebrow ds-eyebrow--accent">Go deeper</p>
+    <h2>Read the engineering notes</h2>
+    <p>The full README covers the API, reproducibility boundaries, examples, and setup.</p>
+    <a class="ds-card__link" href="{{ config.repo_url }}/blob/main/README.md">
+      Open the project README {% include ".icons/material/arrow-up-right.svg" %}
+    </a>
+  </div>
 {% endblock %}

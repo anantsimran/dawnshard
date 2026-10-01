@@ -21,13 +21,25 @@ EXTRA_PAGES = [
     HOME_PAGE,
     "app/src/training/transformer/README.md",
     "app/src/training/dataload/README.md",
+    "experiments/multi30ken_mlm.md",
 ]
-EXTRA_ASSETS = ["graphify-out/graph.html"]
+
+# Images an EXTRA_PAGES page embeds. Without them as site files, the rewriter below
+# sends each one to GitHub, which serves an HTML page where an image is expected.
+EXTRA_ASSETS = [
+    "experiments/assets/sweep_best_val.png",
+    "experiments/assets/val_curves.png",
+    "experiments/assets/follow_up_best_val.png",
+]
+
+README_HERO_PREFIX = "# Dawnshard\n\n**A top-down–designed ML infrastructure library.**\n\n"
 
 # Inline markdown link targets that are relative paths: ](path) or ](path#anchor).
 RELATIVE_LINK = re.compile(pattern=r"\]\((?![a-z]+:|#)([^)\s#]+)(#[^)\s]*)?\)")
+
+
 def on_files(files: Files, config: MkDocsConfig) -> Files:
-    """Re-root docs_dir files under their repo path and add the READMEs as pages.
+    """Re-root docs_dir files under their repo path and add the extra pages and assets.
 
     Theme assets keep their own src_dir and are left alone.
     """
@@ -37,9 +49,7 @@ def on_files(files: Files, config: MkDocsConfig) -> Files:
         if file.src_dir == config.docs_dir:
             files.remove(file=file)
             files.append(file=_repo_file(path=f"{docs_prefix}/{file.src_uri}", config=config))
-    for path in EXTRA_PAGES:
-        files.append(file=_repo_file(path=path, config=config))
-    for path in EXTRA_ASSETS:
+    for path in EXTRA_PAGES + EXTRA_ASSETS:
         files.append(file=_repo_file(path=path, config=config))
     return files
 
@@ -48,10 +58,13 @@ def on_page_markdown(markdown: str, page: Page, config: MkDocsConfig, files: Fil
     """Use the landing template for the home page and send non-page links to GitHub."""
     if page.file.src_uri == HOME_PAGE:
         page.meta["template"] = "home.html"
-        page.meta["hide"] = ["navigation", "toc"]
-        # Keep a TOC target for Material's skip link. The landing template renders
-        # the overview and points readers to the full README on GitHub.
-        return "## Overview\n"
+        page.meta["hide"] = ["navigation"]
+        if not markdown.startswith(README_HERO_PREFIX):  # noqa: NAR001
+            raise ValueError(  # noqa: NAR001
+                "README.md title or tagline no longer matches the site hero"
+            )
+        # The hero supplies these two lines; the template renders the rest below it.
+        markdown = markdown[len(README_HERO_PREFIX) :]  # noqa: NAR001
     page_dir = posixpath.dirname(p=page.file.src_uri)
 
     def rewrite(match: re.Match[str]) -> str:

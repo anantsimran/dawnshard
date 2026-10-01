@@ -106,13 +106,7 @@ sh .githooks/pre-commit
 
 ## Before creating a PR
 
-Refresh the graphify knowledge graph, then check the docs against it:
-
-```bash
-graphify update .       # re-extracts code into graphify-out/graph.json, no LLM needed
-```
-
-Look at the updated graph in `graphify-out/` for what the branch added, removed, renamed, or rewired: modules, classes, functions, and the edges between packages. Where the root `README.md` or the site pages (`tutorials/`, `tutorials/index.md`, `mkdocs.yml`, `pages/overrides/home.html`, the READMEs in `EXTRA_PAGES`) no longer match, update them in the same PR, using Where a change goes under README structure to pick the sections.
+Where the root `README.md` or the site pages (`tutorials/`, `tutorials/index.md`, `mkdocs.yml`, `pages/overrides/home.html`, the READMEs in `EXTRA_PAGES`) no longer match, update them in the same PR, using Where a change goes under README structure to pick the sections.
 
 ## Tutorials site
 
@@ -127,7 +121,7 @@ Tutorials are grouped by topic: `pytorch/` (basics), `training/` (loop, optimize
 
 **When you add a tutorial, add a line for it to the `nav:` list in `mkdocs.yml`.** Otherwise the page is built but doesn't appear in the site's navigation. The build prints `WARNING - The following pages exist in the docs directory, but are not included in the "nav" configuration`, followed by the missing page.
 
-To publish another README, add its path to `EXTRA_PAGES` in `pages/hooks.py` and add a `nav:` entry for it.
+To publish another page from outside `tutorials/`, add its path to `EXTRA_PAGES` in `pages/hooks.py` and add a `nav:` entry for it. If it embeds images, add each one to `EXTRA_ASSETS` in the same file, or the link rewriter points them at GitHub and they render as a link instead of an image.
 
 **The landing page is not generated from the README.** `pages/overrides/home.html` is a hand-written hero and card grid that renders above the README and copies parts of it: the hero code block is the README's one-screen run, the "Design choices" cards summarize the design sections, and the "Learning track" cards list what each tutorial group covers. Nothing checks it. The mkdocs build passes and the pre-PR hook is satisfied while it goes stale. So in the same change:
 
@@ -175,7 +169,7 @@ Top-level sections are `##`, separated by a horizontal rule. They are not number
 | `## The repo keeps itself clean` | The engineering pitch: how the layout reinforces hygiene, then every rule the repo enforces and the tool that enforces it. | Two `###` subsections. `The layout enforces the boundaries`: a `Package | Owns` table with one row per package under `app/src/training/`, then a bullet list of the rules that fall out of the layout (downward-only imports, one `constants.py` and one `setup.py`, gitignored artifacts, one test file per module). `Every rule has a tool behind it`: a `Rule | Enforced by` table, one row per rule, each rule phrased "Every …" and each enforcer naming the file. A rule only belongs here if a tool checks it. When you add such a tool, add a row. When you remove one, remove its row. When you add a package, add a row to the layout table. |
 | `## Debuggability` | What a run leaves behind and how to read it. | `###` subsections in this order: `The terminal: one line per epoch`; `The history file: everything` (a numbered list of the three functions that build it: `EpochRecord` → `serialize_epoch_record` → `save_history`, then a trimmed real excerpt, then a bold-lead bullet list of what the file reveals about that run and a one-line verdict); `Plot it locally` (the `plot_metrics.py` command and its screenshot); `Compare two runs`; `Weights & Biases: the same dict, streamed`; `When the numbers aren't enough` (pointers to probes and `profiled_fit`). The excerpt and the screenshot come from a real run in `app/history/`; regenerate both when the history format or the plot script changes. Keep the excerpt trimmed to one epoch and rounded. The screenshot lives in `tutorials/assets/` (see Style). |
 | `## What's inside` | A scannable map: one table row per part of the library, with a one-line description and a link to its package. | Add a row when you add a package or a major capability. Keep descriptions to one line. |
-| `## Using the loop` | The manual: how each part of the loop behaves and how to use it. | One `###` per task, in this order: `Train and validate`, `Add a metric`, `Add a probe`, `Profile a few epochs`, `Save and restore a checkpoint`. Each opens with a snippet, then says what the loop does with it and, where it isn't obvious, why. Only mechanics and reasoning that no earlier section states belong here. Don't re-explain the state/policy/mechanism split, the history file (Debuggability owns it), or where things go (Exactly one place for everything owns it); link to them instead. `Train and validate` shows only the imports and points at the one-screen run rather than repeating it. A new loop feature gets one `###`. |
+| `## Using the loop` | The manual: how each part of the loop behaves and how to use it. | One `###` per task, in this order: `Train and validate`, `Seed a run`, `Repeat a past run`, `Add a metric`, `Add a probe`, `Profile a few epochs`, `Save and restore a checkpoint`. Each opens with a snippet, then says what the loop does with it and, where it isn't obvious, why. Only mechanics and reasoning that no earlier section states belong here. Don't re-explain the state/policy/mechanism split, the history file (Debuggability owns it), or where things go (Exactly one place for everything owns it); link to them instead. `Train and validate` shows only the imports and points at the one-screen run rather than repeating it. A new loop feature gets one `###`. |
 | `## The BPE tokenizer` | A short section: what it is, one snippet, one number. | **Keep it short. BPE internals stay out of the README**; they live in `bpe.py`'s docstrings and in the intentional-choices list below. |
 | `## Getting started` | Everything practical, as `###` subsections: install, run something, W&B, the MNIST models, model graph, attention heatmaps, Docker, Make targets. | A new script gets a line in the "Run something" block. A new Make target gets a row in the Make targets table. |
 | `## Tutorials` | What the learning track covers and how the site is built. | Keep the bold reminder about `tutorials/index.md` and `mkdocs.yml`. |
@@ -191,7 +185,7 @@ How a `DataLoader` is put together lives in `app/src/training/dataload/README.md
 
 ### Anchors other files depend on
 
-`pages/overrides/home.html` links to `#separate-state-policy-and-mechanism`, `#whats-inside`, `#train-and-validate`, `#the-repo-keeps-itself-clean`, and `#debuggability`, and its design cards summarize the README. The walkthrough links to `#visualizing-attention` and `#debuggability`, and Debuggability links to `#add-a-probe` and `#profile-a-few-epochs`. When you rename or remove one of those headings, update the links in the same change, then run the mkdocs build above; it warns about anchors that no longer exist.
+`pages/overrides/home.html` links to `#a-training-run-in-one-screen`, `#separate-state-policy-and-mechanism`, `#exactly-one-place-for-everything`, `#the-repo-keeps-itself-clean`, and `#debuggability`, and its design cards summarize the README. Those links only resolve because `pages/hooks.py` renders the README below the hero, so they are anchors on the landing page itself. The walkthrough links to `#visualizing-attention` and `#debuggability`, and Debuggability links to `#add-a-probe` and `#profile-a-few-epochs`. When you rename or remove one of those headings, update the links in the same change, then run the mkdocs build above; it warns about anchors that no longer exist.
 
 ### Where a change goes
 

@@ -62,7 +62,7 @@ data = json.load(fp=sys.stdin)
 skill = data.get("tool_input", {}).get("skill", "")
 if skill == "create-pr":
     named_args_result = subprocess.run(
-        args=["bash", "-c", "find app/src -name '*.py' | xargs /Users/anantsimran/.local/bin/uv run python scripts/check_named_args.py"],
+        args=["make", "check-named-args"],
     )
     if named_args_result.returncode != 0:
         block(reason="Named-arg violations found — fix before creating PR")

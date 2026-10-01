@@ -1,7 +1,7 @@
 {% extends "main.html" %}
 
-{# The landing page is a short guide to the implementation. Detailed explanations
-   remain in the repository README, linked below. #}
+{# Keep the run and design claims in step with the root README. The hook removes
+   only the duplicate README title and tagline; page.content renders below. #}
 
 {% block tabs %}
   {{ super() }}
@@ -9,17 +9,17 @@
   <section class="ds-hero" id="overview" tabindex="-1" aria-labelledby="ds-hero-title">
     <div class="md-grid ds-hero__inner">
       <div class="ds-hero__copy">
-        <p class="ds-eyebrow">PyTorch training systems</p>
+        <p class="ds-eyebrow">PyTorch training infrastructure</p>
         <h1 class="ds-hero__title" id="ds-hero-title">Dawnshard</h1>
-        <p class="ds-hero__lead">A training system built to make experiments inspectable.</p>
+        <p class="ds-hero__lead">A top-down–designed ML infrastructure library.</p>
         <p class="ds-hero__description">
-          A reusable loop connects explicit training state to model-specific policy.
-          In the Multi30k pipeline, custom probes capture attention during evaluation,
-          while per-sample seeds keep validation masks stable across passes.
+          One training API accepts models and loaders that meet its batch contract.
+          Explicit state, supplied policy, and named functions keep the loop reusable;
+          tests guard the package boundaries, and each run leaves evidence to inspect.
         </p>
         <div class="ds-hero__actions">
-          <a class="ds-btn ds-btn--primary" href="#design">
-            Explore the design
+          <a class="ds-btn ds-btn--primary" href="#separate-state-policy-and-mechanism">
+            Explore the architecture
             {% include ".icons/material/arrow-right.svg" %}
           </a>
           <a class="ds-btn ds-btn--secondary" href="{{ config.repo_url }}">
@@ -29,37 +29,37 @@
         </div>
       </div>
 
-      <div class="ds-run" aria-label="Multi30k training run overview">
+      <div class="ds-run" aria-label="A classification run using TrainState, EpochSpec, and fit">
         <div class="ds-run__header">
-          <span class="ds-run__label">In the code</span>
-          <span class="ds-run__file">multi30ken_predictor.py</span>
+          <span class="ds-run__label">One classification run</span>
+          <span class="ds-run__file">TrainState · EpochSpec · fit</span>
         </div>
-        <ol class="ds-run__steps">
-          <li>
-            <span class="ds-run__number">01</span>
-            <div>
-              <strong>Prepare the data</strong>
-              <p>Train-only BPE vocabulary. Fresh training masks; fixed validation masks per sentence.</p>
-            </div>
-          </li>
-          <li>
-            <span class="ds-run__number">02</span>
-            <div>
-              <strong>Run the same loop</strong>
-              <p><code>TrainState</code> holds mutable state; <code>EpochSpec</code> supplies metrics and probes.</p>
-            </div>
-          </li>
-          <li>
-            <span class="ds-run__number">03</span>
-            <div>
-              <strong>Inspect what happened</strong>
-              <p>Attention captures and run history share an ID; history records seeds and metrics.</p>
-            </div>
-          </li>
-        </ol>
-        <a class="ds-run__source" href="{{ config.repo_url }}/blob/main/app/src/training/model/multi30ken_predictor.py">
-          Follow the implementation
-          {% include ".icons/material/arrow-up-right.svg" %}
+        <pre class="ds-run__code"><code>train_state = TrainState(
+    model=model.to(device=DEVICE),
+    optimizer=torch.optim.Adam(params=model.parameters(), lr=1e-3),
+    criterion=nn.CrossEntropyLoss(),
+)
+epoch_spec = EpochSpec(
+    device=DEVICE,
+    metrics_type=ClassificationMetrics,
+    calculate_metrics=calculate_metrics,
+    accumulate_metrics=accumulate_metrics,
+    reduce_metrics=reduce_metrics,
+)
+history = fit(
+    state=train_state,
+    epoch_spec=epoch_spec,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    num_epochs=15,
+    val_epoch_list=[5, 10, 15],
+    train_seed=random.getrandbits(32),
+    val_seed=VAL_SEED,
+    test_seed=TEST_SEED,
+)</code></pre>
+        <a class="ds-run__source" href="#a-training-run-in-one-screen">
+          Read the training API
+          {% include ".icons/material/arrow-right.svg" %}
         </a>
       </div>
     </div>
@@ -67,61 +67,96 @@
 
   <section class="ds-section" id="design" aria-labelledby="ds-design-title">
     <div class="md-grid ds-section__inner">
-      <p class="ds-eyebrow ds-eyebrow--accent">What to inspect</p>
-      <h2 class="ds-section__title" id="ds-design-title">Three decisions that shape the system</h2>
+      <p class="ds-eyebrow ds-eyebrow--accent">Design choices</p>
+      <h2 class="ds-section__title" id="ds-design-title">The principles live in the code</h2>
       <p class="ds-section__lead">
-        These are the parts worth opening in the source: where the loop can be extended,
-        what a probe can see, and how evaluation stays comparable.
+        Each choice has a defined home in the library and a place to check its effect.
       </p>
       <div class="ds-grid">
         <article class="ds-card">
           <span class="ds-card__index">01 / Architecture</span>
-          <h3>State, policy, mechanism</h3>
+          <h3>Separate state, policy, and mechanism</h3>
           <p>
-            <code>TrainState</code> owns the model and optimizer. <code>EpochSpec</code> provides
-            metrics and probes. <code>fit</code> runs both without a model-specific trainer.
+            <code>TrainState</code> holds mutable resources. <code>EpochSpec</code> supplies
+            scoring and probes. <code>fit</code> executes the run for any matching model and data.
           </p>
-          <a class="ds-card__link" href="{{ config.repo_url }}/blob/main/app/src/training/train/model.py">
-            Inspect the contracts {% include ".icons/material/arrow-up-right.svg" %}
-          </a>
-        </article>
-        <article class="ds-card" id="probes">
-          <span class="ds-card__index">02 / Inspection</span>
-          <h3>Probes at batch time</h3>
-          <p>
-            A probe receives the model, batch, detached prediction, and run position.
-            The attention probe saves maps from the evaluation forward pass, without
-            another pass through the model.
-          </p>
-          <a class="ds-card__link" href="{{ config.repo_url }}/blob/main/app/src/training/transformer/probes.py">
-            See the attention probe {% include ".icons/material/arrow-up-right.svg" %}
+          <a class="ds-card__link" href="#separate-state-policy-and-mechanism">
+            Trace the separation {% include ".icons/material/arrow-right.svg" %}
           </a>
         </article>
         <article class="ds-card">
-          <span class="ds-card__index">03 / Evaluation</span>
-          <h3>Stable masks, useful comparisons</h3>
+          <span class="ds-card__index">02 / Extension</span>
+          <h3>Give each concern one home</h3>
           <p>
-            Training draws new masks each batch. Validation uses a local generator
-            seeded by sentence index, so a sentence keeps the same mask across epochs
-            without drawing masking randomness from the global generator.
+            Metrics score outputs, probes inspect a batch, and checkpointing stays
+            a named function. A new concern has a clear place to enter.
           </p>
-          <a class="ds-card__link" href="{{ config.repo_url }}/blob/main/app/src/training/dataload/multi30ken.py">
-            Trace the data loader {% include ".icons/material/arrow-up-right.svg" %}
+          <a class="ds-card__link" href="#exactly-one-place-for-everything">
+            Find the extension points {% include ".icons/material/arrow-right.svg" %}
+          </a>
+        </article>
+        <article class="ds-card">
+          <span class="ds-card__index">03 / Boundaries</span>
+          <h3>Make dependencies directional</h3>
+          <p>
+            Each package owns one concern. A test rejects forbidden imports and
+            cycles; source checks enforce named arguments and docstrings.
+          </p>
+          <a class="ds-card__link" href="#the-repo-keeps-itself-clean">
+            Inspect the checks {% include ".icons/material/arrow-right.svg" %}
+          </a>
+        </article>
+        <article class="ds-card">
+          <span class="ds-card__index">04 / Observability</span>
+          <h3>Leave evidence behind</h3>
+          <p>
+            Epoch records and run history retain metrics, seeds, the Git revision,
+            and machine context. Local plots and probes help explain the numbers.
+          </p>
+          <a class="ds-card__link" href="#debuggability">
+            Examine a run {% include ".icons/material/arrow-right.svg" %}
           </a>
         </article>
       </div>
     </div>
   </section>
 
+  <section class="ds-section ds-section--track" id="learning-track" aria-labelledby="ds-track-title">
+    <div class="md-grid ds-section__inner">
+      <p class="ds-eyebrow ds-eyebrow--accent">Learning track</p>
+      <h2 class="ds-section__title" id="ds-track-title">Study the ideas behind the implementation</h2>
+      <p class="ds-section__lead">
+        The revision guide links each topic to a question and a focused explanation.
+      </p>
+      <div class="ds-track-grid">
+        <a class="ds-track" href="{{ 'tutorials/pytorch/overview/' | url }}">
+          <strong>PyTorch</strong>
+          <span>Tensors, autograd, modules, data loading, and randomness.</span>
+        </a>
+        <a class="ds-track" href="{{ 'tutorials/training/training_loop/' | url }}">
+          <strong>Training</strong>
+          <span>Loops, optimizers, schedules, and observability.</span>
+        </a>
+        <a class="ds-track" href="{{ 'tutorials/math/matrix_calculus/' | url }}">
+          <strong>Math</strong>
+          <span>Matrix calculus and the chain rule behind gradients.</span>
+        </a>
+        <a class="ds-track" href="{{ 'tutorials/vision/cnn/' | url }}">
+          <strong>Vision</strong>
+          <span>Convolutions, parameter counts, and model graphs.</span>
+        </a>
+        <a class="ds-track" href="{{ 'tutorials/transformer/attention_masks/' | url }}">
+          <strong>Transformers</strong>
+          <span>Attention masks, normalization, compute, and memory.</span>
+        </a>
+      </div>
+      <a class="ds-track-index" href="{{ 'tutorials/' | url }}">
+        Browse the revision guide {% include ".icons/material/arrow-right.svg" %}
+      </a>
+    </div>
+  </section>
 {% endblock %}
 
 {% block content %}
-  <div class="ds-readme-intro">
-    <p class="ds-eyebrow ds-eyebrow--accent">Go deeper</p>
-    <h2>Read the engineering notes</h2>
-    <p>The full README covers the API, reproducibility boundaries, examples, and setup.</p>
-    <a class="ds-card__link" href="{{ config.repo_url }}/blob/main/README.md">
-      Open the project README {% include ".icons/material/arrow-up-right.svg" %}
-    </a>
-  </div>
+  {{ page.content }}
 {% endblock %}

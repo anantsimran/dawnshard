@@ -9,17 +9,3 @@ __pycache__/
 wandb/
 
 site/
-
-# Graphify's local scan state; keep the shareable graph outputs.
-graphify-out/.*
-graphify-out/cache/
-graphify-out/manifest.json
-graphify-out/cost.json
-graphify-out/[0-9][0-9][0-9][0-9]-*/
-
-# Graphify writes machine-specific hook launchers after `make install-hooks`.
-.githooks/post-commit
-.githooks/post-checkout
-
-# Graphify installs its Codex skill and local hook registration here.
-.codex/

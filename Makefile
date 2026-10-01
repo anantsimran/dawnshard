@@ -25,10 +25,9 @@ check-named-args:
 check-docstrings:
 	@find app/src -name "*.py" | xargs uv run python scripts/check_docstrings.py
 
-# Point git at the versioned hooks directory and install Graphify's local hooks.
+# Point git at the versioned hooks directory.
 install-hooks:
 	git config core.hooksPath .githooks
-	graphify hook install
 
 # Build the production Docker image
 docker-build:

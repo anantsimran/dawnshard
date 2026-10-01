@@ -13,7 +13,6 @@ hooks:
 watch:
   - README.md
   - pages
-  - graphify-out/graph.html
 
 theme:
   name: material
@@ -105,3 +104,5 @@ nav:
   - Code notes:
       - DataLoader internals: app/src/training/dataload/README.md
       - Attention implementation: app/src/training/transformer/README.md
+  - Experiments:
+      - Multi30k masked-token pretraining: experiments/multi30ken_mlm.md

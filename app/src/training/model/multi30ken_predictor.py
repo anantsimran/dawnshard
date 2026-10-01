@@ -14,10 +14,12 @@ selected positions are scored. Rows longer than SEQ_LEN are truncated and shorte
 right-padded with PAD_ID, so a model reading them needs an embedding with `len(vocab)`
 rows and `padding_idx=PAD_ID`.
 
-`main` either trains BASELINE once or, with SHOULD_GRID_SEARCH, runs `grid_search`:
-BASELINE plus each of SWEEP's values changed one at a time, every one of those with
-and without cosine annealing. Both load the default merges file rather than retraining
-BPE; to change it, call the loader once with `retrain_tokenizer=True,
+`main` either trains SINGLE_RUN once for SINGLE_RUN_EPOCHS or, with SHOULD_GRID_SEARCH,
+runs `grid_search` over FOLLOW_UP for FOLLOW_UP_EPOCHS. The original sweep is
+`grid_search` over `one_at_a_time_configs(baseline=BASELINE, sweep=SWEEP)` for
+NUM_EPOCHS: BASELINE plus each of SWEEP's values changed one at a time, every one of
+those with and without cosine annealing. Both load the default merges file rather than
+retraining BPE; to change it, call the loader once with `retrain_tokenizer=True,
 set_default_tokenizer=True`.
 
 Train from the repo root; losses are logged to the terminal after every epoch:
@@ -225,6 +227,7 @@ class Config:
     num_heads: int
     ffn_multiplier: int
     cosine_annealing: bool
+    qk_norm: bool = True
 
 
 BASELINE = Config(
@@ -246,6 +249,21 @@ SWEEP: dict[str, tuple[Any, ...]] = {
     "num_heads": (2, 8),
     "ffn_multiplier": (4, 8),
 }
+# What `main` trains when SHOULD_GRID_SEARCH is off.
+SINGLE_RUN = replace(  # noqa: NAR001
+    BASELINE, d_model=512, dropout_rate=0.3, cosine_annealing=True
+)
+SINGLE_RUN_EPOCHS = 50
+# Follow-ups at d_model=128 for 50 epochs. The control runs twice, so the gap between
+# its two seeds says how big a difference has to be before it is real.
+FOLLOW_UP_CONTROL = replace(BASELINE, d_model=128)  # noqa: NAR001
+FOLLOW_UP = [
+    FOLLOW_UP_CONTROL,
+    FOLLOW_UP_CONTROL,
+    replace(FOLLOW_UP_CONTROL, qk_norm=False),  # noqa: NAR001
+    replace(FOLLOW_UP_CONTROL, dropout_rate=0.0),  # noqa: NAR001
+]
+FOLLOW_UP_EPOCHS = 50
 
 
 def one_at_a_time_configs(baseline: Config, sweep: dict[str, tuple[Any, ...]]) -> list[Config]:
@@ -272,13 +290,15 @@ def train_config(
     train_loader: DataLoader,
     val_loader: DataLoader,
     vocab_size: int,
+    num_epochs: int = NUM_EPOCHS,
     wandb_run: Optional[Any] = None,
 ) -> tuple[str, list[EpochRecord]]:
-    """Train one model on `config` for NUM_EPOCHS, validating every epoch.
+    """Train one model on `config` for `num_epochs`, validating every epoch.
 
     Args:
         train_loader: Built with `seq_len=config.seq_len`.
         vocab_size: `len(vocab)` of the tokenizer the loaders were built with.
+        num_epochs: Also the cosine schedule's length, when `config` enables it.
 
     Returns:
         `(run_uuid, history)`. `run_uuid` names the history file under HISTORY_PATH
@@ -316,7 +336,7 @@ def train_config(
         num_encoders=config.num_encoders,
         h=config.num_heads,
         ffn_multiplier=config.ffn_multiplier,
-        qk_norm=True,
+        qk_norm=config.qk_norm,
     ).to(device=DEVICE)  # noqa: NAR001
     optimizer = torch.optim.Adam(params=model.parameters(), lr=LEARNING_RATE)
     train_state = TrainState(
@@ -324,7 +344,7 @@ def train_config(
         optimizer=optimizer,
         criterion=nn.CrossEntropyLoss(),
         # fit steps the scheduler once per epoch, so this decays to 0 by the last one.
-        scheduler=CosineAnnealingLR(optimizer=optimizer, T_max=NUM_EPOCHS)
+        scheduler=CosineAnnealingLR(optimizer=optimizer, T_max=num_epochs)
         if config.cosine_annealing
         else None,
     )
@@ -335,8 +355,8 @@ def train_config(
         epoch_spec=epoch_spec,
         train_loader=train_loader,
         val_loader=val_loader,
-        num_epochs=NUM_EPOCHS,
-        val_epoch_list=list(range(1, NUM_EPOCHS + 1)),  # noqa: NAR001
+        num_epochs=num_epochs,
+        val_epoch_list=list(range(1, num_epochs + 1)),  # noqa: NAR001
         train_seed=train_seed,
         val_seed=VAL_SEED,
         test_seed=TEST_SEED,
@@ -345,8 +365,8 @@ def train_config(
     return run_uuid, history
 
 
-def grid_search() -> None:
-    """Train every config from `one_at_a_time_configs` and log them by best val loss.
+def grid_search(configs: list[Config], num_epochs: int) -> None:
+    """Train every config in `configs` for `num_epochs` and log them by best val loss.
 
     Every run draws its own train seed, so two configs differ in weight init and batch
     order as well as in the config; each run's seed is in its history file. Loaders are
@@ -364,7 +384,6 @@ def grid_search() -> None:
     """
     loaders: dict[int, tuple[DataLoader, DataLoader, int]] = {}
     results: list[tuple[float, int, MaskedTokenMetrics, Config, str]] = []
-    configs = one_at_a_time_configs(baseline=BASELINE, sweep=SWEEP)
     for index, config in enumerate(configs):  # noqa: NAR001
         logger.info("grid {}/{}", index + 1, len(configs))  # noqa: NAR001
         if config.seq_len not in loaders:
@@ -381,6 +400,7 @@ def grid_search() -> None:
             train_loader=train_loader,
             val_loader=val_loader,
             vocab_size=vocab_size,
+            num_epochs=num_epochs,
         )
         best_loss, best = min(  # noqa: NAR001
             ((record.val_loss, record) for record in history if record.val_loss is not None),
@@ -411,26 +431,27 @@ def grid_search() -> None:
 
 
 def main():
-    """Run `grid_search`, or train BASELINE once, optionally logging to W&B."""
+    """Run `grid_search` over FOLLOW_UP, or train SINGLE_RUN once, optionally to W&B."""
     SHOULD_GRID_SEARCH: bool = True
     SHOULD_LOG_WANDB: bool = False
     if SHOULD_GRID_SEARCH:
-        grid_search()
+        grid_search(configs=FOLLOW_UP, num_epochs=FOLLOW_UP_EPOCHS)
         return
     wandb_run = None
     if SHOULD_LOG_WANDB:
         wandb_run = init_wandb(project="dawnshard", run_name="multi30ken_predictor")
     train_loader, val_loader, _, _, vocab = get_multi30ken_mlm_dataloader(
-        seq_len=BASELINE.seq_len,
+        seq_len=SINGLE_RUN.seq_len,
         val_seed=VAL_SEED,
         test_seed=TEST_SEED,
         batch_size=BATCH_SIZE,
     )
     run_uuid, _ = train_config(
-        config=BASELINE,
+        config=SINGLE_RUN,
         train_loader=train_loader,
         val_loader=val_loader,
         vocab_size=len(vocab),  # noqa: NAR001
+        num_epochs=SINGLE_RUN_EPOCHS,
         wandb_run=wandb_run,
     )
     plot_attention_probes(probe_dir=ATTENTION_PROBES_PATH / run_uuid, vocab=vocab)

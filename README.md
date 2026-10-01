@@ -3,8 +3,8 @@
 **A top-down–designed ML infrastructure library.**
 
 Dawnshard is an ML stack built from first principles and engineered like a real
-codebase. Each one is typed down to tensor
-shapes, tested, linted, containerized, and documented with the reasoning behind it.
+codebase. Every piece is typed down to tensor shapes, tested, linted,
+containerized, and documented with the reasoning behind it.
 
 Most ML code grows bottom-up: a script becomes a notebook becomes a tangle of
 globals. Dawnshard goes the other way. Infra is *designed*, with clean seams between
@@ -33,8 +33,9 @@ ______________________________________________________________________
 
 ## A training run in one screen
 
-Here is the whole loop, for any `nn.Module` and any two `DataLoader`s that yield
-`(input, target)` tuples.
+Here is a complete classification run with a `model`, `train_loader`, and
+`val_loader`. The loaders yield `(input, target)` tuples, and the model produces
+class logits. The loop itself has no dataset or model class baked in.
 
 ```python
 train_state = TrainState(
@@ -82,28 +83,32 @@ This is the principle the whole repo hangs on, and the part I am proudest of.
 Operating-systems people have a name for it: **separation of policy and mechanism**,
 from the Hydra kernel in 1974. Mechanism is the code that does the work. Policy is
 the set of decisions about how. Keep them apart and you can change either without
-touching the other. JAX and Flax add the third piece, **explicit state**: nothing
-hides in `self`, and everything the loop mutates is passed in and handed back. Flax
-even calls its struct `TrainState`.
+touching the other. JAX and Flax add the third piece, **explicit state**: the caller
+passes the model and optimizer in, rather than hiding them in a trainer instance.
+Flax even calls its struct `TrainState`.
 
-Dawnshard applies all three to a PyTorch training loop, and every component maps to
-exactly one of them. The intro's configuration, state, and computation are these three
-: policy, state, and mechanism.
+Dawnshard applies that split to a PyTorch training loop. State, policy, and mechanism
+are visible at the call site, so changing a dataset or model does not require a new
+loop.
 
 ### State: `TrainState`
 
 Defined in [model.py](app/src/training/train/model.py). A dataclass with four
-fields: `model`, `optimizer`, `criterion`, and `scheduler`. It is the only object the
-loop mutates. A checkpoint is its `state_dict`s and nothing else (`save_state`,
-`load`), so "what does resuming restore?" has a one-word answer.
+fields: `model`, `optimizer`, `criterion`, and `scheduler`. It holds the caller-owned
+objects the loop changes: model parameters, optimizer state, and an optional
+scheduler. A checkpoint saves their `state_dict`s through
+[`save_state`](app/src/training/train/utils.py) and restores them through
+[`load`](app/src/training/train/train_loop.py). The criterion is supplied again by
+the caller; the checkpoint does not save it.
 
 ### Policy: `EpochSpec`
 
 Same file. It holds `device`, a `Metrics` type, the three functions that score a
 batch and reduce an epoch, and two optional probes. The loop reads it and never
-writes to it. Swap `ClassificationMetrics` for `Metrics` and the same loop trains a
-regressor. Set `train_probe` and the same loop dumps gradient norms. Nothing in
-`EpochSpec` knows which model it will drive.
+writes to it. Supply `Metrics` and the functions in
+[loss_only_metrics.py](app/src/training/metrics/loss_only_metrics.py) to use the same
+loop for a regressor. Set `train_probe` to capture gradient norms. Nothing in
+`EpochSpec` names the model or dataset it will drive.
 
 ### Mechanism: the functions
 
@@ -115,14 +120,15 @@ Batch = tuple[Tensor, Tensor]
 StepFn = Callable[["TrainState", "EpochSpec", Batch, int, int, Optional[int]], "Metrics"]
 ```
 
-state in, policy in, data in, metrics out. The trailing ints are the epoch, the
+State in, policy in, data in, metrics out. The trailing ints are the epoch, the
 batch's index, and the seed of the pass, passed through for probes: `val_seed` on a
-validation pass, None on a training pass.
+validation pass, `None` on a training pass.
 
 `train_step` and `eval_step` are the two `StepFn`s. `run_epoch` walks a loader with
 whichever one it is handed, `fit` runs the epochs and writes the history, and
-`profiled_fit` does the same with a profiler on the epochs you pick. None of them keeps
-anything between calls, and the only argument they mutate is the `TrainState`.
+`profiled_fit` does the same with a profiler on the epochs you pick. None of these
+functions owns persistent training state; they change the objects inside `TrainState`
+and return metrics or epoch records.
 
 ### What that buys you
 
@@ -132,8 +138,9 @@ anything between calls, and the only argument they mutate is the `TrainState`.
 - **Tests need no `DataLoader`.** `run_epoch` only iterates its loader, so
   [test_train_loop.py](app/tests/test_train_loop.py) passes it a plain list of
   `(input, target)` tuples.
-- **No `self` to grep.** A step reads its arguments and nothing else. To see what it
-  depends on, read its signature.
+- **The loop has no trainer instance to inspect.** A step's signature names its
+  inputs, and [train_loop.py](app/src/training/train/train_loop.py) shows when the
+  optimizer steps, metrics accumulate, and probes run.
 - **Every piece is replaceable alone.** The MNIST CNN in
   [mnist.py](app/src/training/model/mnist.py) and the AG News transformer in
   [ag_news_classifier.py](app/src/training/model/ag_news_classifier.py) call the same
@@ -145,39 +152,46 @@ ______________________________________________________________________
 
 ## Exactly one place for everything
 
-Because the seams are fixed, every tool you might want already has a home. There is
-no hidden complexity to be afraid of in this repo.
+The split also gives common training extensions a specific home. The loop can keep
+its execution path small because each extension crosses a named boundary.
 
 ### Metrics: a function of the outputs
 
-A metric sees the predicted tensor and the target tensor and nothing else. Accuracy, precision, and recall are one
-dataclass and three functions in
+A metric calculation sees the predicted tensor and the target tensor. Accuracy,
+precision, and recall are one dataclass and three functions in
 [classification_metrics.py](app/src/training/metrics/classification_metrics.py).
-Mean absolute error would be another dataclass and three more. The loop calls them
-on every batch and never learns what they compute.
+Mean absolute error would be another dataclass and three more. The step calls the
+calculation on each batch; `run_epoch` accumulates and reduces it without knowing
+what the fields mean.
 
 ### Probes: a function of the training state
 
-A probe sees the training state at the one moment everything exists together: the
-model, with this batch's gradients still on its parameters during training, the
-input, the target, the detached prediction, and where in the run you are. It writes
-what it wants to disk or to the log and returns nothing. Attention maps, gradient
-norms, activations for a fixed input: same signature, same slot on `EpochSpec`.
+A probe sees the model and current batch after a step, while training gradients are
+still on the parameters: input, target, detached prediction, epoch, batch index,
+and pass seed. It can write to disk or a log and returns nothing. Attention maps,
+gradient norms, activations for a fixed input: same signature, same slot on
+`EpochSpec`. The signature lives in [model.py](app/src/training/train/model.py).
 
-### Everything else
+### Everything else: a named function
 
-- Need to resume? `save_state` and `load`, called where you decide.
-- What happened in your run? The history file every run writes on its own.
-- Who controls randomness? `train_seed`, seeded once in `main` before the model is
-  built and once more by `fit`; the global RNG does the rest. Eval randomness comes from
-  `VAL_SEED` and `TEST_SEED` in
-  [constants.py](app/src/training/constants.py).
+- Need a trace? [`profiled_fit`](app/src/training/train/train_loop.py) profiles the
+  epochs you select, using the same state, policy, and steps.
+- Need to resume? [`save_state`](app/src/training/train/utils.py) and
+  [`load`](app/src/training/train/train_loop.py) run where the caller puts them.
+- What happened in a run? [`save_history`](app/src/training/train/utils.py) writes
+  the records that `fit` builds at the end of the run.
+- Who controls randomness? The example entry points seed before model construction,
+  and [`fit`](app/src/training/train/train_loop.py) seeds before training. The caller
+  passes the validation and test seeds; `fit` forwards the validation seed to
+  probes and records all three.
 
 ### No hidden complexity
 
-Nothing here asks you to read the loop, subclass anything, or work out which of a
-dozen callbacks fires when. Know the three parts and you know where every tool
-goes.
+Follow one batch through `train_step`, `run_epoch`, and `fit` in
+[train_loop.py](app/src/training/train/train_loop.py). That path shows when a model
+runs, when the optimizer steps, and when an optional probe fires. New models and
+datasets enter through arguments, while new metrics and probes keep their own
+contracts.
 
 ______________________________________________________________________
 
@@ -189,7 +203,9 @@ done that way. Here is what that looks like.
 ### The layout enforces the boundaries
 
 The same separation holds one level up. `app/src/training/` has one package per
-concern, and imports point downward.
+concern. [test_layout.py](app/tests/test_layout.py) checks the allowed import edges
+and rejects cycles, so the training loop cannot acquire a model dependency by
+accident.
 
 | Package | Owns |
 |---|---|
@@ -197,8 +213,8 @@ concern, and imports point downward.
 | `metrics/` | the `Metrics` subclasses and their three functions |
 | `transformer/` | attention, the encoder block, masks, probes, axis names |
 | `common/` | the BPE tokenizer and the indexed max-heap it trains with |
-| `dataload/` | the dataset cache and the AG News pipeline |
-| `model/` | the MNIST classifiers and the AG News classifier |
+| `dataload/` | dataset caches and the AG News and Multi30k pipelines |
+| `model/` | the MNIST classifiers, AG News classifier, and Multi30k predictor |
 | `viz/` | every plot |
 | `analytics/` | printed dataset statistics |
 | `utils/` | the git commit, `log_elapsed` step timing |
@@ -214,11 +230,8 @@ Four rules fall out of that layout:
 - Tests live in `app/tests/`, one file per module. The tests for `mask.py` are in
   `test_mask.py` and nowhere else.
 
-The [interactive code graph](graphify-out/graph.html) makes those boundaries
-visible. Its busiest connections run through `TrainState`, `EpochSpec`, and `fit`:
-models and batches meet the loop through state, while scoring functions arrive
-through policy. The tokenizer and attention code feed models without making the
-training loop depend on either one.
+The pieces meet at the training call site. These arrows show what feeds a run,
+not Python import direction:
 
 ```mermaid
 flowchart LR
@@ -233,24 +246,20 @@ flowchart LR
   history --> viz["viz: plots"]
 ```
 
-Arrows show how pieces feed a run, not Python import direction. The
-[graph report](graphify-out/GRAPH_REPORT.md) and [source graph](graphify-out/graph.json)
-provide the detailed relationships; Graphify marks inferred connections separately
-from relationships found directly in source.
-
 ### Every rule has a tool behind it
 
 | Rule | Enforced by |
 |---|---|
-| Every command runs through `uv run`. No bare `python`, no `pip`, no `sys.path` edits. | [.env](.env) sets `PYTHONPATH=app/src`, the [Dockerfile](Dockerfile) sets the same `UV_ENV_FILE`, and both run the same `uv sync --frozen` against the same lockfile. Imports resolve identically on a laptop and in a container. |
-| Every workflow is a Make target. | The [Makefile](Makefile). Nobody remembers flags, and nobody's local variation drifts. |
-| Every function call uses keyword arguments. | [check_named_args.py](scripts/check_named_args.py), an AST linter that fails on any positional argument. `# noqa: NAR001` is the escape for C builtins and `nn.Module.__call__`, where keywords don't exist. |
-| Every import between packages points downward. | [test_layout.py](app/tests/test_layout.py) lists which packages each package may import, and fails on any import outside that list, type-only imports included. It also fails if the list has a cycle, so "downward" can't quietly turn into a loop. The pre-PR hook runs it with the rest of the suite. |
-| Every function has a docstring. | [check_docstrings.py](scripts/check_docstrings.py), installed as a git pre-commit hook. Tests are exempt; nothing else is. |
-| Every tensor has a declared shape. | `jaxtyping` annotations enforced at call time by `beartype` on every `forward` and every transformer function. Shape strings come from one set of axis names in [constants.py](app/src/training/transformer/constants.py), so `B`, `L`, `d_model`, `h`, and `d_k` mean the same thing everywhere. A mismatch raises at the call that made it. |
-| Every run is recorded. | `fit` writes a history file with the git commit, the optimizer's hyperparameters, and per-epoch resource usage. A result you can't trace to a commit doesn't exist here. |
-| Every code commit refreshes the code graph. | `make install-hooks` installs Graphify's post-commit and post-checkout hooks alongside the versioned pre-commit check. The graph remains a navigable snapshot of the code. |
-| Every PR passes the same gate. | `make precheck` runs pyright, ruff, and mdformat. A pre-PR hook ([check_tests_before_pr.py](.claude/hooks/check_tests_before_pr.py)) refuses to open the PR until the named-argument check and the tests pass, and until the README changed whenever `app/src/` did. |
+| Every unsuppressed positional call in `app/src/` fails the named-argument check. | [check_named_args.py](scripts/check_named_args.py) parses calls with `ast`; `# noqa: NAR001` covers APIs that require positional arguments. |
+| Every import between packages follows the declared dependency map. | [test_layout.py](app/tests/test_layout.py) checks imports, including type-only imports, and rejects cycles in the map. |
+| Every non-test function in `app/src/` has a docstring or an explicit exemption. | [check_docstrings.py](scripts/check_docstrings.py) checks AST definitions; `# noqa: NAR002` marks a deliberate exception. The versioned [pre-commit hook](.githooks/pre-commit) runs it. |
+| Every `@jaxtyped(typechecker=beartype)` boundary checks its annotated tensor shapes when called. | The decorators on model `forward` methods and [transformer functions](app/src/training/transformer/functions.py) run the check; [axis names](app/src/training/transformer/constants.py) keep annotations consistent. |
+| Every successful `fit` writes run history. | [train_loop.py](app/src/training/train/train_loop.py) calls [save_history](app/src/training/train/utils.py) with the git commit, seeds, state summary, and per-epoch metrics. |
+| Every `create-pr` invocation through the Claude Code hook runs the source gates first. | [check_tests_before_pr.py](.claude/hooks/check_tests_before_pr.py) checks named arguments, tests, and README updates when source changes. |
+
+The [Makefile](Makefile) exposes the tests and source checks as stable commands.
+`make precheck` also runs pyright, Ruff, and Markdown formatting; its formatter
+can rewrite files.
 
 ______________________________________________________________________
 
@@ -340,10 +349,11 @@ uv run python app/src/training/viz/compare_runs.py app/history/<run-a>.json app/
 ### Weights & Biases: the same dict, streamed
 
 Pass `wandb_run=` to `fit` and it logs every epoch's dict, the same one that ends up
-in the file, with `wandb_run.log` as the epoch finishes. The keys are identical, so
-the dashboard and the file can never disagree. It is off by default. `init_wandb` in
-[setup.py](app/src/training/setup.py) reads `WANDB_API_KEY`, each `main()` gates it
-behind a flag, and nothing else in the repo knows W&B exists.
+in the file, with `wandb_run.log` as the epoch finishes. Both outputs use
+`serialize_epoch_record`, so their epoch fields match. It is off by default.
+`init_wandb` in [setup.py](app/src/training/setup.py) reads `WANDB_API_KEY`; the
+example entry points gate it behind flags, and the loop only sees the optional
+`wandb_run` argument.
 
 ### When the numbers aren't enough
 
@@ -362,11 +372,10 @@ ______________________________________________________________________
 | Metrics | loss-only; classification with accuracy and macro-averaged precision and recall; masked-token accuracy and perplexity for per-position targets; each as three functions the loop injects | [metrics/](app/src/training/metrics/) |
 | Attention | scaled dot-product attention, multi-head self-attention with optional QK norm, fixed sinusoidal position encodings, a pre-norm encoder block, padding and causal masks; design notes and axis names in the [transformer README](app/src/training/transformer/README.md) | [transformer/](app/src/training/transformer/) |
 | Tokenizer | byte-level BPE, written from scratch, with an indexed max-heap so each merge updates pair counts in O(log n) | [common/](app/src/training/common/) |
-| Data | MNIST through torchvision; AG News sampled, tokenized, and cached; how a `DataLoader` is built in the [dataload README](app/src/training/dataload/README.md) | [dataload/](app/src/training/dataload/), [mnist.py](app/src/training/model/mnist.py) |
-| Models | three MNIST classifiers (two MLPs and a CNN) and a transformer classifier for AG News | [model/](app/src/training/model/) |
+| Data | MNIST through torchvision; AG News and Multi30k sampled, tokenized, and cached; how a `DataLoader` is built in the [dataload README](app/src/training/dataload/README.md) | [dataload/](app/src/training/dataload/), [mnist.py](app/src/training/model/mnist.py) |
+| Models | three MNIST classifiers, an AG News transformer classifier, and a Multi30k masked-token predictor | [model/](app/src/training/model/) |
 | Visualization | a run's metrics, two runs side by side, a model's autograd graph, attention heatmaps, BPE sequence length against merges | [viz/](app/src/training/viz/) |
 | Analytics | BPE length stats (mean, min, max, percentiles) for each Multi30k EN split | [analytics/](app/src/training/analytics/) |
-| Code graph | an interactive map of source symbols, documentation concepts, and their connections | [graphify-out/graph.html](graphify-out/graph.html) |
 | Tests | a pytest suite; `attention` is checked against `torch.nn.functional.scaled_dot_product_attention` | [tests/](app/tests/) |
 | Tutorials | theory and revision notes from tensors to attention masks, published as a website | [tutorials/](tutorials/) |
 
@@ -751,26 +760,20 @@ ______________________________________________________________________
 
 ### Install
 
-Dawnshard uses [`uv`](https://docs.astral.sh/uv/) for everything. Install it
-first, then export these three environment variables (add them to your shell
-profile):
+Dawnshard uses [`uv`](https://docs.astral.sh/uv/) for its Python workflows.
+Install it first, then make the project environment file available to `uv run`:
 
 ```bash
 # Make `uv run` automatically load the project .env (which sets PYTHONPATH=app/src)
 export UV_ENV_FILE=".env"
-
-# Weights & Biases — set your key, or leave wandb disabled (see below)
-export WANDB_API_KEY=<your-key>
-
-# Enable Docker BuildKit for the cached, fast image builds
-export DOCKER_BUILDKIT=1
 ```
 
-Then sync dependencies:
+Set `WANDB_API_KEY` only if you enable W&B. Set `DOCKER_BUILDKIT=1` for the
+cached Docker builds below. Then sync the pinned dependencies:
 
 ```bash
-uv sync          # runtime + dev dependencies
-uv sync --no-dev # runtime only (matches the production Docker image)
+uv sync --frozen          # runtime + dev dependencies
+uv sync --frozen --no-dev # runtime only (matches the production Docker image)
 ```
 
 `UV_ENV_FILE=".env"` is what makes imports like `from training.train.train_loop import fit`
@@ -788,6 +791,9 @@ uv run python app/src/training/model/ag_news_classifier.py
 
 # Train the MNIST model (CNN by default — edit main() to pick a model)
 uv run python app/src/training/model/mnist.py
+
+# Run the Multi30k masked-token predictor's configured sweep (50 epochs per config)
+uv run python app/src/training/model/multi30ken_predictor.py
 
 # Plot one run's per-epoch metrics
 uv run python app/src/training/viz/plot_metrics.py app/history/<run-id>.json
@@ -832,34 +838,14 @@ swappable in `main()` ([mnist.py](app/src/training/model/mnist.py)):
 (`torchviz`) to an HTML file and opens it in your browser:
 
 ```python
-from viz.model_graph import visualize_model
-from model.mnist import ConvolutionalMNISTClassifier
+from training.model.mnist import ConvolutionalMNISTClassifier
+from training.viz.model_graph import visualize_model
 
 visualize_model(model=ConvolutionalMNISTClassifier(), input_shape=(1, 1, 28, 28))
 ```
 
 For a quick layer-by-layer parameter table, `torchinfo.summary(...)` is the
 faster check. See the module docstring for both.
-
-### Explore the codebase graph
-
-Open the [interactive code graph](graphify-out/graph.html) to search symbols and
-follow connections across packages. The [report](graphify-out/GRAPH_REPORT.md)
-highlights central abstractions and records where relationships were inferred.
-The committed snapshot is available immediately after cloning. To refresh it,
-install the CLI and the repo's hooks:
-
-```bash
-uv tool install graphifyy
-graphify install --platform codex --project
-make install-hooks
-```
-
-The hooks update code relationships after commits and branch changes. Run
-`graphify update .` before staging if the graph should be in the same commit as
-the code change. Run `/graphify . --update` in Codex after changing documentation.
-Only `graph.html`, `graph.json`, and `GRAPH_REPORT.md` belong in Git; the Codex
-skill copy, hook launchers, caches, and local scan state are ignored.
 
 ### Visualizing attention
 
@@ -913,7 +899,7 @@ you never have to remember the underlying flags:
 | `make precheck` | `pyright` + `ruff check --fix` + `ruff format` + `mdformat`. Run it before every PR |
 | `make check-named-args` | Enforce the keyword-argument rule (see [CLAUDE.md](CLAUDE.md)) |
 | `make check-docstrings` | Enforce the docstring rule (see [CLAUDE.md](CLAUDE.md)) |
-| `make install-hooks` | Install the docstring pre-commit check and Graphify's graph refresh hooks (once after cloning) |
+| `make install-hooks` | Install the versioned docstring pre-commit check (once after cloning) |
 | `make docker-build*` / `make docker-run*` | Build and run the Docker images (above) |
 | `make nb-to-py NB=…` / `make py-to-nb PY=…` | Convert between notebooks and scripts |
 
@@ -942,8 +928,9 @@ the longer derivations remain available when you need them.
 
 The project landing page and tutorials are built as a website at
 [anantsimran.github.io/dawnshard](https://anantsimran.github.io/dawnshard/) by
-[pages.yml](.github/workflows/pages.yml) on pushes to `main`. The landing page links
-to this full README on GitHub. Tutorial paths mirror the repo, and source-file links
+[pages.yml](.github/workflows/pages.yml) on pushes to `main`. The landing page is a
+hand-written hero with this README rendered below it, so the hero's links land on
+real sections. Tutorial paths mirror the repo, and source-file links
 point to GitHub. In the repository's **Settings → Pages → Build and deployment**,
 the publishing source must be **GitHub Actions**; branch publishing runs a separate
 Jekyll build that can replace the MkDocs site.
@@ -986,11 +973,15 @@ dawnshard/
 │   │       │   ├── bpe.py            # byte-level BPE with GPT-4 pre-tokenization
 │   │       │   ├── constants.py      # protected token ids: PAD, MASK, CLS, SEP
 │   │       │   └── priority_queue.py # indexed max-heap with O(log n) priority updates
-│   │       ├── dataload/             # dataset cache location + AG News pipeline
+│   │       ├── dataload/             # dataset caches and text pipelines
 │   │       │   ├── README.md         # DataLoader internals: collate, shuffling, seeding, chunks
 │   │       │   ├── ag_news.py        # AG News: sample, tokenize, cache, one DataLoader per split
+│   │       │   ├── multi30ken.py     # Multi30k English: tokenize and mask language-model batches
 │   │       │   └── constants.py      # DATASETS_CACHE_DIR
-│   │       ├── model/                # MNIST classifiers; AG News classifier (in progress)
+│   │       ├── model/                # MNIST, AG News, and Multi30k model entry points
+│   │       │   ├── mnist.py                # three digit classifiers
+│   │       │   ├── ag_news_classifier.py   # text classifier and attention probe
+│   │       │   └── multi30ken_predictor.py # masked-token predictor and config sweep
 │   │       ├── viz/                  # metrics, run comparison, model graph, attention, BPE length
 │   │       ├── analytics/            # printed stats: Multi30k EN BPE length percentiles
 │   │       ├── utils/                # git commit, log_elapsed timing
@@ -1000,16 +991,13 @@ dawnshard/
 │   ├── history/                  # per-run history JSON; traces/ and attention_probes/ (gitignored)
 │   └── datasets/                 # downloaded dataset cache (gitignored)
 ├── tutorials/                    # theory and revision: pytorch/, training/, math/, vision/, transformer/; index.md
+├── experiments/                  # run write-ups with the CSV exports and plots behind them
 ├── pages/                        # MkDocs hooks and theme overrides for the website
 ├── scripts/
 │   ├── check_named_args.py       # keyword-argument linter
 │   └── check_docstrings.py       # docstring-presence linter
 ├── .claude/hooks/                # pre-PR gate: named args, tests, README touched when source changed
 ├── .githooks/pre-commit          # runs the docstring check (make install-hooks)
-├── AGENTS.md                     # Codex instructions for using the graph
-├── graphify-out/                # shareable graph, interactive viewer, and report
-├── .graphifyignore              # keeps Graphify's own skill files out of the graph
-├── .gitattributes               # merge driver for the shared graph JSON
 ├── .github/workflows/pages.yml   # builds and deploys the website on push to main
 ├── mkdocs.yml                    # website config and navigation
 ├── Dockerfile                    # uv-based prod/dev image

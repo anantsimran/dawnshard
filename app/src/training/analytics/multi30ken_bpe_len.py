@@ -13,14 +13,18 @@ import numpy as np
 from loguru import logger
 from training.common.constants import PAD_ID
 from training.constants import TEST_SEED, VAL_SEED
-from training.dataload.multi30ken import Multi30kENDataset, get_multi30ken_mlm_dataloader
+from training.dataload.datasets import InMemoryDataset
+from training.dataload.multi30k import (
+    Multi30kENDatasetChunk,
+    get_multi30ken_mlm_dataloader,
+)
 
 MAX_SEQ_LEN = 512
 PERCENTILES = (1, 5, 10, 25, 50, 75, 90, 95, 99, 99.9)
 
 
-def bpe_lengths(dataset: Multi30kENDataset) -> np.ndarray:
-    """Return the number of non-PAD_ID ids in each row of a Multi30kENDataset.
+def bpe_lengths(dataset: InMemoryDataset[Multi30kENDatasetChunk]) -> np.ndarray:
+    """Return the number of non-PAD_ID ids in each row of a token-id dataset.
 
     Raises:
         ValueError: If a row fills all MAX_SEQ_LEN positions, since it may have been
@@ -69,7 +73,7 @@ def main() -> None:
     logger.info("Tokenizer has {} merges", len(merges))  # noqa: NAR001
     for split, loader in (("train", train_loader), ("val", val_loader), ("test", test_loader)):
         dataset = loader.dataset
-        assert isinstance(dataset, Multi30kENDataset)  # noqa: NAR001
+        assert isinstance(dataset, InMemoryDataset)  # noqa: NAR001
         log_stats(split=split, lengths=bpe_lengths(dataset=dataset))
 
 

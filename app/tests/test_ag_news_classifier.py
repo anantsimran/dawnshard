@@ -122,8 +122,9 @@ def test_classifier_forward_stores_detached_attention_map_per_block():
     torch.manual_seed(seed=0)
     model = AGNewsClassifier(vocab_size=PAD_ID + 1)
     model(_padded_ids(batch_size=3, length=12))  # noqa: NAR001
-    assert len(model.attention_map) == NUM_BLOCKS  # noqa: NAR001
-    for weights in model.attention_map:
+    assert list(model.attention_map) == ["encoder"]  # noqa: NAR001
+    assert len(model.attention_map["encoder"]) == NUM_BLOCKS  # noqa: NAR001
+    for weights in model.attention_map["encoder"]:
         assert weights.shape == (3, NUM_HEADS, 12, 12)
         assert not weights.requires_grad
 
@@ -166,8 +167,8 @@ def test_save_attention_maps_writes_first_batch_rows_once_per_epoch(tmp_path):
     ]
     capture = torch.load(f=tmp_path / "epoch_001.pt")
     assert torch.equal(capture["token_ids"], first[:2])  # noqa: NAR001
-    assert len(capture["weights"]) == NUM_BLOCKS  # noqa: NAR001
-    assert capture["weights"][0].shape == (2, NUM_HEADS, 12, 12)
+    assert len(capture["weights"]["encoder"]) == NUM_BLOCKS  # noqa: NAR001
+    assert capture["weights"]["encoder"][0].shape == (2, NUM_HEADS, 12, 12)
 
 
 def test_small_training_run_reduces_train_loss(tmp_path):

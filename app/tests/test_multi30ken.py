@@ -2,7 +2,7 @@ import pytest
 import torch
 from training.common.constants import MASK_ID, PAD_ID, PROTECTED_IDS
 from training.constants import CROSS_ENTROPY_IGNORE_INDEX
-from training.dataload.multi30ken import Multi30kENDataset, _mlm_collate
+from training.dataload.multi30k import _mlm_collate, _translation_collate
 
 # Bytes 0-255, the protected ids, then two merge ids.
 VOCAB_LENGTH = 256 + len(PROTECTED_IDS) + 2  # noqa: NAR001
@@ -13,8 +13,7 @@ def _rows(num_rows, seq_len):
         low=0, high=256, size=(num_rows, seq_len), generator=torch.Generator()
     )
     ids[:, seq_len // 2 :] = PAD_ID
-    dataset = Multi30kENDataset(ids=ids)
-    return [dataset[i] for i in range(len(dataset))]  # noqa: NAR001
+    return list(enumerate(ids.unbind(dim=0)))  # noqa: NAR001
 
 
 def test_mlm_collate_returns_batch_shaped_x_and_flat_y():
@@ -101,3 +100,13 @@ def test_mlm_collate_follows_80_10_10_and_draws_no_protected_replacement():
 def test_mlm_collate_rejects_empty_batch():
     with pytest.raises(ValueError):
         _mlm_collate(rows=[], vocab_length=VOCAB_LENGTH)
+
+
+def test_translation_collate_stacks_x_and_flattens_y_row_major():
+    inputs = torch.randint(low=0, high=256, size=(3, 2, 8))
+    targets = torch.randint(low=0, high=256, size=(3, 8))
+
+    x, y = _translation_collate(rows=list(zip(inputs, targets)))  # noqa: NAR001
+
+    assert torch.equal(x, inputs)  # noqa: NAR001
+    assert torch.equal(y, targets.reshape(-1))  # noqa: NAR001

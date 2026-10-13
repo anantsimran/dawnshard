@@ -10,4 +10,6 @@ PAD_ID = 256
 MASK_ID = 257  # masked-language-modelling target
 CLS_ID = 258  # sequence summary position
 SEP_ID = 259  # boundary between two segments
-PROTECTED_IDS = [PAD_ID, MASK_ID, CLS_ID, SEP_ID]
+BOS_ID = 260
+EOS_ID = 261
+PROTECTED_IDS = [PAD_ID, MASK_ID, CLS_ID, SEP_ID, BOS_ID, EOS_ID]

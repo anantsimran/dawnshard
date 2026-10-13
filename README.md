@@ -215,6 +215,7 @@ accident.
 | `common/` | the BPE tokenizer and the indexed max-heap it trains with |
 | `dataload/` | dataset caches and the AG News and Multi30k pipelines |
 | `model/` | the MNIST classifiers, AG News classifier, and Multi30k predictor |
+| `experiments/` | config sweeps and ablations over a model's entry point |
 | `viz/` | every plot |
 | `analytics/` | printed dataset statistics |
 | `utils/` | the git commit, `log_elapsed` step timing |
@@ -273,6 +274,22 @@ it again. So every run leaves a trail, and each part of the trail has one job.
 loguru prints the epoch number, the training loss, and the validation loss when
 there was a validation pass. That is enough to watch a run from your terminal.
 
+For setup work outside the training loop, wrap a block with
+[`log_elapsed`](app/src/training/utils/timing.py):
+
+```python
+from training.utils.timing import log_elapsed
+
+with log_elapsed(label="Prepared dataset"):
+    prepare_dataset()
+```
+
+On successful exit, loguru prints one INFO line such as `Prepared dataset in 1.2s`.
+The timer uses `time.perf_counter()` and rounds to one decimal place. If the block
+raises, it logs no duration. The Multi30k loader uses it for downloads and BPE
+training; these setup timings appear in the terminal, not in the run history.
+For accelerator step timing, see [Observability](tutorials/training.md#the-async-gotcha-that-invalidates-naive-timing).
+
 ### The history file: everything
 
 Three functions build it:
@@ -323,17 +340,23 @@ rounded:
 
 ### Plot it locally
 
-`plot_metrics.py` takes one history file, draws every top-level numeric field against
-the epoch, and opens the result in your browser. No server, no account, no upload.
+`plot_metrics.py` takes one history file, draws one panel per metric against the
+epoch, and opens the result in your browser. No server, no account, no upload. A metric
+the file records for both splits (`train_loss` and `val_loss`, or the same rate in
+`train_metrics` and `val_metrics`) gets one panel with a train line and a val line, so
+the gap between them is the first thing you see. Counts and per-class lists inside the
+metrics dicts are left out.
 
 ```bash
 uv run python app/src/training/viz/plot_metrics.py app/history/fd13cf78-a573-465a-b151-55439ff68d36.json
 ```
 
-![plot_metrics output for the run above: training loss falls every epoch, validation loss bottoms out at epoch 4 and rises, epoch duration and GPU memory stay flat](tutorials/assets/plot_metrics.png)
+![plot_metrics output for the run above: train loss falls every epoch while val loss bottoms out at epoch 4 and rises; train accuracy, precision, and recall climb toward 0.97 while val holds near 0.85; epoch duration and GPU memory stay flat](tutorials/assets/plot_metrics.png)
 
-The turn in the validation-loss panel is the overfitting the numbers showed. The flat
-duration and memory panels rule out the run changing character halfway through.
+The turn in the val line of the loss panel is the overfitting the numbers showed, and
+the accuracy panel shows what it costs: val accuracy stops at 0.85 while train keeps
+climbing. The flat duration and memory panels rule out the run changing character
+halfway through.
 
 ### Compare two runs
 
@@ -370,14 +393,17 @@ ______________________________________________________________________
 |---|---|---|
 | Training loop | `fit`, `profiled_fit`, `run_epoch`, `train_step`, `eval_step`; checkpoints, probes, and a history file per run | [train/](app/src/training/train/) |
 | Metrics | loss-only; classification with accuracy and macro-averaged precision and recall; masked-token accuracy and perplexity for per-position targets; each as three functions the loop injects | [metrics/](app/src/training/metrics/) |
-| Attention | scaled dot-product attention, multi-head self-attention with optional QK norm, fixed sinusoidal position encodings, a pre-norm encoder block, padding and causal masks; design notes and axis names in the [transformer README](app/src/training/transformer/README.md) | [transformer/](app/src/training/transformer/) |
+| Attention | scaled dot-product attention, multi-head self- and cross-attention with optional QK norm, fixed sinusoidal position encodings, pre-norm encoder and decoder blocks, padding and causal masks; design notes and axis names in the [transformer README](app/src/training/transformer/README.md) | [transformer/](app/src/training/transformer/) |
 | Tokenizer | byte-level BPE, written from scratch, with an indexed max-heap so each merge updates pair counts in O(log n) | [common/](app/src/training/common/) |
 | Data | MNIST through torchvision; AG News and Multi30k sampled, tokenized, and cached; how a `DataLoader` is built in the [dataload README](app/src/training/dataload/README.md) | [dataload/](app/src/training/dataload/), [mnist.py](app/src/training/model/mnist.py) |
-| Models | three MNIST classifiers, an AG News transformer classifier, and a Multi30k masked-token predictor | [model/](app/src/training/model/) |
+| Models | three MNIST classifiers, an AG News transformer classifier, a Multi30k masked-token predictor, and a Multi30k encoder-decoder translator | [model/](app/src/training/model/) |
+| Experiments | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation, each a grid search ranked by best val loss | [experiments/](app/src/training/experiments/) |
 | Visualization | a run's metrics, two runs side by side, a model's autograd graph, attention heatmaps, BPE sequence length against merges | [viz/](app/src/training/viz/) |
 | Analytics | BPE length stats (mean, min, max, percentiles) for each Multi30k EN split | [analytics/](app/src/training/analytics/) |
 | Tests | a pytest suite; `attention` is checked against `torch.nn.functional.scaled_dot_product_attention` | [tests/](app/tests/) |
 | Tutorials | theory and revision notes from tensors to attention masks, published as a website | [tutorials/](tutorials/) |
+| Knowledge sharing | engineering articles that trace design choices through the implementation | [Reproducibility](knowledge_sharing/reproducibility.md) |
+| Reports | measured tradeoffs, with figures, exported data, and a reproduction command | [Multi30k tokenisation](reports/multi30k_tokenisation.md) |
 
 Logs go through loguru, Weights & Biases is optional, and everything runs with `uv`
 locally or in Docker.
@@ -555,7 +581,7 @@ shuffle, dropout, and training-time collate draws. Weight initialization starts
 from that seed too when `torch.manual_seed` runs before the model is built.
 
 The recorded seeds are not a complete Multi30k replay recipe. Its loader randomly
-reorders training rows before `train_config` chooses the recorded `train_seed`, even
+reorders training rows before the entry point chooses the recorded `train_seed`, even
 when it keeps all 29,000 rows. The downloaded splits and selected BPE merges are
 local cache files, and their identities are not saved in the history. Keep those
 inputs and the model configuration alongside the seed to reproduce a past setup.
@@ -752,7 +778,8 @@ ids = bpe.encode(text="Stocks rally as tech earnings beat forecasts", merges=mer
 ```
 
 On the AG News train split, 2,000 merges bring the average sample down from 236 bytes
-to 79 tokens.
+to 79 tokens. The [Multi30k tokenisation report](reports/multi30k_tokenisation.md)
+measures how vocabulary size changes caption lengths in English and German.
 
 ______________________________________________________________________
 
@@ -792,8 +819,17 @@ uv run python app/src/training/model/ag_news_classifier.py
 # Train the MNIST model (CNN by default — edit main() to pick a model)
 uv run python app/src/training/model/mnist.py
 
-# Run the Multi30k masked-token predictor's configured sweep (50 epochs per config)
+# Train the Multi30k masked-token predictor once
 uv run python app/src/training/model/multi30ken_predictor.py
+
+# Train the Multi30k encoder-decoder translator once
+uv run python app/src/training/model/multi30k_translator.py
+
+# Run the Multi30k masked-token predictor's ablation (7 arms x 3 seeds, 100 epochs each)
+uv run python app/src/training/experiments/multi30ken_predictor_ablation.py
+
+# Run the Multi30k translator's ablation (10 arms x 3 seeds, 100 epochs each)
+uv run python app/src/training/experiments/multi30k_translator_ablation.py
 
 # Plot one run's per-epoch metrics
 uv run python app/src/training/viz/plot_metrics.py app/history/<run-id>.json
@@ -806,6 +842,12 @@ uv run python app/src/training/viz/bpe_seq_len.py
 
 # Print BPE length stats (mean, min, max, percentiles) for each Multi30k EN split
 uv run python app/src/training/analytics/multi30ken_bpe_len.py
+
+# Export the tokenisation report's CSV and plots from saved notebook output
+uv run python reports/generate_multi30k_tokenisation.py
+
+# Execute the starter notebook and print its outputs, leaving the file unchanged
+uv run jupyter nbconvert --execute --to markdown --stdout notebooks/hello_world.ipynb
 
 # Run the test suite
 make test
@@ -857,16 +899,17 @@ spaces are drawn as `·` so word boundaries stay visible.
 The AG News classifier records these maps during training with a probe:
 
 1. Every `AGNewsClassifier.forward` overwrites `model.attention_map` with each block's
-   detached `(B, h, L, L)` weights.
+   detached `(B, h, L, L)` weights, keyed by kind: `{"encoder": [one per block]}`. A
+   model with a decoder adds `"decoder_self"` and `"decoder_cross"`.
 1. `main` sets `eval_probe=partial(save_attention_maps, out_dir=..., num_sentences=4)`
    ([probes.py](app/src/training/transformer/probes.py)), with `out_dir` a fresh folder
    under `app/history/attention_probes/` (`ATTENTION_PROBES_PATH` in
    [constants.py](app/src/training/constants.py)).
 1. On each validation epoch, `save_attention_maps` ignores every batch except
    batch 0 and saves its first 4 sentences to `epoch_<NNN>.pt`. Each file holds the
-   token ids and one weight tensor per block.
+   token ids and, for each kind, one weight tensor per block.
 1. After `fit`, `plot_attention_probes` reads those files and writes
-   `epoch_<NNN>_block_<i>.png` next to each one.
+   `epoch_<NNN>_<kind>_block_<i>.png` next to each one.
 
 The validation loader isn't shuffled, so every capture shows the same sentences and
 you can compare how attention changes between epochs.
@@ -913,20 +956,27 @@ routes, a page list, and a map from specific questions to the sections that
 answer them. Pages begin with the central idea and end with a quick recall check;
 the longer derivations remain available when you need them.
 
-- [tutorials/pytorch/](tutorials/pytorch/) — a PyTorch series: tensors, shapes and
+One file per topic, each a sequence of `##` sections:
+
+- [tutorials/pytorch.md](tutorials/pytorch.md) — a PyTorch series: tensors, shapes and
   broadcasting, autograd and gradient descent, `nn.Module` and multi-layer
   networks, where the transpose in a linear layer's backward pass comes from, ReLU
   and dead neurons, data loading, and best practices for inspecting a model.
-- [tutorials/training/](tutorials/training/) — the training loop, optimizers and
+- [tutorials/training.md](tutorials/training.md) — the training loop, optimizers and
   learning-rate schedulers, Adam and the learning rate, and what the training loop
   measures for free versus a profiler.
-- [tutorials/math/](tutorials/math/) — the matrix calculus behind backprop, adapted
+- [tutorials/math.md](tutorials/math.md) — the matrix calculus behind backprop, adapted
   from Parr & Howard with PyTorch checks.
-- [tutorials/vision/](tutorials/vision/) — convolutional networks for MNIST.
-- [tutorials/transformer/](tutorials/transformer/) — attention masks and
+- [tutorials/vision.md](tutorials/vision.md) — convolutional networks for MNIST.
+- [tutorials/transformer.md](tutorials/transformer.md) — attention masks and
   cross-attention, pre-norm vs post-norm, and compute and memory planning.
 
-The project landing page and tutorials are built as a website at
+The [reproducibility article](knowledge_sharing/reproducibility.md) follows the
+library's random streams through initialization, loaders, workers, and masks.
+The [Multi30k tokenisation report](reports/multi30k_tokenisation.md) compares BPE
+vocabulary sizes with downloadable figures and statistics.
+
+The project landing page, tutorials, code notes, articles, and reports are built as a website at
 [anantsimran.github.io/dawnshard](https://anantsimran.github.io/dawnshard/) by
 [pages.yml](.github/workflows/pages.yml) on pushes to `main`. The landing page is a
 hand-written hero with this README rendered below it, so the hero's links land on
@@ -936,10 +986,11 @@ the publishing source must be **GitHub Actions**; branch publishing runs a separ
 Jekyll build that can replace the MkDocs site.
 
 **When you add or change a tutorial, update
-[tutorials/index.md](tutorials/index.md), and add a line for a new page to the `nav:`
-list in [mkdocs.yml](mkdocs.yml).** Otherwise the page is built but doesn't appear in the
-site's navigation. The build prints a warning naming any page left out. To preview
-the site locally:
+[tutorials/index.md](tutorials/index.md).** A new tutorial is a `##` section appended
+to the topic file it belongs to, so it needs no `nav:` entry; only a new *topic* file
+gets a line in the `nav:` list in [mkdocs.yml](mkdocs.yml). Otherwise the page is built
+but doesn't appear in the site's navigation, and the build prints a warning naming any
+page left out. To preview the site locally:
 
 ```bash
 uvx --from mkdocs==1.6.1 --with mkdocs-material==9.7.7 --with pymdown-extensions==12.0 mkdocs serve
@@ -964,24 +1015,30 @@ dawnshard/
 │   │       ├── transformer/          # attention built from scratch
 │   │       │   ├── README.md         # attention design choices and axis names
 │   │       │   ├── functions.py      # scaled dot-product attention
-│   │       │   ├── modules.py        # SinusoidalEmbedding, MultiHeadAttentionLayer (optional QK norm), EncoderBlock
+│   │       │   ├── modules.py        # SinusoidalEmbedding, MultiHeadAttentionLayer (optional QK norm), EncoderBlock, DecoderBlock
 │   │       │   ├── probes.py         # save_attention_maps: probe that saves attention maps per epoch
 │   │       │   ├── mask.py           # padding and causal keep masks, pad-masked mean pool
 │   │       │   └── constants.py      # axis names for shape strings: B, L, D_MODEL, H, D_K
 │   │       ├── common/
 │   │       │   ├── README.md         # BPE usage: batching, saving, translation, chunking
 │   │       │   ├── bpe.py            # byte-level BPE with GPT-4 pre-tokenization
-│   │       │   ├── constants.py      # protected token ids: PAD, MASK, CLS, SEP
+│   │       │   ├── constants.py      # protected token ids: PAD, MASK, CLS, SEP, BOS, EOS
 │   │       │   └── priority_queue.py # indexed max-heap with O(log n) priority updates
 │   │       ├── dataload/             # dataset caches and text pipelines
 │   │       │   ├── README.md         # DataLoader internals: collate, shuffling, seeding, chunks
+│   │       │   ├── datasets.py       # InMemoryDataset: an in-memory split of prebuilt items
 │   │       │   ├── ag_news.py        # AG News: sample, tokenize, cache, one DataLoader per split
-│   │       │   ├── multi30ken.py     # Multi30k English: tokenize and mask language-model batches
+│   │       │   ├── multi30k.py       # Multi30k: translation pairs and English masked-LM batches
 │   │       │   └── constants.py      # DATASETS_CACHE_DIR
 │   │       ├── model/                # MNIST, AG News, and Multi30k model entry points
 │   │       │   ├── mnist.py                # three digit classifiers
 │   │       │   ├── ag_news_classifier.py   # text classifier and attention probe
-│   │       │   └── multi30ken_predictor.py # masked-token predictor and config sweep
+│   │       │   ├── multi30ken_predictor.py # masked-token predictor and its single run
+│   │       │   └── multi30k_translator.py  # encoder-decoder translator and its single run
+│   │       ├── experiments/          # config studies over a model's entry point
+│   │       │   ├── common.py         # grid_search, LR schedules, norm names, seed repeats
+│   │       │   ├── multi30ken_predictor_ablation.py # sweep, follow-ups, ablation
+│   │       │   └── multi30k_translator_ablation.py  # component, depth, LR, language ablation
 │   │       ├── viz/                  # metrics, run comparison, model graph, attention, BPE length
 │   │       ├── analytics/            # printed stats: Multi30k EN BPE length percentiles
 │   │       ├── utils/                # git commit, log_elapsed timing
@@ -990,8 +1047,11 @@ dawnshard/
 │   ├── tests/                    # pytest suite; test_layout.py checks imports between packages
 │   ├── history/                  # per-run history JSON; traces/ and attention_probes/ (gitignored)
 │   └── datasets/                 # downloaded dataset cache (gitignored)
-├── tutorials/                    # theory and revision: pytorch/, training/, math/, vision/, transformer/; index.md
-├── experiments/                  # run write-ups with the CSV exports and plots behind them
+├── tutorials/                    # theory and revision, one file per topic: pytorch.md, training.md, transformer.md, math.md, vision.md; index.md
+├── experiments/<model>/<date>/   # one study per folder: write-up, CSV exports, plots
+├── knowledge_sharing/            # standalone engineering articles and SVG diagrams
+├── reports/                      # measured tradeoffs, report generators, CSV data, PNG/SVG figures
+├── notebooks/hello_world.ipynb   # starter notebook: the sys.path cell to borrow, then imports
 ├── pages/                        # MkDocs hooks and theme overrides for the website
 ├── scripts/
 │   ├── check_named_args.py       # keyword-argument linter

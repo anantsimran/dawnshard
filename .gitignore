@@ -9,3 +9,6 @@ __pycache__/
 wandb/
 
 site/
+
+blog_and_publishing_ideas.md
+cloud_readiness.md

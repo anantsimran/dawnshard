@@ -112,14 +112,35 @@ Where the root `README.md` or the site pages (`tutorials/`, `tutorials/index.md`
 
 `tutorials/` and the root `README.md` are published to GitHub Pages with MkDocs Material (`mkdocs.yml`, `pages/`, `.github/workflows/pages.yml`).
 
-Tutorials are grouped by topic: `pytorch/` (basics), `training/` (loop, optimizers, schedulers, observability), `math/`, `vision/`, and `transformer/`. Put a new page in the folder that matches its topic.
+**Publishing preference:** prepare website changes on the current branch. The
+existing GitHub Pages workflow deploys when changes merge to `main`; leave
+publication to that workflow.
+
+### One file per topic
+
+`tutorials/` holds exactly six markdown files: `index.md` and one page per topic — `pytorch.md` (basics), `training.md` (loop, optimizers, schedulers, observability), `transformer.md`, `math.md`, and `vision.md`. There are no subfolders. A topic page is a sequence of tutorials, and **a tutorial is a `##` section**, not a file.
+
+This is deliberate: a reader gets one `ctrl-F` per topic instead of ten, the `nav:` list stays five lines long, and a cross-reference within a topic is a same-page `#anchor` that cannot rot into a dead path. **Do not add a tutorial as a new file or re-introduce the per-topic folders.**
+
+The heading levels follow from that, and the whole file must obey them:
+
+| Level | What it is |
+|---|---|
+| `#` | the topic, once per file (`# PyTorch`) |
+| `##` | one tutorial |
+| `###` | a section within a tutorial |
+| `####`, `#####` | subsections |
+
+Each topic page opens with its `#` title, a short paragraph saying what the topic covers, and an **On this page** bullet list linking every `##` tutorial by anchor. Tutorials are separated by a horizontal rule (a line of underscores, as `mdformat` writes them). Add a tutorial by appending its `##` section and a row to that list.
+
+**Repeated headings must be scoped.** Every tutorial ends with its own recall questions, confusions, and references, so the same heading text would appear many times in one file and MkDocs would silently number the duplicate anchors `_1`, `_2`, making them unstable and unlinkable. Scope each one with its tutorial: `### Common confusions: Tensors`, `### Check your understanding: DataLoader`. The same applies to any content heading that collides — `training.md` carries `Warmup and Decay: how to build them` and `Warmup and Decay: why Adam wants them` for exactly this reason. After editing, confirm no slug repeats within a file; the mkdocs build does not warn about this, only about links to anchors that do not exist.
 
 **Whenever you add, remove, move, or change a tutorial, update `tutorials/index.md` in the same change.** The index has two parts, and both must stay accurate:
 
-- **Pages:** one row per page, in its folder's table, with a one-line summary of what it covers.
-- **Concepts:** question → `page.md#section` rows. Add rows for new sections, and fix or remove rows whose heading you renamed or deleted, because the anchor comes from the heading text. The mkdocs build below warns about anchors that no longer exist.
+- **Pages:** one row per `##` tutorial, under its topic file's `###` heading, with a one-line summary of what it covers.
+- **Concepts:** question → `topic.md#section` rows. Add rows for new sections, and fix or remove rows whose heading you renamed or deleted, because the anchor comes from the heading text. The mkdocs build below warns about anchors that no longer exist.
 
-**When you add a tutorial, add a line for it to the `nav:` list in `mkdocs.yml`.** Otherwise the page is built but doesn't appear in the site's navigation. The build prints `WARNING - The following pages exist in the docs directory, but are not included in the "nav" configuration`, followed by the missing page.
+**A new tutorial needs no `nav:` entry**, because it lives inside a page already listed. Only a new *topic file* gets a line in the `nav:` list in `mkdocs.yml`, under `Topics:`. Otherwise the page is built but doesn't appear in the site's navigation. The build prints `WARNING - The following pages exist in the docs directory, but are not included in the "nav" configuration`, followed by the missing page.
 
 To publish another page from outside `tutorials/`, add its path to `EXTRA_PAGES` in `pages/hooks.py` and add a `nav:` entry for it. If it embeds images, add each one to `EXTRA_ASSETS` in the same file, or the link rewriter points them at GitHub and they render as a link instead of an image.
 
@@ -127,7 +148,7 @@ To publish another page from outside `tutorials/`, add its path to `EXTRA_PAGES`
 
 - When the README's one-screen run changes, copy it into the hero `<pre>` block with the same argument names.
 - When a claim a design card makes changes in the README (what `EpochSpec` holds, what the history file records, what the loop injects, a rule or tool), rewrite that card.
-- When a tutorial is added, moved, or regrouped, fix the learning-track card for its group.
+- When a tutorial is added, moved, or regrouped, fix the learning-track card for its topic. Each card links to a topic page (`tutorials/pytorch/`), not to one tutorial's anchor, so a card only changes when the topic's coverage changes or a topic file is added.
 
 Before opening the PR, read `home.html` next to the README diff. Don't treat a green build as proof the landing page is current.
 
@@ -138,6 +159,51 @@ uvx --from mkdocs==1.6.1 --with mkdocs-material==9.7.7 --with pymdown-extensions
 ```
 
 Keep these versions in step with the pins in `pages.yml`. MkDocs 2.0 removes the hook and theme-override system the site depends on.
+
+## Knowledge sharing articles
+
+`knowledge_sharing/` holds standalone engineering articles, one Markdown file per
+article, separate from the six topic pages in `tutorials/`. The
+[reproducibility article](knowledge_sharing/reproducibility.md) is the reference for
+the site's long-form layout and visual treatment. Follow its approach, not its exact
+section titles.
+
+- **Establish the intuition first.** Explain the mechanism the reader needs to
+  understand through a concrete operation or failure mode, then state the
+  repo's design claim and the conditions under which it holds. Readers should
+  understand why the design works before meeting its implementation details.
+- **Follow one causal path.** Arrange sections in the order the system executes or
+  the design argument develops. Each section answers one question and sets up
+  the next. Define prerequisites before using their consequences. Put compact
+  definitions in a recap near the end.
+- **Write like an architect explaining a decision.** Use specific code behavior,
+  then explain what it guarantees and why. Link claims to the implementation.
+  Prefer connected prose and one concrete example over a table or a collection of
+  fact cards. Use a measured, structured voice; avoid casual asides, slogans,
+  generic motivation, repeated summaries, and decorative warnings. Give the
+  central rule one prominent statement, then make each later section add a
+  distinct consequence. State a real limitation precisely without making it
+  the article's center when the article is about the design that works.
+- **Make visuals explain something.** Draw repo-native SVGs in
+  `knowledge_sharing/assets/` only for the transitions or comparisons that need
+  a diagram. The reproducibility article uses two: one for RNG state, one for
+  Dawnshard's execution path. Use the site's indigo, amber, and blue palette;
+  write meaningful alt text and a short caption for each image. SVG text must
+  remain legible at article width, with narrow-screen overflow handled by
+  article CSS. Audit arrows and labels against the actual code: show separate
+  seed inputs as separate inputs, distinguish main-process work from worker
+  work, and do not use vertical placement to imply a false execution order.
+- **Use the article layout.** A knowledge-sharing page gets a scoped template and
+  CSS in `pages/overrides/` rather than changing the appearance of tutorials.
+  Keep the site's top navigation. Add the page to `EXTRA_PAGES` in
+  `pages/hooks.py` and to `mkdocs.yml` navigation; register every image in
+  `EXTRA_ASSETS` so it is served on GitHub Pages. Give the homepage a card when
+  the new article should be discoverable there. Set page template metadata in the
+  hook because the repo's `mdformat` rewrites YAML front matter in Markdown.
+- **Review the published form.** Run `mdformat --check` for the article, validate
+  SVG XML, build with the pinned MkDocs command above, and inspect the rendered
+  desktop and narrow-screen page. Confirm image URLs, relative links, and
+  diagrams survive the site build.
 
 ## README structure
 
@@ -181,7 +247,7 @@ Attention design lives in `app/src/training/transformer/README.md`, not the root
 
 ### The dataload README
 
-How a `DataLoader` is put together lives in `app/src/training/dataload/README.md`: the sampler → dataset → `collate_fn` pipeline, what a new loader has to define, shuffling, train and eval loaders, seeding, chunking long documents, and a checklist for writing a new loader. It is general, per Keep general code and docs general above: it names no dataset, and a dataset's own choices go in its module docstring. The basics (why mini-batches, transforms, normalization) stay in `tutorials/pytorch/dataloading.md`, and the README links there instead of repeating them. The root README's What's inside table links to it. It is published through `EXTRA_PAGES` in `pages/hooks.py` and the PyTorch `nav:` group in `mkdocs.yml`.
+How a `DataLoader` is put together lives in `app/src/training/dataload/README.md`: the sampler → dataset → `collate_fn` pipeline, what a new loader has to define, shuffling, train and eval loaders, seeding, chunking long documents, and a checklist for writing a new loader. It is general, per Keep general code and docs general above: it names no dataset, and a dataset's own choices go in its module docstring. The basics (why mini-batches, transforms, normalization) stay in the DataLoader tutorial in `tutorials/pytorch.md`, and the README links there instead of repeating them. The root README's What's inside table links to it. It is published through `EXTRA_PAGES` in `pages/hooks.py` and the Code notes `nav:` group in `mkdocs.yml`.
 
 ### Anchors other files depend on
 
@@ -201,7 +267,7 @@ Use this to decide which README sections a code change touches. A pre-PR hook (`
 | An attention or mask choice | `app/src/training/transformer/README.md` (not the root README), and the intentional-choices list below if it's a choice that looks like a bug. |
 | How loaders are built: collate, samplers, shuffling, seeding, workers | `app/src/training/dataload/README.md`, kept general. |
 | A BPE or AG News data choice | The docstring in `bpe.py` or `ag_news_classifier.py`, and the intentional-choices list below. Not the README. |
-| A tutorial | `tutorials/index.md` and `mkdocs.yml`, per the Tutorials site section above, and the learning-track card in `pages/overrides/home.html` if the group's topics changed. |
+| A tutorial | The `##` section in its `tutorials/<topic>.md` page, its **On this page** row, and `tutorials/index.md`, per the Tutorials site section above. Also the learning-track card in `pages/overrides/home.html` if the topic's coverage changed, and `mkdocs.yml` only if you added a topic file. |
 | Any README section the landing page summarizes (the one-screen run, the design sections, debuggability, the rules) | The hero code block and the matching design card in `pages/overrides/home.html`. See the Tutorials site section above. |
 
 ### Style

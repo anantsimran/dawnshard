@@ -9,9 +9,13 @@ from torch import nn
 
 @runtime_checkable
 class HasAttentionMap(Protocol):
-    """A model whose `forward` stores each block's (B, h, L, L) weights in block order."""
+    """A model whose `forward` stores each block's (B, h, L, S) weights, by kind.
 
-    attention_map: list[torch.Tensor]
+    Keys name the kind of attention (`"encoder"`, `"decoder_self"`, ...); each value
+    holds one tensor per block, in block order.
+    """
+
+    attention_map: dict[str, list[torch.Tensor]]
 
 
 def save_attention_maps(
@@ -31,8 +35,10 @@ def save_attention_maps(
     A probe for `EpochSpec`: bind `out_dir` and `num_sentences` with
     `functools.partial`. `seed` is part of the probe signature and unused here,
     because saving a tensor draws no randomness. Acts only on batch 0 and writes
-    `epoch_<NNN>.pt` holding `{"token_ids": (n, L), "weights": [(n, h, L, L) per
-    block]}` on the cpu, for the first `num_sentences` rows.
+    `epoch_<NNN>.pt` holding `{"token_ids": (n, ...), "weights": {kind: [(n, h, L, S)
+    per block]}}` on the cpu, for the first `num_sentences` rows. `token_ids` is the
+    input as the model took it: `(n, L)`, or `(n, 2, L)` for a model that takes
+    source and target stacked.
 
     Raises:
         TypeError: If `model` has no `attention_map`.
@@ -47,7 +53,10 @@ def save_attention_maps(
     torch.save(
         obj={
             "token_ids": input_tensor[:num_sentences].cpu(),
-            "weights": [weights[:num_sentences].cpu() for weights in model.attention_map],
+            "weights": {
+                kind: [weights[:num_sentences].cpu() for weights in blocks]
+                for kind, blocks in model.attention_map.items()
+            },
         },
         f=out_dir / f"epoch_{epoch:03d}.pt",
     )

@@ -11,7 +11,7 @@ Usage:
 from training.common import bpe
 
 merges, vocab = bpe.train(text="low lower lowest", num_merges=4)
-ids = bpe.encode(text="lowest\tlow", merges=merges)  # [261, 101, 115, 116, 262]
+ids = bpe.encode(text="lowest\tlow", merges=merges)  # [263, 101, 115, 116, 264]
 [vocab[i] for i in ids]                               # ['low', 'e', 's', 't', ' low']
 bpe.decode(ids=ids, vocab=vocab)                      # 'lowest low' (tab lost)
 ```
@@ -39,7 +39,9 @@ Token ids:
   257                     MASK_ID, vocab "[MASK]"
   258                     CLS_ID, vocab "[CLS]"
   259                     SEP_ID, vocab "[SEP]"
-  260 ─ 259+len(merges)   merges; FIRST_MERGE_ID + k is merges[k]
+  260                     BOS_ID, vocab "[BOS]"
+  261                     EOS_ID, vocab "[EOS]"
+  262 ─ 261+len(merges)   merges; FIRST_MERGE_ID + k is merges[k]
 ```
 
 The protected ids live in `constants.py` next to this file. They sit between the
@@ -111,12 +113,27 @@ from dataclasses import dataclass
 from typing import DefaultDict, Dict, List, Optional, Tuple
 
 import regex
-from training.common.constants import CLS_ID, MASK_ID, PAD_ID, PROTECTED_IDS, SEP_ID
+from training.common.constants import (
+    BOS_ID,
+    CLS_ID,
+    EOS_ID,
+    MASK_ID,
+    PAD_ID,
+    PROTECTED_IDS,
+    SEP_ID,
+)
 from training.common.priority_queue import MaxHeap, PrioritizedItem
 
 UNK = "<unk>"
 # vocab string for each protected id; decode drops all of them.
-_PROTECTED_STRINGS = {PAD_ID: "", MASK_ID: "[MASK]", CLS_ID: "[CLS]", SEP_ID: "[SEP]"}
+_PROTECTED_STRINGS = {
+    PAD_ID: "",
+    MASK_ID: "[MASK]",
+    CLS_ID: "[CLS]",
+    SEP_ID: "[SEP]",
+    BOS_ID: "[BOS]",
+    EOS_ID: "[EOS]",
+}
 FIRST_MERGE_ID = 256 + len(PROTECTED_IDS)  # noqa: NAR001
 EOW = " "  # all whitespace is normalized to it; chunks attach it to the next word
 _WHITESPACE_TO_EOW = {

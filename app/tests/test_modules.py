@@ -10,7 +10,7 @@ def test_output_preserves_d_model():
     torch.manual_seed(seed=0)
     layer = MultiHeadAttentionLayer(d_model=64, h=8, qk_norm=True)
     x = torch.randn(2, 10, 64)  # noqa: NAR001
-    assert layer(batch=x, pad_mask=None)[0].shape == (2, 10, 64)
+    assert layer(x=x, mask=None)[0].shape == (2, 10, 64)
 
 
 def test_qk_norm_makes_attention_scale_invariant():
@@ -18,8 +18,8 @@ def test_qk_norm_makes_attention_scale_invariant():
     layer = MultiHeadAttentionLayer(d_model=64, h=8, qk_norm=True)
     x = torch.randn(2, 10, 64)  # noqa: NAR001
     torch.testing.assert_close(
-        actual=layer(batch=10.0 * x, pad_mask=None)[0],
-        expected=10.0 * layer(batch=x, pad_mask=None)[0],
+        actual=layer(x=10.0 * x, mask=None)[0],
+        expected=10.0 * layer(x=x, mask=None)[0],
     )
 
 
@@ -28,8 +28,8 @@ def test_without_qk_norm_attention_is_not_scale_invariant():
     layer = MultiHeadAttentionLayer(d_model=64, h=8, qk_norm=False)
     x = torch.randn(2, 10, 64)  # noqa: NAR001
     assert not torch.allclose(
-        input=layer(batch=10.0 * x, pad_mask=None)[0],
-        other=10.0 * layer(batch=x, pad_mask=None)[0],
+        input=layer(x=10.0 * x, mask=None)[0],
+        other=10.0 * layer(x=x, mask=None)[0],
     )
 
 
@@ -42,8 +42,8 @@ def test_pad_mask_hides_padded_positions_from_real_tokens():
     x_other_pad = x.clone()
     x_other_pad[:, 3] = torch.randn(64)  # noqa: NAR001
     torch.testing.assert_close(
-        actual=layer(batch=x_other_pad, pad_mask=mask)[0][:, :3],
-        expected=layer(batch=x, pad_mask=mask)[0][:, :3],
+        actual=layer(x=x_other_pad, mask=mask)[0][:, :3],
+        expected=layer(x=x, mask=mask)[0][:, :3],
     )
 
 
@@ -51,7 +51,7 @@ def test_returns_attention_weights_per_head():
     torch.manual_seed(seed=0)
     layer = MultiHeadAttentionLayer(d_model=64, h=8, qk_norm=True)
     x = torch.randn(2, 10, 64)  # noqa: NAR001
-    _, weights = layer(batch=x, pad_mask=None)
+    _, weights = layer(x=x, mask=None)
     assert weights.shape == (2, 8, 10, 10)
     torch.testing.assert_close(actual=weights.sum(dim=-1), expected=torch.ones(2, 8, 10))  # noqa: NAR001
 

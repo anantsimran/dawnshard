@@ -28,6 +28,15 @@ ALLOWED_IMPORTS: dict[str, set[str]] = {
         "transformer",
         "viz",
     },
+    "experiments": {
+        "constants",
+        "dataload",
+        "metrics",
+        "model",
+        "setup",
+        "train",
+        "transformer",
+    },
 }
 
 

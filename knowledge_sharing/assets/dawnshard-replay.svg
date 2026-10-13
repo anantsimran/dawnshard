@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 950" role="img" aria-labelledby="title desc">
+  <title id="title">Seed and generator ownership in a Dawnshard run</title>
+  <desc id="desc">The entry point chooses train_seed, seeds torch before constructing the model, and fit resets torch with train_seed before epoch one. Torch's CPU default supplies DataLoader base seeds and sample order; workers, if enabled, start from base_seed plus worker ID. Training masks use the default CPU generator and dropout uses the model device's default. Separately supplied val_seed and test_seed create private per-row generators for fixed Multi30k evaluation masks. Fit records test_seed without running a test pass.</desc>
+  <defs>
+    <linearGradient id="paper" x2="1" y2="1">
+      <stop stop-color="#f8f6f1"/>
+      <stop offset="1" stop-color="#ebeef3"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" orient="auto">
+      <path d="M0 0L10 5 0 10Z" fill="#b7713b"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="950" rx="22" fill="url(#paper)"/>
+  <path d="M0 0H1200V11H0Z" fill="#dfaa6d"/>
+  <text x="56" y="57" fill="#9b582c" font-family="Inter, system-ui, sans-serif" font-size="18" font-weight="750" letter-spacing="3">02 / DAWNSHARD</text>
+  <text x="56" y="103" fill="#1a2943" font-family="Inter, system-ui, sans-serif" font-size="33" font-weight="750">Seed scope and draw order in Dawnshard</text>
+  <text x="56" y="138" fill="#4d6078" font-family="Inter, system-ui, sans-serif" font-size="20">train_seed resets torch twice; evaluation seeds are bound to their loaders.</text>
+
+  <rect x="56" y="185" width="245" height="151" rx="16" fill="#192944"/>
+  <text x="78" y="219" fill="#efb373" font-family="Inter, system-ui, sans-serif" font-size="17" font-weight="700" letter-spacing="1">01  CHOOSE</text>
+  <text x="78" y="260" fill="#ffffff" font-family="ui-monospace, SFMono-Regular, monospace" font-size="26" font-weight="700">train_seed</text>
+  <text x="78" y="292" fill="#bdcde0" font-family="Inter, system-ui, sans-serif" font-size="18">Python random draws</text>
+  <text x="78" y="317" fill="#bdcde0" font-family="Inter, system-ui, sans-serif" font-size="18">a 32-bit value</text>
+
+  <path d="M302 260H329" fill="none" stroke="#b7713b" stroke-width="3" marker-end="url(#arrow)"/>
+  <rect x="342" y="185" width="245" height="151" rx="16" fill="#243b5c"/>
+  <text x="364" y="219" fill="#efb373" font-family="Inter, system-ui, sans-serif" font-size="17" font-weight="700" letter-spacing="1">02  MODEL INIT</text>
+  <text x="364" y="255" fill="#ffffff" font-family="ui-monospace, SFMono-Regular, monospace" font-size="20" font-weight="700">manual_seed</text>
+  <text x="364" y="282" fill="#ffffff" font-family="ui-monospace, SFMono-Regular, monospace" font-size="19">(train_seed)</text>
+  <text x="364" y="316" fill="#d2deeb" font-family="Inter, system-ui, sans-serif" font-size="18">then construct model</text>
+
+  <path d="M588 260H615" fill="none" stroke="#b7713b" stroke-width="3" marker-end="url(#arrow)"/>
+  <rect x="628" y="185" width="245" height="151" rx="16" fill="#243b5c"/>
+  <text x="650" y="219" fill="#efb373" font-family="Inter, system-ui, sans-serif" font-size="17" font-weight="700" letter-spacing="1">03  FIT RESET</text>
+  <text x="650" y="255" fill="#ffffff" font-family="ui-monospace, SFMono-Regular, monospace" font-size="20" font-weight="700">manual_seed</text>
+  <text x="650" y="282" fill="#ffffff" font-family="ui-monospace, SFMono-Regular, monospace" font-size="19">(train_seed)</text>
+  <text x="650" y="316" fill="#d2deeb" font-family="Inter, system-ui, sans-serif" font-size="18">before epoch one</text>
+
+  <path d="M874 260H901" fill="none" stroke="#b7713b" stroke-width="3" marker-end="url(#arrow)"/>
+  <rect x="914" y="185" width="230" height="151" rx="16" fill="#192944"/>
+  <text x="936" y="219" fill="#efb373" font-family="Inter, system-ui, sans-serif" font-size="17" font-weight="700" letter-spacing="1">04  TORCH DEFAULTS</text>
+  <text x="936" y="258" fill="#ffffff" font-family="Inter, system-ui, sans-serif" font-size="22" font-weight="700">one per device</text>
+  <text x="936" y="292" fill="#bdcde0" font-family="Inter, system-ui, sans-serif" font-size="18">within each process</text>
+  <text x="936" y="317" fill="#bdcde0" font-family="Inter, system-ui, sans-serif" font-size="18">advances on draws</text>
+
+  <text x="56" y="395" fill="#9b582c" font-family="Inter, system-ui, sans-serif" font-size="18" font-weight="750" letter-spacing="1">DURING TRAINING / DEFAULT TORCH GENERATORS</text>
+  <path d="M1029 337V419H318V432" fill="none" stroke="#b7713b" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <path d="M1029 419H882V432" fill="none" stroke="#b7713b" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <rect x="56" y="446" width="524" height="220" rx="16" fill="#ffffff" stroke="#d5dce4" stroke-width="2"/>
+  <rect x="56" y="446" width="7" height="220" rx="3" fill="#d99655"/>
+  <text x="82" y="483" fill="#9b582c" font-family="Inter, system-ui, sans-serif" font-size="18" font-weight="750" letter-spacing="1">CPU DEFAULT / DATA LOADER</text>
+  <text x="82" y="521" fill="#1b2d48" font-family="ui-monospace, SFMono-Regular, monospace" font-size="21" font-weight="650">iter(loader) → base_seed</text>
+  <text x="82" y="559" fill="#445971" font-family="Inter, system-ui, sans-serif" font-size="19">Sampler chooses indices in main process.</text>
+  <text x="82" y="596" fill="#445971" font-family="Inter, system-ui, sans-serif" font-size="19">If workers: seed worker i from base_seed + i.</text>
+  <text x="82" y="633" fill="#445971" font-family="Inter, system-ui, sans-serif" font-size="19">If none: collate runs in main process.</text>
+
+  <rect x="620" y="446" width="524" height="220" rx="16" fill="#ffffff" stroke="#d5dce4" stroke-width="2"/>
+  <rect x="620" y="446" width="7" height="220" rx="3" fill="#d99655"/>
+  <text x="646" y="483" fill="#9b582c" font-family="Inter, system-ui, sans-serif" font-size="18" font-weight="750" letter-spacing="1">DEFAULTS / TRAINING OPERATIONS</text>
+  <text x="646" y="521" fill="#1b2d48" font-family="Inter, system-ui, sans-serif" font-size="19">Dropout reads the model device's default.</text>
+  <text x="646" y="559" fill="#445971" font-family="ui-monospace, SFMono-Regular, monospace" font-size="19">Multi30k train: generator=None</text>
+  <text x="646" y="596" fill="#445971" font-family="Inter, system-ui, sans-serif" font-size="19">Mask draws advance the CPU default.</text>
+  <text x="646" y="633" fill="#445971" font-family="Inter, system-ui, sans-serif" font-size="19">A row may get a new mask next pass.</text>
+
+  <rect x="56" y="719" width="1088" height="167" rx="16" fill="#ffffff" stroke="#8bbbd0" stroke-width="2"/>
+  <rect x="56" y="719" width="7" height="167" rx="3" fill="#6caec9"/>
+  <text x="82" y="757" fill="#327b9b" font-family="Inter, system-ui, sans-serif" font-size="18" font-weight="750" letter-spacing="1">MULTI30K MLM EVALUATION / SEEDS BOUND WHEN LOADERS ARE BUILT</text>
+  <text x="82" y="800" fill="#1b2d48" font-family="ui-monospace, SFMono-Regular, monospace" font-size="22" font-weight="650">VAL_SEED + row index</text>
+  <text x="82" y="834" fill="#445971" font-family="Inter, system-ui, sans-serif" font-size="19">Private generator → fixed validation mask</text>
+  <path d="M595 776V855" stroke="#d5dce4" stroke-width="2"/>
+  <text x="624" y="800" fill="#1b2d48" font-family="ui-monospace, SFMono-Regular, monospace" font-size="22" font-weight="650">TEST_SEED + row index</text>
+  <text x="624" y="834" fill="#445971" font-family="Inter, system-ui, sans-serif" font-size="19">Private generator → fixed test mask</text>
+  <text x="82" y="865" fill="#6b7d92" font-family="Inter, system-ui, sans-serif" font-size="17">fit records test_seed; it does not run the test loader.</text>
+
+  <text x="56" y="925" fill="#4d6078" font-family="Inter, system-ui, sans-serif" font-size="18">A validation iterator still draws a CPU base_seed; its row masks use the private generators above.</text>
+</svg>

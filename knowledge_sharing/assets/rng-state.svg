@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 540" role="img" aria-labelledby="title desc">
+  <title id="title">A seeded random generator is a state machine</title>
+  <desc id="desc">Seed s establishes state S0 in the default generator. A first draw returns r0 and advances to S1; a second returns r1 and advances to S2. Reseeding with s returns to S0. A private generator has its own independent states.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1">
+      <stop stop-color="#111d35"/>
+      <stop offset="1" stop-color="#203458"/>
+    </linearGradient>
+    <linearGradient id="card" x2="1" y2="1">
+      <stop stop-color="#2c4266"/>
+      <stop offset="1" stop-color="#233756"/>
+    </linearGradient>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M36 0H0V36" fill="none" stroke="#ffffff" stroke-opacity=".045"/>
+    </pattern>
+    <marker id="amber-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" orient="auto">
+      <path d="M0 0L10 5 0 10Z" fill="#efb373"/>
+    </marker>
+    <marker id="blue-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" orient="auto">
+      <path d="M0 0L10 5 0 10Z" fill="#85c7e1"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="540" rx="22" fill="url(#bg)"/>
+  <rect width="1200" height="540" rx="22" fill="url(#grid)"/>
+  <text x="58" y="56" fill="#efb373" font-family="Inter, system-ui, sans-serif" font-size="18" font-weight="700" letter-spacing="3">01 / DEFAULT GENERATOR</text>
+  <text x="58" y="103" fill="#f5f6f8" font-family="Inter, system-ui, sans-serif" font-size="32" font-weight="700">A seed chooses where a sequence begins</text>
+  <text x="58" y="139" fill="#b9c8da" font-family="Inter, system-ui, sans-serif" font-size="20">A call with generator=None consumes this default stream.</text>
+
+  <rect x="58" y="205" width="145" height="68" rx="34" fill="#efb373"/>
+  <text x="130" y="248" text-anchor="middle" fill="#18243b" font-family="ui-monospace, SFMono-Regular, monospace" font-size="25" font-weight="700">seed s</text>
+  <path d="M205 239H250" fill="none" stroke="#efb373" stroke-width="3" marker-end="url(#amber-arrow)"/>
+
+  <rect x="265" y="184" width="205" height="110" rx="16" fill="url(#card)" stroke="#8296b4" stroke-opacity=".55"/>
+  <text x="290" y="228" fill="#f5f6f8" font-family="ui-monospace, SFMono-Regular, monospace" font-size="35" font-weight="700">S₀</text>
+  <text x="290" y="263" fill="#b9c8da" font-family="Inter, system-ui, sans-serif" font-size="20">initial state</text>
+
+  <path d="M471 239H548" fill="none" stroke="#efb373" stroke-width="3" marker-end="url(#amber-arrow)"/>
+  <text x="509" y="216" text-anchor="middle" fill="#efb373" font-family="ui-monospace, SFMono-Regular, monospace" font-size="19">draw r₀</text>
+  <rect x="562" y="184" width="205" height="110" rx="16" fill="url(#card)" stroke="#8296b4" stroke-opacity=".55"/>
+  <text x="587" y="228" fill="#f5f6f8" font-family="ui-monospace, SFMono-Regular, monospace" font-size="35" font-weight="700">S₁</text>
+  <text x="587" y="263" fill="#b9c8da" font-family="Inter, system-ui, sans-serif" font-size="20">advanced state</text>
+
+  <path d="M768 239H845" fill="none" stroke="#efb373" stroke-width="3" marker-end="url(#amber-arrow)"/>
+  <text x="806" y="216" text-anchor="middle" fill="#efb373" font-family="ui-monospace, SFMono-Regular, monospace" font-size="19">draw r₁</text>
+  <rect x="859" y="184" width="283" height="110" rx="16" fill="url(#card)" stroke="#8296b4" stroke-opacity=".55"/>
+  <text x="884" y="228" fill="#f5f6f8" font-family="ui-monospace, SFMono-Regular, monospace" font-size="35" font-weight="700">S₂</text>
+  <text x="884" y="263" fill="#b9c8da" font-family="Inter, system-ui, sans-serif" font-size="20">next state</text>
+
+  <path d="M1000 295V351H367V307" fill="none" stroke="#efb373" stroke-width="2.5" stroke-dasharray="8 7" marker-end="url(#amber-arrow)"/>
+  <rect x="517" y="330" width="335" height="42" rx="21" fill="#172640"/>
+  <text x="684" y="357" text-anchor="middle" fill="#efb373" font-family="Inter, system-ui, sans-serif" font-size="19" font-weight="650">reseed with s → return to S₀</text>
+
+  <path d="M58 407H1142" stroke="#7890b1" stroke-opacity=".32"/>
+  <text x="58" y="452" fill="#85c7e1" font-family="Inter, system-ui, sans-serif" font-size="18" font-weight="700" letter-spacing="2">PRIVATE GENERATOR</text>
+  <text x="58" y="486" fill="#d3dce8" font-family="Inter, system-ui, sans-serif" font-size="20">Its draws advance a different state.</text>
+  <rect x="590" y="433" width="128" height="71" rx="14" fill="#21465f" stroke="#85c7e1" stroke-opacity=".6"/>
+  <text x="654" y="478" text-anchor="middle" fill="#e7f5fb" font-family="ui-monospace, SFMono-Regular, monospace" font-size="29">T₀</text>
+  <path d="M721 469H844" fill="none" stroke="#85c7e1" stroke-width="3" marker-end="url(#blue-arrow)"/>
+  <text x="781" y="445" text-anchor="middle" fill="#85c7e1" font-family="ui-monospace, SFMono-Regular, monospace" font-size="19">draw q₀</text>
+  <rect x="859" y="433" width="128" height="71" rx="14" fill="#21465f" stroke="#85c7e1" stroke-opacity=".6"/>
+  <text x="923" y="478" text-anchor="middle" fill="#e7f5fb" font-family="ui-monospace, SFMono-Regular, monospace" font-size="29">T₁</text>
+</svg>

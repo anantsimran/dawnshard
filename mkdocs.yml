@@ -12,7 +12,13 @@ hooks:
   - pages/hooks.py
 watch:
   - README.md
+  - app/src/training/common/README.md
+  - app/src/training/dataload/README.md
+  - app/src/training/transformer/README.md
+  - experiments
+  - knowledge_sharing
   - pages
+  - reports
 
 theme:
   name: material
@@ -78,31 +84,21 @@ validation:
 nav:
   - Home: README.md
   - Revision guide: tutorials/index.md
-  - PyTorch:
-      - Overview: tutorials/pytorch/overview.md
-      - Tensors: tutorials/pytorch/tensors.md
-      - Shapes & broadcasting: tutorials/pytorch/broadcasting.md
-      - Gradients & descent: tutorials/pytorch/grad_and_descent.md
-      - nn.Module & multi-layer nets: tutorials/pytorch/nn_module_and_multi_layer_networks.md
-      - Linear-layer backward: tutorials/pytorch/linear_layer_backward.md
-      - ReLU & dead neurons: tutorials/pytorch/relu_and_dead_neurons.md
-      - Data loading: tutorials/pytorch/dataloading.md
-      - Randomness & workers: tutorials/pytorch/randomness_and_workers.md
-      - Inspecting your model: tutorials/pytorch/inspecting_your_model_best_practices.md
-  - Training:
-      - The training loop: tutorials/training/training_loop.md
-      - Optimizer & scheduler: tutorials/training/optimizer_and_scheduler.md
-      - Adam & the learning rate: tutorials/training/adam_and_learning_rate.md
-      - Observability: tutorials/training/observability.md
-  - Transformers:
-      - Attention masks: tutorials/transformer/attention_masks.md
-      - Pre-norm vs post-norm: tutorials/transformer/norm.md
-      - Compute & memory: tutorials/transformer/compute_and_memory.md
-  - Guides:
-      - Matrix calculus: tutorials/math/matrix_calculus.md
-      - Convolutional networks: tutorials/vision/cnn.md
+  # One page per topic. A new tutorial is a ## section inside one of these files,
+  # so it needs no nav entry; only a new topic file does.
+  - Topics:
+      - PyTorch: tutorials/pytorch.md
+      - Training: tutorials/training.md
+      - Transformers: tutorials/transformer.md
+      - Math: tutorials/math.md
+      - Vision: tutorials/vision.md
+  - Knowledge sharing:
+      - Reproducibility: knowledge_sharing/reproducibility.md
   - Code notes:
+      - BPE tokenizer: app/src/training/common/README.md
       - DataLoader internals: app/src/training/dataload/README.md
       - Attention implementation: app/src/training/transformer/README.md
+  - Reports:
+      - Multi30k tokenisation: reports/multi30k_tokenisation.md
   - Experiments:
-      - Multi30k masked-token pretraining: experiments/multi30ken_mlm.md
+      - Multi30k masked-token pretraining: experiments/multi30ken_predictor/2026-09-29/README.md

@@ -120,7 +120,7 @@ class AGNewsClassifier(nn.Module):
     Transformer. Pad positions get encodings too; the padding mask keeps them out.
 
     Every `forward` overwrites `attention_map` with each block's detached attention
-    weights, (B, h, L, L) per block in block order, so it describes the most recent
+    weights, `{"encoder": [(B, h, L, L) per block]}`, so it describes the most recent
     call only. `save_attention_maps` reads it as an eval probe; nothing else may rely
     on it surviving the next call.
 
@@ -150,7 +150,7 @@ class AGNewsClassifier(nn.Module):
         )
         self.final_norm = nn.LayerNorm(normalized_shape=D_MODEL)
         self.head = nn.Linear(in_features=D_MODEL, out_features=NUM_CLASSES)
-        self.attention_map: list[torch.Tensor] = []
+        self.attention_map: dict[str, list[torch.Tensor]] = {}
 
     @jaxtyped(typechecker=beartype)
     def forward(
@@ -170,8 +170,8 @@ class AGNewsClassifier(nn.Module):
             ValueError: If `L` exceeds `MAX_LEN`, the length of the position table.
 
         Side effects:
-            Replaces `self.attention_map` with this call's attention weights, one
-            detached `(B, h, L, L)` tensor per block in block order.
+            Replaces `self.attention_map` with this call's attention weights under
+            `"encoder"`, one detached `(B, h, L, L)` tensor per block in block order.
         """
         pad_mask = padding_keep_mask(token_ids=token_ids, pad_id=PAD_ID)
         hidden = self.embedding(token_ids)  # noqa: NAR001
@@ -181,7 +181,7 @@ class AGNewsClassifier(nn.Module):
         for block in self.blocks:
             hidden, weights = block(batch=hidden, pad_mask=pad_mask)
             attention_map.append(weights.detach())  # noqa: NAR001
-        self.attention_map = attention_map
+        self.attention_map = {"encoder": attention_map}
         normalized = self.final_norm(hidden)  # noqa: NAR001
         # (B, 1, 1, L) is the attention view; the pool wants (B, L).
         pooled = pad_masked_mean(attn=normalized, mask=pad_mask[:, 0, 0, :])

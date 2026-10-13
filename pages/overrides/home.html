@@ -111,7 +111,8 @@ history = fit(
           <h3>Leave evidence behind</h3>
           <p>
             Epoch records and run history retain metrics, seeds, the Git revision,
-            and machine context. Local plots and probes help explain the numbers.
+            and machine context. <code>log_elapsed</code> times setup phases in the
+            terminal; local plots and probes help explain the numbers.
           </p>
           <a class="ds-card__link" href="#debuggability">
             Examine a run {% include ".icons/material/arrow-right.svg" %}
@@ -126,33 +127,64 @@ history = fit(
       <p class="ds-eyebrow ds-eyebrow--accent">Learning track</p>
       <h2 class="ds-section__title" id="ds-track-title">Study the ideas behind the implementation</h2>
       <p class="ds-section__lead">
-        The revision guide links each topic to a question and a focused explanation.
+        Follow a topic in the revision guide or trace a design choice through the code.
       </p>
       <div class="ds-track-grid">
-        <a class="ds-track" href="{{ 'tutorials/pytorch/overview/' | url }}">
+        <a class="ds-track" href="{{ 'tutorials/pytorch/' | url }}">
           <strong>PyTorch</strong>
-          <span>Tensors, autograd, modules, data loading, and randomness.</span>
+          <span>Tensors, shared weights, autograd, token losses, and data loading.</span>
         </a>
-        <a class="ds-track" href="{{ 'tutorials/training/training_loop/' | url }}">
+        <a class="ds-track" href="{{ 'tutorials/training/' | url }}">
           <strong>Training</strong>
           <span>Loops, optimizers, schedules, and observability.</span>
         </a>
-        <a class="ds-track" href="{{ 'tutorials/math/matrix_calculus/' | url }}">
+        <a class="ds-track" href="{{ 'tutorials/math/' | url }}">
           <strong>Math</strong>
           <span>Matrix calculus and the chain rule behind gradients.</span>
         </a>
-        <a class="ds-track" href="{{ 'tutorials/vision/cnn/' | url }}">
+        <a class="ds-track" href="{{ 'tutorials/vision/' | url }}">
           <strong>Vision</strong>
           <span>Convolutions, parameter counts, and model graphs.</span>
         </a>
-        <a class="ds-track" href="{{ 'tutorials/transformer/attention_masks/' | url }}">
+        <a class="ds-track" href="{{ 'tutorials/transformer/' | url }}">
           <strong>Transformers</strong>
-          <span>Attention masks, normalization, compute, and memory.</span>
+          <span>Encoder and decoder attention, causal masks, normalization, and compute.</span>
+        </a>
+        <a class="ds-track" href="{{ 'knowledge_sharing/reproducibility/' | url }}">
+          <strong>Reproducibility</strong>
+          <span>Why Dawnshard seeds twice, and where loaders, workers, and masks draw.</span>
         </a>
       </div>
       <a class="ds-track-index" href="{{ 'tutorials/' | url }}">
         Browse the revision guide {% include ".icons/material/arrow-right.svg" %}
       </a>
+    </div>
+  </section>
+
+  <section class="ds-section ds-section--reports" id="reports" aria-labelledby="ds-reports-title">
+    <div class="md-grid ds-section__inner">
+      <p class="ds-eyebrow ds-eyebrow--accent">Reports</p>
+      <h2 class="ds-section__title" id="ds-reports-title">Measure the choices behind the model</h2>
+      <div class="ds-report-preview">
+        <a class="ds-report-preview__figure" href="{{ 'reports/multi30k_tokenisation/' | url }}" aria-label="Read the Multi30k tokenisation report">
+          <img src="{{ 'reports/assets/multi30k_tokenisation/mean_length.png' | url }}" alt="English and German caption lengths decrease as the BPE vocabulary grows, with diminishing returns." loading="lazy" width="1571" height="786">
+        </a>
+        <div class="ds-report-preview__copy">
+          <p class="ds-card__index">Multi30k / English and German</p>
+          <h3>Token counts measure the tokenizer, too</h3>
+          <p>
+            Seven vocabulary sizes, two languages, and the same captions within each
+            language. See how BPE changes sequence lengths, why a word-to-token
+            ratio varies, and what averages hide about longer inputs.
+          </p>
+          <a class="ds-card__link" href="{{ 'reports/multi30k_tokenisation/' | url }}">
+            Read the report {% include ".icons/material/arrow-right.svg" %}
+          </a>
+          <a class="ds-card__link" href="{{ 'app/src/training/common/' | url }}">
+            Use the BPE tokenizer {% include ".icons/material/arrow-right.svg" %}
+          </a>
+        </div>
+      </div>
     </div>
   </section>
 {% endblock %}

@@ -8,7 +8,7 @@ see the [root README](../../../../README.md).
 This page covers how a PyTorch `DataLoader` is put together, so a new loader can be
 written without guessing, and what each split is for. For the basics (why
 mini-batches, transforms, normalization), see the
-[data loading tutorial](../../../../tutorials/pytorch/dataloading.md).
+[data loading tutorial](../../../../tutorials/pytorch.md#dataloader--batching-and-the-dataset-abstraction).
 Choices specific to one dataset live in that module's docstring.
 
 ______________________________________________________________________
@@ -204,10 +204,11 @@ Pass `generator=torch.Generator().manual_seed(seed)` to the `DataLoader`.
   same seed before each validation pass gives the identical order every time. Reusing
   one generator advances its state, so each pass differs, but the whole run is still
   reproducible.
-- **Workers seed torch and Python, not NumPy.** With `num_workers > 0`, each worker's
-  `torch` and `random` are seeded from the generator. NumPy is not, so if
-  `__getitem__` uses NumPy randomness, pass a `worker_init_fn` that seeds it per
-  worker, or workers produce duplicate "random" augmentations.
+- **Workers have separate random streams.** With `num_workers > 0`, each worker's
+  `torch` and Python `random` are seeded from the loader's base seed. Current
+  PyTorch also derives a distinct seed for NumPy's global RNG. If dataset code uses
+  another random library or a separately created generator, seed it in
+  `worker_init_fn` using `torch.utils.data.get_worker_info().seed`.
 
 ### Random collates: mask validation and test once
 
@@ -322,7 +323,7 @@ ______________________________________________________________________
   multi-process loading, and `DistributedSampler`.
 - PyTorch docs,
   [Reproducibility](https://pytorch.org/docs/stable/notes/randomness.html): worker
-  seeding, the NumPy caveat, and `worker_init_fn`.
+  seeding, other random libraries, and `worker_init_fn`.
 - Hugging Face LLM Course,
   [Chapter 7](https://huggingface.co/learn/llm-course/chapter7/7): splitting long
   inputs into fixed-length pieces.

@@ -17,19 +17,33 @@ from mkdocs.structure.pages import Page
 REPO_ROOT = Path(__file__).resolve().parent.parent  # noqa: NAR001
 BRANCH = "main"
 HOME_PAGE = "README.md"
+REPRODUCIBILITY_PAGE = "knowledge_sharing/reproducibility.md"
+TOKENISATION_REPORT = "reports/multi30k_tokenisation.md"
 EXTRA_PAGES = [
     HOME_PAGE,
+    REPRODUCIBILITY_PAGE,
+    TOKENISATION_REPORT,
+    "app/src/training/common/README.md",
     "app/src/training/transformer/README.md",
     "app/src/training/dataload/README.md",
-    "experiments/multi30ken_mlm.md",
+    "experiments/multi30ken_predictor/2026-09-29/README.md",
 ]
 
-# Images an EXTRA_PAGES page embeds. Without them as site files, the rewriter below
-# sends each one to GitHub, which serves an HTML page where an image is expected.
+# Images and downloads used by EXTRA_PAGES. Without them as site files, the
+# rewriter sends each one to GitHub, which serves HTML instead of the asset.
 EXTRA_ASSETS = [
-    "experiments/assets/sweep_best_val.png",
-    "experiments/assets/val_curves.png",
-    "experiments/assets/follow_up_best_val.png",
+    "reports/assets/multi30k_tokenisation/mean_length.png",
+    "reports/assets/multi30k_tokenisation/mean_length.svg",
+    "reports/assets/multi30k_tokenisation/tokens_per_word.png",
+    "reports/assets/multi30k_tokenisation/tokens_per_word.svg",
+    "reports/assets/multi30k_tokenisation/length_tail.png",
+    "reports/assets/multi30k_tokenisation/length_tail.svg",
+    "reports/assets/multi30k_tokenisation/stats.csv",
+    "knowledge_sharing/assets/rng-state.svg",
+    "knowledge_sharing/assets/dawnshard-replay.svg",
+    "experiments/multi30ken_predictor/2026-09-29/assets/sweep_best_val.png",
+    "experiments/multi30ken_predictor/2026-09-29/assets/val_curves.png",
+    "experiments/multi30ken_predictor/2026-09-29/assets/follow_up_best_val.png",
 ]
 
 README_HERO_PREFIX = "# Dawnshard\n\n**A top-down–designed ML infrastructure library.**\n\n"
@@ -56,6 +70,16 @@ def on_files(files: Files, config: MkDocsConfig) -> Files:
 
 def on_page_markdown(markdown: str, page: Page, config: MkDocsConfig, files: Files) -> str:
     """Use the landing template for the home page and send non-page links to GitHub."""
+    if page.file.src_uri == REPRODUCIBILITY_PAGE:
+        page.meta["template"] = "reproducibility.html"
+        page.meta["hide"] = ["navigation", "toc"]
+    if page.file.src_uri == TOKENISATION_REPORT:
+        page.meta["template"] = "report.html"
+        page.meta["hide"] = ["navigation", "toc"]
+        page.meta["description"] = (
+            "How BPE vocabulary size changes English and German Multi30k caption "
+            "lengths, tokens per word, and the long-input tail."
+        )
     if page.file.src_uri == HOME_PAGE:
         page.meta["template"] = "home.html"
         page.meta["hide"] = ["navigation"]

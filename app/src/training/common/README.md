@@ -22,7 +22,7 @@ module docstring of [bpe.py](bpe.py). This page covers how to use it.
 from training.common import bpe
 
 merges, vocab = bpe.train(text="low lower lowest", num_merges=4)
-ids = bpe.encode(text="lowest\tlow", merges=merges)  # [261, 101, 115, 116, 262]
+ids = bpe.encode(text="lowest\tlow", merges=merges)  # [263, 101, 115, 116, 264]
 [vocab[i] for i in ids]                               # ['low', 'e', 's', 't', ' low']
 bpe.decode(ids=ids, vocab=vocab)                      # 'lowest low' (tab lost)
 ```
@@ -40,8 +40,9 @@ merges, vocab = bpe.train(text=text, num_merges=8000)
 
 - **`num_merges` is an upper bound.** Training stops earlier once no pair occurs at
   least twice.
-- **The embedding table has `len(vocab)` rows:** 256 bytes, the 4 protected ids in
-  [constants.py](constants.py) (`PAD_ID`, `MASK_ID`, `CLS_ID`, `SEP_ID`), and
+- **The embedding table has `len(vocab)` rows:** 256 bytes, the 6 protected ids in
+  [constants.py](constants.py) (`PAD_ID`, `MASK_ID`, `CLS_ID`, `SEP_ID`, `BOS_ID`,
+  `EOS_ID`), and
   `len(merges)` merges.
 - **Train on the training split only,** so validation and test text do not shape the
   vocabulary.
@@ -132,8 +133,10 @@ tgt = bpe.encode(text=tgt_sentence, merges=merges)
   `' Männer'`.
 - **Whitespace normalization loses nothing on single-line sentences,** which is what
   a parallel corpus of sentence pairs usually holds.
-- **A decoder needs start and end tokens,** which `bpe.py` does not define yet. See
-  Open items.
+- **A decoder needs start and end tokens.** `BOS_ID` and `EOS_ID` are reserved in
+  [constants.py](constants.py); the caller inserts them around target token IDs.
+  Shift that sequence by one position to build decoder inputs and next-token
+  targets. `encode` produces text tokens only.
 
 ### How text is chunked
 
@@ -166,9 +169,6 @@ normalized text.
 
 Not implemented. Each needs a decision first:
 
-1. **BOS and EOS.** A translation decoder needs them. Adding them to
-   `PROTECTED_IDS` shifts `FIRST_MERGE_ID`, so existing tokenizers would need
-   retraining.
 1. **Word ids from `encode`,** for whole-word masking in MLM.
 1. **Training on unique chunk counts** instead of the full text. Memory would scale
    with unique chunks, not corpus bytes. Not needed while the corpus fits in memory.

@@ -74,12 +74,15 @@ holds only part of a multi-byte character decodes to U+FFFD.
 ```python
 from training.common.constants import PAD_ID
 
-batch = [bpe.encode(text=t, merges=merges) for t in texts]
+batch = bpe.encode_many(texts=texts, merges=merges)
 max_len = max(len(ids) for ids in batch)
 padded = [ids + [PAD_ID] * (max_len - len(ids)) for ids in batch]
 mask = [[i != PAD_ID for i in ids] for ids in padded]  # False at padding
 ```
 
+- **Use `encode_many` for more than a handful of texts.** It returns what `encode`
+  would for each text, but builds the merge table once; `encode` rebuilds it on every
+  call, and with thousands of merges that costs more than the encoding itself.
 - **`encode` never produces `PAD_ID`,** so `ids != PAD_ID` marks exactly the real
   tokens. Use the mask to exclude padding from mean pooling and attention.
 - **`decode` drops `PAD_ID`,** so padded rows decode cleanly.

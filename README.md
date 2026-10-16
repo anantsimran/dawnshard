@@ -397,13 +397,13 @@ ______________________________________________________________________
 | Tokenizer | byte-level BPE, written from scratch, with an indexed max-heap so each merge updates pair counts in O(log n) | [common/](app/src/training/common/) |
 | Data | MNIST through torchvision; AG News and Multi30k sampled, tokenized, and cached; how a `DataLoader` is built in the [dataload README](app/src/training/dataload/README.md) | [dataload/](app/src/training/dataload/), [mnist.py](app/src/training/model/mnist.py) |
 | Models | three MNIST classifiers, an AG News transformer classifier, a Multi30k masked-token predictor, and a Multi30k encoder-decoder translator | [model/](app/src/training/model/) |
-| Experiments | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation, each a grid search ranked by best val loss | [experiments/](app/src/training/experiments/) |
+| Experiments | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation and its scale study, each a grid search ranked by best val loss | [experiments/](app/src/training/experiments/) |
 | Visualization | a run's metrics, two runs side by side, a model's autograd graph, attention heatmaps, BPE sequence length against merges | [viz/](app/src/training/viz/) |
 | Analytics | BPE length stats (mean, min, max, percentiles) for each Multi30k EN split | [analytics/](app/src/training/analytics/) |
 | Tests | a pytest suite; `attention` is checked against `torch.nn.functional.scaled_dot_product_attention` | [tests/](app/tests/) |
 | Tutorials | theory and revision notes from tensors to attention masks, published as a website | [tutorials/](tutorials/) |
 | Knowledge sharing | engineering articles that trace design choices through the implementation | [Reproducibility](knowledge_sharing/reproducibility.md) |
-| Reports | measured tradeoffs, with figures, exported data, and a reproduction command | [Multi30k tokenisation](reports/multi30k_tokenisation.md) |
+| Reports | measured tradeoffs, with figures, exported data, and reproduction commands | [Multi30k ablations](reports/multi30k_ablations.md), [tokenisation](reports/multi30k_tokenisation.md) |
 
 Logs go through loguru, Weights & Biases is optional, and everything runs with `uv`
 locally or in Docker.
@@ -825,11 +825,14 @@ uv run python app/src/training/model/multi30ken_predictor.py
 # Train the Multi30k encoder-decoder translator once
 uv run python app/src/training/model/multi30k_translator.py
 
-# Run the Multi30k masked-token predictor's ablation (7 arms x 3 seeds, 100 epochs each)
+# Run the Multi30k masked-token predictor's ablation (3 arms x 3 seeds, 100 epochs each)
 uv run python app/src/training/experiments/multi30ken_predictor_ablation.py
 
-# Run the Multi30k translator's ablation (10 arms x 3 seeds, 100 epochs each)
+# Run the Multi30k translator's ablation (10 arms x 3 seeds, 30 epochs each)
 uv run python app/src/training/experiments/multi30k_translator_ablation.py
+
+# Run its scale follow-up: d_model=256 and 512, 12+12 blocks, schedules, dropout
+uv run python app/src/training/experiments/multi30k_translator_ablation.py scale
 
 # Plot one run's per-epoch metrics
 uv run python app/src/training/viz/plot_metrics.py app/history/<run-id>.json
@@ -845,6 +848,9 @@ uv run python app/src/training/analytics/multi30ken_bpe_len.py
 
 # Export the tokenisation report's CSV and plots from saved notebook output
 uv run python reports/generate_multi30k_tokenisation.py
+
+# Export the ablation report's summary and plots from checked-in study CSVs
+uv run python reports/generate_multi30k_ablations.py
 
 # Execute the starter notebook and print its outputs, leaving the file unchanged
 uv run jupyter nbconvert --execute --to markdown --stdout notebooks/hello_world.ipynb
@@ -975,6 +981,9 @@ The [reproducibility article](knowledge_sharing/reproducibility.md) follows the
 library's random streams through initialization, loaders, workers, and masks.
 The [Multi30k tokenisation report](reports/multi30k_tokenisation.md) compares BPE
 vocabulary sizes with downloadable figures and statistics.
+The [Multi30k ablation report](reports/multi30k_ablations.md) follows dropout,
+depth, and learning-rate schedules across 66 comparison runs, with links to the
+full study records and their data.
 
 The project landing page, tutorials, code notes, articles, and reports are built as a website at
 [anantsimran.github.io/dawnshard](https://anantsimran.github.io/dawnshard/) by

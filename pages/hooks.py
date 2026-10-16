@@ -19,19 +19,65 @@ BRANCH = "main"
 HOME_PAGE = "README.md"
 REPRODUCIBILITY_PAGE = "knowledge_sharing/reproducibility.md"
 TOKENISATION_REPORT = "reports/multi30k_tokenisation.md"
+ABLATION_REPORT = "reports/multi30k_ablations.md"
+STUDY_DETAILS = {
+    "experiments/multi30ken_predictor/2026-09-29/README.md": (
+        "Masked-token pretraining",
+        "34 completed runs",
+        "20–50 epochs",
+        "Sweep and ablation",
+    ),
+    "experiments/multi30k_translator/2026-10-13/README.md": (
+        "Translator components",
+        "30 comparison runs",
+        "3 seeds per arm",
+        "30 epochs",
+    ),
+    "experiments/multi30k_translator/2026-10-15/README.md": (
+        "Translator scale",
+        "27 comparison runs",
+        "3 seeds per arm",
+        "25 epochs",
+    ),
+    "experiments/multi30ken_predictor/2026-10-15/README.md": (
+        "Masked-token convergence",
+        "9 comparison runs",
+        "3 seeds per arm",
+        "100 epochs",
+    ),
+}
 EXTRA_PAGES = [
     HOME_PAGE,
     REPRODUCIBILITY_PAGE,
     TOKENISATION_REPORT,
+    ABLATION_REPORT,
     "app/src/training/common/README.md",
     "app/src/training/transformer/README.md",
     "app/src/training/dataload/README.md",
     "experiments/multi30ken_predictor/2026-09-29/README.md",
+    "experiments/multi30k_translator/2026-10-13/README.md",
+    "experiments/multi30ken_predictor/2026-10-15/README.md",
+    "experiments/multi30k_translator/2026-10-15/README.md",
 ]
 
 # Images and downloads used by EXTRA_PAGES. Without them as site files, the
 # rewriter sends each one to GitHub, which serves HTML instead of the asset.
 EXTRA_ASSETS = [
+    "reports/assets/multi30k_ablations/translator_components.png",
+    "reports/assets/multi30k_ablations/translator_components.svg",
+    "reports/assets/multi30k_ablations/width_and_schedule.png",
+    "reports/assets/multi30k_ablations/width_and_schedule.svg",
+    "reports/assets/multi30k_ablations/masked_token_convergence.png",
+    "reports/assets/multi30k_ablations/masked_token_convergence.svg",
+    "reports/assets/multi30k_ablations/summary.csv",
+    "experiments/multi30ken_predictor/2026-09-29/runs.csv",
+    "experiments/multi30ken_predictor/2026-09-29/epochs.csv",
+    "experiments/multi30k_translator/2026-10-13/runs.csv",
+    "experiments/multi30k_translator/2026-10-13/epochs.csv",
+    "experiments/multi30ken_predictor/2026-10-15/runs.csv",
+    "experiments/multi30ken_predictor/2026-10-15/epochs.csv",
+    "experiments/multi30k_translator/2026-10-15/runs.csv",
+    "experiments/multi30k_translator/2026-10-15/epochs.csv",
     "reports/assets/multi30k_tokenisation/mean_length.png",
     "reports/assets/multi30k_tokenisation/mean_length.svg",
     "reports/assets/multi30k_tokenisation/tokens_per_word.png",
@@ -44,6 +90,14 @@ EXTRA_ASSETS = [
     "experiments/multi30ken_predictor/2026-09-29/assets/sweep_best_val.png",
     "experiments/multi30ken_predictor/2026-09-29/assets/val_curves.png",
     "experiments/multi30ken_predictor/2026-09-29/assets/follow_up_best_val.png",
+    "experiments/multi30k_translator/2026-10-13/assets/val_curves.png",
+    "experiments/multi30k_translator/2026-10-13/assets/best_val_by_arm.png",
+    "experiments/multi30ken_predictor/2026-10-15/assets/val_curves.png",
+    "experiments/multi30ken_predictor/2026-10-15/assets/best_val_by_arm.png",
+    "experiments/multi30k_translator/2026-10-15/assets/val_curves.png",
+    "experiments/multi30k_translator/2026-10-15/assets/best_val_by_arm.png",
+    "experiments/multi30k_translator/2026-10-15/assets/val_perplexity.png",
+    "experiments/multi30k_translator/2026-10-15/assets/val_accuracy.png",
 ]
 
 README_HERO_PREFIX = "# Dawnshard\n\n**A top-down–designed ML infrastructure library.**\n\n"
@@ -76,10 +130,26 @@ def on_page_markdown(markdown: str, page: Page, config: MkDocsConfig, files: Fil
     if page.file.src_uri == TOKENISATION_REPORT:
         page.meta["template"] = "report.html"
         page.meta["hide"] = ["navigation", "toc"]
+        page.meta["report_subject"] = "Multi30k tokenisation"
         page.meta["description"] = (
             "How BPE vocabulary size changes English and German Multi30k caption "
             "lengths, tokens per word, and the long-input tail."
         )
+    if page.file.src_uri == ABLATION_REPORT:
+        page.meta["template"] = "report.html"
+        page.meta["hide"] = ["navigation", "toc"]
+        page.meta["report_subject"] = "Multi30k ablation studies"
+        page.meta["report_period"] = "October 13–15, 2026"
+        page.meta["description"] = (
+            "66 runs across translator components, model scale, and masked-token "
+            "convergence: what dropout, depth, and learning-rate schedules change."
+        )
+    if page.file.src_uri in STUDY_DETAILS:
+        subject, *facts = STUDY_DETAILS[page.file.src_uri]
+        page.meta["template"] = "experiment.html"
+        page.meta["study_subject"] = subject
+        page.meta["study_facts"] = facts
+        page.meta["study_date"] = page.file.src_uri.split(sep="/")[-2]
     if page.file.src_uri == HOME_PAGE:
         page.meta["template"] = "home.html"
         page.meta["hide"] = ["navigation"]

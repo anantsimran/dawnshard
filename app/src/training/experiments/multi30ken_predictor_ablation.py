@@ -9,7 +9,8 @@ from the model module's constants, so editing those for a one-off run changes no
 `main` runs `grid_search` over ABLATION_ARMS repeated ABLATION_SEEDS times for
 ABLATION_EPOCHS: ABLATION_REFERENCE, one arm per component removed from it
 (COMPONENT_ARMS), and one arm per LR schedule in place of its constant LR
-(SCHEDULE_ARMS). Two earlier studies are kept here as the configs that produced
+(SCHEDULE_ARMS); its results are in `experiments/multi30ken_predictor/2026-10-15/`.
+Two earlier studies are kept here as the configs that produced
 them — `grid_search` over
 `one_at_a_time_configs(baseline=BASELINE, sweep=SWEEP)` for NUM_EPOCHS (BASELINE plus
 each of SWEEP's values changed one at a time, each with a constant and a cosine LR),
@@ -111,25 +112,21 @@ FOLLOW_UP_EPOCHS = 50
 # 34 runs was still improving at its last epoch, so ablating at 50 would measure
 # partial training as much as the component.
 ABLATION_REFERENCE = replace(BASELINE, d_model=128)  # noqa: NAR001
-# One component removed each. Cut to spend the budget where the outcome is least
-# certain: num_heads=1 and norm="rmsnorm" were predicted inside noise, num_encoders=3
-# has 20-epoch sweep data, and position_encoding=False is predicted catastrophic with
-# near certainty. The model keeps every flag, so each is one line to restore.
+# One component removed each. Cut to fit a 5-hour budget at 100 epochs and 3 seeds,
+# keeping dropout, the verdict most likely to flip with length. qk_norm=False has a
+# clear 50-epoch result (+0.095), and final_norm=False, num_heads=1, norm="rmsnorm",
+# num_encoders=3, and position_encoding=False wait for a longer run. The model keeps
+# every flag, so each is one line to restore.
 # Post-norm is missing on purpose: EncoderBlock hardcodes the pre-norm order, and
 # switching it is a change to shared code rather than a flag on this model.
 COMPONENT_ARMS = [
-    replace(ABLATION_REFERENCE, qk_norm=False),  # noqa: NAR001
     replace(ABLATION_REFERENCE, dropout_rate=0.0),  # noqa: NAR001
-    replace(ABLATION_REFERENCE, final_norm=False),  # noqa: NAR001
 ]
-# The reference's constant LR swapped for a schedule, each with the same peak LR.
-# Read as a chain: cosine against the reference is what decay buys, warmup_cosine
-# against cosine is what warmup buys, one_cycle against warmup_cosine is what a 30-
-# rather than 5-epoch warmup costs.
+# The reference's constant LR swapped for a schedule with the same peak LR: cosine
+# against the reference is what decay buys. warmup_cosine and one_cycle, which would
+# price the warmup, were cut for the same budget.
 SCHEDULE_ARMS = [
     replace(ABLATION_REFERENCE, schedule="cosine"),  # noqa: NAR001
-    replace(ABLATION_REFERENCE, schedule="warmup_cosine"),  # noqa: NAR001
-    replace(ABLATION_REFERENCE, schedule="one_cycle"),  # noqa: NAR001
 ]
 # The reference is the control for both lists, so it runs once.
 ABLATION_ARMS = [ABLATION_REFERENCE] + COMPONENT_ARMS + SCHEDULE_ARMS

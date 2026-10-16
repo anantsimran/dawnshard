@@ -115,8 +115,8 @@ class Multi30kEnPredictor(nn.Module):
     original Transformer.
 
     `norm`, `position_encoding`, and `final_norm` exist so one component at a time can
-    be switched off and the cost measured; `ABLATION_ARMS` in
-    `experiments/multi30ken_predictor_ablation.py` is the list that does it.
+    be switched off and the cost measured; `COMPONENT_ARMS` in
+    `experiments/multi30ken_predictor_ablation.py` is where an arm switches one off.
     Each off state is `nn.Identity`, not a skipped call, so the forward pass keeps one
     shape and one code path whichever way the flags are set. Dropping the position
     encoding leaves attention as the only thing that mixes positions, and attention is

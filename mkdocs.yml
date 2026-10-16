@@ -99,6 +99,10 @@ nav:
       - DataLoader internals: app/src/training/dataload/README.md
       - Attention implementation: app/src/training/transformer/README.md
   - Reports:
+      - Multi30k ablation studies: reports/multi30k_ablations.md
       - Multi30k tokenisation: reports/multi30k_tokenisation.md
   - Experiments:
       - Multi30k masked-token pretraining: experiments/multi30ken_predictor/2026-09-29/README.md
+      - Multi30k masked-token dropout and decay: experiments/multi30ken_predictor/2026-10-15/README.md
+      - Multi30k translation ablation: experiments/multi30k_translator/2026-10-13/README.md
+      - Multi30k translation scale study: experiments/multi30k_translator/2026-10-15/README.md

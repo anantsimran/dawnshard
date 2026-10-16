@@ -86,6 +86,14 @@ def test_encode_with_no_merges_returns_raw_bytes():
     assert bpe.encode(text="AB", merges=[]) == [65, 66]
 
 
+def test_encode_many_matches_encode_per_text():
+    merges, _ = bpe.train(text="low lower lowest newer newest", num_merges=20)
+    texts = ["lowest newer", "", "low  low\tlower", "unseen bytes ü"]
+    assert bpe.encode_many(texts=texts, merges=merges) == [
+        bpe.encode(text=text, merges=merges) for text in texts
+    ]
+
+
 def test_encode_decode_roundtrip_is_lossless_for_plain_ascii():
     text = "the cat sat on the mat"
     merges, vocab = bpe.train(text=text, num_merges=50)

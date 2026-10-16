@@ -493,6 +493,115 @@
   margin-top: 0.7rem;
 }
 
+.ds-report-preview--featured {
+  margin-bottom: 2rem;
+  padding-bottom: 2rem;
+  border-bottom: 1px solid var(--ds-border);
+}
+
+.ds-report-preview__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1.2rem;
+  margin: 0 0 1.2rem;
+  padding: 0;
+  color: var(--ds-muted);
+  list-style: none;
+  font-size: 0.67rem;
+}
+
+.ds-report-preview__facts strong {
+  margin-right: 0.15rem;
+  color: var(--md-default-fg-color);
+  font-size: 0.95rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Study records keep Material's section navigation and give evidence more room. */
+.ds-experiment {
+  min-width: 0;
+  padding-bottom: 2rem;
+}
+
+.ds-experiment__header {
+  margin: 0 0 1.6rem;
+  padding: 1rem 1.2rem;
+  border: 1px solid var(--ds-border);
+  border-top: 3px solid var(--ds-amber);
+  border-radius: 0.35rem;
+  background: var(--ds-surface);
+}
+
+.md-typeset .ds-experiment__header .ds-eyebrow {
+  margin: 0 0 0.4rem;
+}
+
+.md-typeset .ds-experiment__subject {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+}
+
+.md-typeset .ds-experiment ul.ds-experiment__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.1rem;
+  margin: 0.6rem 0 0.9rem;
+  padding: 0;
+  color: var(--ds-muted);
+  list-style: none;
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.md-typeset .ds-experiment__facts li {
+  margin: 0;
+}
+
+.md-typeset .ds-experiment h1 {
+  margin-bottom: 1.2rem;
+  font-size: clamp(1.7rem, 3vw, 2.35rem);
+  line-height: 1.15;
+}
+
+.md-typeset .ds-experiment h2 {
+  margin-top: 2.7rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--ds-border);
+}
+
+.md-typeset .ds-experiment hr {
+  display: none;
+}
+
+.md-typeset .ds-experiment > p:first-of-type {
+  font-size: 0.92rem;
+  line-height: 1.7;
+}
+
+.md-typeset .ds-experiment > p:has(> img) {
+  overflow-x: auto;
+  padding: 0.35rem;
+  border: 1px solid var(--ds-border);
+  border-radius: 0.45rem;
+  background: #ffffff;
+}
+
+.md-typeset .ds-experiment > p > img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.md-typeset :is(.ds-experiment, .ds-feature-article--report) table {
+  font-variant-numeric: tabular-nums;
+}
+
+.md-typeset :is(.ds-experiment, .ds-feature-article--report) tbody tr:nth-child(even) {
+  background: var(--ds-surface);
+}
+
 /* Knowledge-sharing articles use the same palette with a wider reading rhythm. */
 .md-typeset .ds-feature-article {
   width: 100%;
@@ -505,6 +614,7 @@
 
 .ds-feature-article__meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.55rem;
   padding-top: 0.4rem;
@@ -513,6 +623,15 @@
   font-weight: 750;
   letter-spacing: 0.13em;
   text-transform: uppercase;
+}
+
+.ds-feature-article__period {
+  margin-left: auto;
+  color: var(--ds-muted);
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .md-typeset .ds-feature-article h1 {
@@ -663,6 +782,27 @@
 }
 
 @media screen and (max-width: 35em) {
+  .ds-feature-article__period {
+    flex-basis: 100%;
+    margin-left: 0;
+  }
+
+  .md-typeset .ds-experiment > p:has(> img)::before {
+    display: block;
+    margin: 0.3rem 0.3rem 0.5rem;
+    color: #96501c;
+    content: "SCROLL CHART →";
+    font-size: 0.65rem;
+    font-weight: 750;
+    letter-spacing: 0.12em;
+  }
+
+  .md-typeset .ds-experiment > p > img {
+    width: 34rem;
+    min-width: 34rem;
+    max-width: none;
+  }
+
   .md-typeset .ds-feature-article > p:has(> img)::before {
     display: block;
     margin-bottom: 0.4rem;

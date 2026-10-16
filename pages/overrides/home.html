@@ -165,6 +165,31 @@ history = fit(
     <div class="md-grid ds-section__inner">
       <p class="ds-eyebrow ds-eyebrow--accent">Reports</p>
       <h2 class="ds-section__title" id="ds-reports-title">Measure the choices behind the model</h2>
+      <div class="ds-report-preview ds-report-preview--featured">
+        <a class="ds-report-preview__figure" href="{{ 'reports/multi30k_ablations/' | url }}" aria-label="Read the Multi30k ablation report">
+          <img src="{{ 'reports/assets/multi30k_ablations/width_and_schedule.png' | url }}" alt="Warmup plus cosine barely changes the narrow translator's loss but improves wider models." loading="lazy" width="1585" height="828">
+        </a>
+        <div class="ds-report-preview__copy">
+          <p class="ds-card__index">Multi30k / Ablation studies / October 2026</p>
+          <h3>The training setup changes the ablation result</h3>
+          <p>
+            What survives a change in model size or training budget? Three studies
+            trace the effects of dropout, depth, and learning-rate schedules through
+            translator and masked-token experiments.
+          </p>
+          <ul class="ds-report-preview__facts" aria-label="Report scope">
+            <li><strong>66</strong> comparison runs</li>
+            <li><strong>22</strong> arms</li>
+            <li><strong>3</strong> seeds per arm</li>
+          </ul>
+          <a class="ds-card__link" href="{{ 'reports/multi30k_ablations/' | url }}">
+            Read the ablation report {% include ".icons/material/arrow-right.svg" %}
+          </a>
+          <a class="ds-card__link" href="{{ 'reports/multi30k_ablations/#data-and-reproduction' | url }}">
+            Explore the study records and data {% include ".icons/material/arrow-right.svg" %}
+          </a>
+        </div>
+      </div>
       <div class="ds-report-preview">
         <a class="ds-report-preview__figure" href="{{ 'reports/multi30k_tokenisation/' | url }}" aria-label="Read the Multi30k tokenisation report">
           <img src="{{ 'reports/assets/multi30k_tokenisation/mean_length.png' | url }}" alt="English and German caption lengths decrease as the BPE vocabulary grows, with diminishing returns." loading="lazy" width="1571" height="786">

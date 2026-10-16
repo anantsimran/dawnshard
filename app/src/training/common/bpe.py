@@ -352,6 +352,24 @@ def encode(text: str, merges: List[Phrase]) -> List[int]:
         Token ids; ids below 256 are raw bytes, FIRST_MERGE_ID + k is merges[k].
         Protected ids are never produced.
     """
+    pairs, rank_of = _merge_table(merges=merges)
+    return _encode_with_table(text=text, pairs=pairs, rank_of=rank_of)
+
+
+def encode_many(texts: List[str], merges: List[Phrase]) -> List[List[int]]:
+    """Return `[encode(text=t, merges=merges) for t in texts]`, building the merge table once.
+
+    `encode` rebuilds the table on every call, which hashes every merge's `Phrase`
+    tree; with thousands of merges that dominates the cost of encoding a short text.
+    """
+    pairs, rank_of = _merge_table(merges=merges)
+    return [_encode_with_table(text=text, pairs=pairs, rank_of=rank_of) for text in texts]
+
+
+def _merge_table(
+    merges: List[Phrase],
+) -> Tuple[List[Tuple[int, int]], Dict[Tuple[int, int], int]]:
+    """Return each merge's (first_id, second_id) in rank order, and each pair's rank."""
     phrase_ids: Dict[Phrase, int] = {
         Phrase(encoding=b): b
         for b in range(256)  # noqa: NAR001
@@ -364,6 +382,13 @@ def encode(text: str, merges: List[Phrase]) -> List[int]:
         )
         phrase_ids[merge] = FIRST_MERGE_ID + rank
     rank_of = {pair: rank for rank, pair in enumerate(pairs)}  # noqa: NAR001
+    return pairs, rank_of
+
+
+def _encode_with_table(
+    text: str, pairs: List[Tuple[int, int]], rank_of: Dict[Tuple[int, int], int]
+) -> List[int]:
+    """Encode `text` as `encode` does, from the table `_merge_table` returns."""
     no_merge = len(pairs)  # noqa: NAR001
     encoded: List[int] = []
     for chunk in _pretokenize(text=text):

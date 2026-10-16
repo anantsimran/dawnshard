@@ -1,0 +1,23 @@
+study,arm,runs,parameters,epochs,best_val_mean,best_val_min,best_val_max,delta_vs_control,overlaps_control
+translator_128,control,3,7509910,30,2.167100,2.1482,2.1819,0.000000,True
+translator_128,qk_norm=False,3,7508758,30,2.188767,2.1766,2.2053,0.021667,True
+translator_128,dropout_rate=0.0,3,7509910,30,2.338267,2.3297,2.348,0.171167,False
+translator_128,norm=rmsnorm,3,7505814,30,2.180100,2.172,2.1948,0.013000,True
+translator_128,num_decoders=2,3,6192022,30,2.259000,2.2472,2.2742,0.091900,False
+translator_128,num_encoders=2,3,6455446,30,2.225333,2.2127,2.2354,0.058233,False
+translator_128,schedule=cosine,3,7509910,30,2.162067,2.1537,2.1751,-0.005033,True
+translator_128,schedule=warmup_cosine,3,7509910,30,2.165467,2.1456,2.1831,-0.001633,True
+translator_128,schedule=one_cycle,3,7509910,30,2.163867,2.1603,2.1704,-0.003233,True
+translator_128,src_lang=cs,3,7509910,30,2.641133,2.636,2.6514,0.474033,False
+translator_scale,control,3,22087446,25,2.111433,2.1056,2.1183,0.000000,True
+translator_scale,"num_encoders=12, num_decoders=12",3,36282390,25,2.260300,2.2481,2.2742,0.148867,False
+translator_scale,d_model=512,3,72476182,25,2.220833,2.2087,2.2341,0.109400,False
+translator_scale,schedule=one_cycle,3,22087446,25,2.091167,2.0906,2.0918,-0.020267,False
+translator_scale,schedule=warmup_cosine,3,22087446,25,2.077100,2.064,2.099,-0.034333,False
+translator_scale,"d_model=512, schedule=one_cycle",3,72476182,25,2.102133,2.0926,2.1149,-0.009300,True
+translator_scale,"d_model=512, schedule=warmup_cosine",3,72476182,25,2.092800,2.0794,2.1047,-0.018633,False
+translator_scale,dropout_rate=0.0,3,22087446,25,2.187367,2.1778,2.1986,0.075933,False
+translator_scale,dropout_rate=0.3,3,22087446,25,2.108000,2.098,2.114,-0.003433,True
+masked_token,control,3,4219286,100,2.526033,2.4859,2.5672,0.000000,True
+masked_token,dropout_rate=0.0,3,4219286,100,2.643400,2.6247,2.6676,0.117367,False
+masked_token,schedule=cosine,3,4219286,100,2.469967,2.448,2.4874,-0.056067,True

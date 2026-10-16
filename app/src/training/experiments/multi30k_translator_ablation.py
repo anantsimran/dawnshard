@@ -6,23 +6,27 @@ over a list of `Config`s.
 
 The constants and ABLATION_REFERENCE here are pinned to the values the study runs
 with, apart from the model module's constants, so editing those for a one-off run
-changes no study. The run plan, arms, and predictions are in
-`experiments/multi30k_translator/TODO_ablation.md`.
+changes no study. The ablation's results are written up in
+`experiments/multi30k_translator/2026-10-13/README.md`, and the scale study's in
+`experiments/multi30k_translator/2026-10-15/README.md`.
 
-`main` runs `grid_search` over ABLATION_ARMS repeated ABLATION_SEEDS times for
-ABLATION_EPOCHS: ABLATION_REFERENCE, one arm per component changed from it
-(COMPONENT_ARMS), one arm per LR schedule in place of its constant LR
-(SCHEDULE_ARMS), and one arm per source language in place of English
-(LANGUAGE_ARMS). It loads the default merges files rather than retraining BPE; to set
-them, call the loader once per language pair with `retrain_tokenizer=True,
+`main` runs one study from STUDIES, by name, as `grid_search` over its arms repeated
+ABLATION_SEEDS times. The default, "ablation", is ABLATION_ARMS for ABLATION_EPOCHS:
+ABLATION_REFERENCE, one arm per component changed from it (COMPONENT_ARMS), one arm
+per LR schedule in place of its constant LR (SCHEDULE_ARMS), and one arm per source
+language in place of English (LANGUAGE_ARMS). "scale" is SCALE_ARMS for SCALE_EPOCHS:
+the same model at 256 wide, deeper, at 512 wide, and with other schedules and
+dropout. Both load the default merges files rather than retraining BPE; to set them,
+call the loader once per language pair with `retrain_tokenizer=True,
 set_default_tokenizer=True`.
 
-Run from the repo root; losses are logged to the terminal after every epoch, and the
-ranked results once every config has finished:
+Run from the repo root, naming the study (default "ablation"); losses are logged to the
+terminal after every epoch, and the ranked results once every config has finished:
 
-    uv run python app/src/training/experiments/multi30k_translator_ablation.py
+    uv run python app/src/training/experiments/multi30k_translator_ablation.py scale
 """
 
+import argparse
 from dataclasses import dataclass, replace
 from functools import cache, partial
 from pathlib import Path
@@ -124,6 +128,39 @@ ABLATION_SEEDS = 3
 # steadily after, so 30 epochs covers every arm's minimum at under a third of the cost.
 ABLATION_EPOCHS = 30
 
+# The scale study: the ablation's model at 256 wide is its control, and every arm
+# changes one thing from it except the two 512 schedule arms, which change the
+# schedule of WIDE_ARM and compare against it. The question is whether more capacity
+# helps on 29,000 pairs, and whether the schedules and dropout matter more at this
+# size than they did at 128, where all three schedules landed inside noise.
+SCALE_REFERENCE = replace(ABLATION_REFERENCE, d_model=256)  # noqa: NAR001
+WIDE_ARM = replace(SCALE_REFERENCE, d_model=512)  # noqa: NAR001
+SCALE_ARMS = [
+    SCALE_REFERENCE,
+    replace(SCALE_REFERENCE, num_encoders=12, num_decoders=12),  # noqa: NAR001
+    WIDE_ARM,
+    replace(SCALE_REFERENCE, schedule="one_cycle"),  # noqa: NAR001
+    replace(SCALE_REFERENCE, schedule="warmup_cosine"),  # noqa: NAR001
+    replace(WIDE_ARM, schedule="one_cycle"),  # noqa: NAR001
+    replace(WIDE_ARM, schedule="warmup_cosine"),  # noqa: NAR001
+    replace(SCALE_REFERENCE, dropout_rate=0.0),  # noqa: NAR001
+    replace(SCALE_REFERENCE, dropout_rate=0.3),  # noqa: NAR001
+]
+# Every arm in the 128 study peaked by epoch 13, and a wider model on the same data
+# should peak no later.
+SCALE_EPOCHS = 25
+
+# Each study is its configs in run order and its epochs. The ablation keeps a config's
+# seeds adjacent, as it ran. The scale study runs every arm once before any arm twice,
+# so a third of the way in every arm has one seed, and a clear loser can be cut.
+STUDIES: dict[str, tuple[list[Config], int]] = {
+    "ablation": (
+        repeat_for_seeds(configs=ABLATION_ARMS, seeds=ABLATION_SEEDS),
+        ABLATION_EPOCHS,
+    ),
+    "scale": (SCALE_ARMS * ABLATION_SEEDS, SCALE_EPOCHS),
+}
+
 
 @cache
 def get_loaders(
@@ -207,10 +244,20 @@ def build_epoch_spec(probe_dir: Path) -> EpochSpec:
 
 
 def main():
-    """Run the ablation: every arm, ABLATION_SEEDS times each."""
+    """Run the study named on the command line: every arm, ABLATION_SEEDS times each,
+    in the order STUDIES lists them."""
+    parser = argparse.ArgumentParser(description="Run one Multi30kTranslator study.")
+    parser.add_argument(  # noqa: NAR001
+        "study",
+        nargs="?",
+        default="ablation",
+        choices=list(STUDIES),  # noqa: NAR001
+    )
+    args = parser.parse_args()
+    configs, num_epochs = STUDIES[args.study]
     grid_search(
-        configs=repeat_for_seeds(configs=ABLATION_ARMS, seeds=ABLATION_SEEDS),
-        num_epochs=ABLATION_EPOCHS,
+        configs=configs,
+        num_epochs=num_epochs,
         get_loaders=lambda config: get_loaders(
             seq_len=config.seq_len, src_lang=config.src_lang, tgt_lang=config.tgt_lang
         ),

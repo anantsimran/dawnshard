@@ -5,7 +5,10 @@
     <div class="ds-feature-article__meta" aria-label="Report series">
       <span>Reports</span>
       <span aria-hidden="true">/</span>
-      <span>Multi30k tokenisation</span>
+      <span>{{ page.meta.report_subject }}</span>
+      {% if page.meta.report_period %}
+        <span class="ds-feature-article__period">{{ page.meta.report_period }}</span>
+      {% endif %}
     </div>
     {{ page.content }}
   </article>

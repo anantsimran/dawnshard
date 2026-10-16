@@ -381,11 +381,11 @@ def get_multi30k_translation_dataloader(
         (tgt_train_rows, tgt_val_rows, tgt_test_rows),
     ):
         src = _pad_and_tensorize(
-            rows=[bpe.encode(text=row, merges=src_merges) for row in src_rows],
+            rows=bpe.encode_many(texts=src_rows, merges=src_merges),
             seq_len=seq_len,
             append_bos=True,
         )
-        encoded_tgt_rows = [bpe.encode(text=row, merges=tgt_merges) for row in tgt_rows]
+        encoded_tgt_rows = bpe.encode_many(texts=tgt_rows, merges=tgt_merges)
         tgt_in = _pad_and_tensorize(rows=encoded_tgt_rows, seq_len=seq_len, append_bos=True)
         tgt_out = _pad_and_tensorize(rows=encoded_tgt_rows, seq_len=seq_len, append_eos=True)
         tgt_out = tgt_out.masked_fill(mask=tgt_out == PAD_ID, value=CROSS_ENTROPY_IGNORE_INDEX)
@@ -490,7 +490,7 @@ def get_multi30ken_mlm_dataloader(
             items=list(  # noqa: NAR001
                 enumerate(  # noqa: NAR001
                     _pad_and_tensorize(
-                        rows=[bpe.encode(text=row, merges=merges) for row in rows],
+                        rows=bpe.encode_many(texts=rows, merges=merges),
                         seq_len=seq_len,
                     ).unbind(dim=0)
                 )

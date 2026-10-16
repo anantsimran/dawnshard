@@ -1,0 +1,19 @@
+{% extends "main.html" %}
+
+{% block content %}
+  <article class="ds-experiment">
+    <div class="ds-experiment__header">
+      <p class="ds-eyebrow ds-eyebrow--accent">Experiment record / {{ page.meta.study_date }}</p>
+      <p class="ds-experiment__subject">{{ page.meta.study_subject }}</p>
+      <ul class="ds-experiment__facts" aria-label="Study scope">
+        {% for fact in page.meta.study_facts %}
+          <li>{{ fact }}</li>
+        {% endfor %}
+      </ul>
+      <a class="ds-card__link" href="{{ 'reports/multi30k_ablations/' | url }}">
+        Read the ablation report {% include ".icons/material/arrow-right.svg" %}
+      </a>
+    </div>
+    {{ page.content }}
+  </article>
+{% endblock %}

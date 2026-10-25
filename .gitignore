@@ -1,5 +1,4 @@
 app/datasets/
-appcheckpoints/
 app/history/
 .venv
 __pycache__/

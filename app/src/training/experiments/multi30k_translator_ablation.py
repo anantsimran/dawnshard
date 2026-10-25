@@ -18,7 +18,8 @@ language in place of English (LANGUAGE_ARMS). "scale" is SCALE_ARMS for SCALE_EP
 the same model at 256 wide, deeper, at 512 wide, and with other schedules and
 dropout. Both load the default merges files rather than retraining BPE; to set them,
 call the loader once per language pair with `retrain_tokenizer=True,
-set_default_tokenizer=True`.
+set_default_tokenizer=True`. "best" is not a study: it retrains the scale study's best
+arm once (`train_best`) and saves a checkpoint to BEST_CHECKPOINT_PATH.
 
 Run from the repo root, naming the study (default "ablation"); losses are logged to the
 terminal after every epoch, and the ranked results once every config has finished:
@@ -31,10 +32,18 @@ from dataclasses import dataclass, replace
 from functools import cache, partial
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
 import torch
+from loguru import logger
 from torch import nn
 from torch.utils.data import DataLoader
+from training.constants import (
+    ATTENTION_PROBES_PATH,
+    CHECKPOINTS_PATH,
+    TEST_SEED,
+    VAL_SEED,
+)
 from training.dataload.multi30k import get_multi30k_translation_dataloader
 from training.experiments.common import (
     NORMS,
@@ -52,6 +61,8 @@ from training.metrics.masked_token_metrics import (
 from training.model.multi30k_translator import Multi30kTranslator
 from training.setup import DEVICE
 from training.train.model import EpochSpec, TrainState
+from training.train.train_loop import fit
+from training.train.utils import save_state
 from training.transformer.probes import save_attention_maps
 
 PROBE_SENTENCES = 10
@@ -161,6 +172,16 @@ STUDIES: dict[str, tuple[list[Config], int]] = {
     "scale": (SCALE_ARMS * ABLATION_SEEDS, SCALE_EPOCHS),
 }
 
+# The scale study's best arm by mean best val loss (2.077), retrained by `train_best`
+# from the seed of its best run (96ff2746, 2.068) and stopped at that run's best epoch,
+# the median of the arm's three (7, 8, 9). fit keeps no best-epoch weights, so the
+# epoch is fixed in advance. The replay is not exact, since the loader shuffles its
+# rows before the seed is set, so expect a val loss inside the arm's 2.064-2.099.
+BEST_CONFIG = replace(SCALE_REFERENCE, schedule="warmup_cosine")  # noqa: NAR001
+BEST_TRAIN_SEED = 1091505212
+BEST_EPOCH = 8
+BEST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "multi30k_translator_best.pt"
+
 
 @cache
 def get_loaders(
@@ -243,17 +264,59 @@ def build_epoch_spec(probe_dir: Path) -> EpochSpec:
     )
 
 
+def train_best() -> None:
+    """Retrain BEST_CONFIG for BEST_EPOCH epochs and checkpoint it.
+
+    The scheduler is sized for SCALE_EPOCHS, as in the study, so the epochs that run
+    see the same learning rates the study's run did.
+
+    Side effects:
+        Seeds the global torch RNG, writes the run's history file and attention
+        probes, and overwrites BEST_CHECKPOINT_PATH with the model, optimizer, and
+        scheduler state.
+    """
+    train_loader, val_loader, vocab_sizes = get_loaders(
+        seq_len=BEST_CONFIG.seq_len,
+        src_lang=BEST_CONFIG.src_lang,
+        tgt_lang=BEST_CONFIG.tgt_lang,
+    )
+    # fit reseeds from it, but only after the model exists; seed here so weight init
+    # uses the recorded seed too.
+    torch.manual_seed(seed=BEST_TRAIN_SEED)
+    state = build_train_state(config=BEST_CONFIG, vocab_sizes=vocab_sizes, num_epochs=SCALE_EPOCHS)
+    run_uuid = str(uuid4())  # noqa: NAR001
+    logger.info("config {} | run {}", BEST_CONFIG, run_uuid)  # noqa: NAR001
+    fit(
+        run_uuid=run_uuid,
+        state=state,
+        epoch_spec=build_epoch_spec(probe_dir=ATTENTION_PROBES_PATH / run_uuid),
+        train_loader=train_loader,
+        val_loader=val_loader,
+        num_epochs=BEST_EPOCH,
+        val_epoch_list=list(range(1, BEST_EPOCH + 1)),  # noqa: NAR001
+        train_seed=BEST_TRAIN_SEED,
+        val_seed=VAL_SEED,
+        test_seed=TEST_SEED,
+    )
+    BEST_CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    save_state(state=state, checkpoint_path=BEST_CHECKPOINT_PATH)
+    logger.info("saved checkpoint to {}", BEST_CHECKPOINT_PATH)  # noqa: NAR001
+
+
 def main():
     """Run the study named on the command line: every arm, ABLATION_SEEDS times each,
-    in the order STUDIES lists them."""
+    in the order STUDIES lists them. "best" runs `train_best` instead."""
     parser = argparse.ArgumentParser(description="Run one Multi30kTranslator study.")
     parser.add_argument(  # noqa: NAR001
         "study",
         nargs="?",
         default="ablation",
-        choices=list(STUDIES),  # noqa: NAR001
+        choices=list(STUDIES) + ["best"],  # noqa: NAR001
     )
     args = parser.parse_args()
+    if args.study == "best":
+        train_best()
+        return
     configs, num_epochs = STUDIES[args.study]
     grid_search(
         configs=configs,

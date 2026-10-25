@@ -834,6 +834,9 @@ uv run python app/src/training/experiments/multi30k_translator_ablation.py
 # Run its scale follow-up: d_model=256 and 512, 12+12 blocks, schedules, dropout
 uv run python app/src/training/experiments/multi30k_translator_ablation.py scale
 
+# Retrain the scale study's best arm to its best epoch and save it to app/history/checkpoints/
+uv run python app/src/training/experiments/multi30k_translator_ablation.py best
+
 # Plot one run's per-epoch metrics
 uv run python app/src/training/viz/plot_metrics.py app/history/<run-id>.json
 

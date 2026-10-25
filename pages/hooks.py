@@ -63,6 +63,12 @@ EXTRA_PAGES = [
 # Images and downloads used by EXTRA_PAGES. Without them as site files, the
 # rewriter sends each one to GitHub, which serves HTML instead of the asset.
 EXTRA_ASSETS = [
+    "reports/assets/multi30k_ablations/training_budget.png",
+    "reports/assets/multi30k_ablations/training_budget.svg",
+    "reports/assets/multi30k_ablations/schedule_dynamics.png",
+    "reports/assets/multi30k_ablations/schedule_dynamics.svg",
+    "reports/assets/multi30k_ablations/loss_and_accuracy.png",
+    "reports/assets/multi30k_ablations/loss_and_accuracy.svg",
     "reports/assets/multi30k_ablations/translator_components.png",
     "reports/assets/multi30k_ablations/translator_components.svg",
     "reports/assets/multi30k_ablations/width_and_schedule.png",
@@ -141,8 +147,8 @@ def on_page_markdown(markdown: str, page: Page, config: MkDocsConfig, files: Fil
         page.meta["report_subject"] = "Multi30k ablation studies"
         page.meta["report_period"] = "October 13–15, 2026"
         page.meta["description"] = (
-            "66 runs across translator components, model scale, and masked-token "
-            "convergence: what dropout, depth, and learning-rate schedules change."
+            "Learn to read transformer ablations through learning curves: "
+            "overfitting, dropout, model size, learning rates, and loss versus accuracy."
         )
     if page.file.src_uri in STUDY_DETAILS:
         subject, *facts = STUDY_DETAILS[page.file.src_uri]

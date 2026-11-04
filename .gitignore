@@ -11,3 +11,6 @@ site/
 
 blog_and_publishing_ideas.md
 cloud_readiness.md
+
+# Local ticket tracking (see .claude/commands/my-status.md)
+status/

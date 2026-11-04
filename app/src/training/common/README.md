@@ -1,8 +1,18 @@
 # Common
 
-Building blocks shared across the library: [bpe.py](bpe.py), a byte-level BPE
-tokenizer, and [priority_queue.py](priority_queue.py), the indexed max-heap it trains
-with. For the rest of the library, see the [root README](../../../../README.md).
+This package owns tokenization: the byte-level BPE tokenizer in [bpe.py](bpe.py), the
+indexed max-heap it trains with in [priority_queue.py](priority_queue.py), and the
+protected token ids in [constants.py](constants.py). A data pipeline trains a
+vocabulary once and applies the same merges to every split without importing a model
+or a training loop.
+
+| Owns | Imports from the library | Never sees |
+|---|---|---|
+| merges, vocabularies, encoding and decoding, protected ids | nothing | datasets, models, the training loop |
+
+[test_layout.py](../../../tests/test_layout.py) fails if this package imports anything
+else from `training/`, so the tokenizer stays usable on its own. For the full
+architecture, see the [root README](../../../../README.md).
 
 ______________________________________________________________________
 
@@ -11,7 +21,9 @@ ______________________________________________________________________
 Byte-level Byte Pair Encoding with GPT-4 pre-tokenization. `train` learns merges once
 from a corpus. `encode` and `decode` turn text into token ids and back, and never
 learn anything new. Every byte is in the base vocabulary, so any input can be encoded
-and there is no unknown token.
+and there is no unknown token. Saved merges can be reused across runs, and each merge
+can be inspected. Encoding throughput has not been benchmarked against production
+tokenizers.
 
 The algorithm, the token id layout, and the choices that look like bugs live in the
 module docstring of [bpe.py](bpe.py). This page covers how to use it.

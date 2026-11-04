@@ -1,23 +1,17 @@
 # Multi30k masked-token pretraining: a sweep, a scale-up, and an ablation
 
-`Multi30kEnPredictor` is a pre-norm encoder trained with BERT-style masking on the
-English side of Multi30k. This page records 34 training runs made on 2026-09-29: a
-28-run sweep over six hyperparameters and cosine annealing, two 512-wide runs over 50
-epochs, and a four-run ablation at `d_model=128` over 50 epochs. Every number below comes
-from [runs.csv](runs.csv) and [epochs.csv](epochs.csv), exported from the runs' history
-files.
+This 2026-09-29 study follows a `Multi30kEnPredictor` from a 28-run search to two
+wider runs and then a four-run component ablation. At 50 epochs, the
+2.16M-parameter control reaches about the same best validation loss as a
+27.5M-parameter run on this corpus's masked-token task.
 
-The short version: **training length mattered most, then width, then QK norm.** A
-2.2M-parameter model trained for 50 epochs matches a 27.5M-parameter one.
-
-The three sections do three different jobs, and only the third is an ablation. Section
-1 sweeps one hyperparameter at a time from a deliberately small baseline, to find which
-direction is worth spending on. Section 2 spends it, scaling width and length together.
-Section 3 removes one component at a time from the best configuration found, to
-attribute the result — and it runs its reference twice, so a gap has a noise floor to
-clear. Reading section 1 as an ablation would invert it: its reference is the weakest
-and least-trained configuration on the page, and most of its rows add capacity rather
-than remove it.
+The sweep finds promising settings; the longer runs spend more compute; only the
+final comparison removes components from a stronger control. Those stages answer
+different questions, so their rows should not be read as one ablation. The 34 runs
+and per-epoch values are in [runs.csv](runs.csv) and [epochs.csv](epochs.csv). For the
+comparison with the later studies, see the
+[ablation report](../../reports/multi30k_ablations.md). The setup, individual
+results, and reproduction notes are below.
 
 ______________________________________________________________________
 

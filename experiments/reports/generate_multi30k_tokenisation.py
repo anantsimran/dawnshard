@@ -1,7 +1,7 @@
 """Export the notebook's saved BPE statistics and render the report's figures.
 
 Run from the repository root:
-    uv run python reports/generate_multi30k_tokenisation.py
+    uv run python experiments/reports/generate_multi30k_tokenisation.py
 
 Reads saved stream output only; does not download data or retrain tokenizers.
 The CSV and plots preserve the notebook's two-decimal precision and vocabulary
@@ -19,9 +19,9 @@ matplotlib.use(backend="Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 
-ROOT = Path(__file__).resolve().parents[1]  # noqa: NAR001
+ROOT = Path(__file__).resolve().parents[2]  # noqa: NAR001
 NOTEBOOK = ROOT / "notebooks" / "multi30k_dataload.ipynb"
-ASSETS = ROOT / "reports" / "assets" / "multi30k_tokenisation"
+ASSETS = ROOT / "experiments" / "reports" / "assets" / "multi30k_tokenisation"
 LANGUAGES = {"en": ("English", "#4f46e5", "o"), "de": ("German", "#b45309", "s")}
 BUDGETS = (500, 1000, 2000, 3000, 5000, 8000, 10000)
 

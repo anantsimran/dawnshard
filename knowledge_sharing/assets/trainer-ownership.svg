@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 610" role="img" aria-labelledby="title desc">
+  <title id="title">Which object owns policy, mechanism, and state in five training designs</title>
+  <desc id="desc">Keras: one keras.Model owns policy, mechanism, and state. Lightning: a Trainer owns the policy flags and the loop; a LightningModule owns the training step, weights, and optimizers. Hugging Face: TrainingArguments owns policy; the Trainer owns the loop and holds the model, optimizer, and scheduler. Flax: the caller's own code holds policy and mechanism; an explicit TrainState holds params and optimizer state. Dawnshard: EpochSpec owns policy, the functions fit, run_epoch, and train_step own mechanism, and TrainState owns state, each a separate object.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1">
+      <stop stop-color="#111d35"/>
+      <stop offset="1" stop-color="#203458"/>
+    </linearGradient>
+    <linearGradient id="card" x2="1" y2="1">
+      <stop stop-color="#2c4266"/>
+      <stop offset="1" stop-color="#233756"/>
+    </linearGradient>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M36 0H0V36" fill="none" stroke="#ffffff" stroke-opacity=".045"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="610" rx="22" fill="url(#bg)"/>
+  <rect width="1200" height="610" rx="22" fill="url(#grid)"/>
+
+  <text x="58" y="56" fill="#efb373" font-family="Inter, system-ui, sans-serif" font-size="18" font-weight="700" letter-spacing="3">01 / OWNERSHIP</text>
+  <text x="58" y="103" fill="#f5f6f8" font-family="Inter, system-ui, sans-serif" font-size="32" font-weight="700">Which object owns each concern</text>
+  <text x="58" y="139" fill="#b9c8da" font-family="Inter, system-ui, sans-serif" font-size="20">A box that spans several columns is one object holding several concerns.</text>
+
+  <!-- Column headers -->
+  <text x="365" y="196" text-anchor="middle" fill="#85c7e1" font-family="Inter, system-ui, sans-serif" font-size="17" font-weight="700" letter-spacing="2.5">POLICY</text>
+  <text x="665" y="196" text-anchor="middle" fill="#85c7e1" font-family="Inter, system-ui, sans-serif" font-size="17" font-weight="700" letter-spacing="2.5">MECHANISM</text>
+  <text x="1000" y="196" text-anchor="middle" fill="#85c7e1" font-family="Inter, system-ui, sans-serif" font-size="17" font-weight="700" letter-spacing="2.5">STATE</text>
+  <path d="M487 176V586M842 176V586" stroke="#8296b4" stroke-opacity=".35" stroke-dasharray="4 6"/>
+
+  <!-- Keras -->
+  <text x="58" y="262" fill="#f5f6f8" font-family="Inter, system-ui, sans-serif" font-size="21" font-weight="700">Keras</text>
+  <rect x="250" y="222" width="900" height="64" rx="12" fill="url(#card)" stroke="#8296b4" stroke-opacity=".55"/>
+  <text x="272" y="250" fill="#f5f6f8" font-family="ui-monospace, SFMono-Regular, monospace" font-size="19" font-weight="700">keras.Model</text>
+  <text x="272" y="275" fill="#b9c8da" font-family="Inter, system-ui, sans-serif" font-size="15">compile() and fit() · train_step() · weights · optimizer</text>
+
+  <!-- Lightning -->
+  <text x="58" y="334" fill="#f5f6f8" font-family="Inter, system-ui, sans-serif" font-size="21" font-weight="700">Lightning</text>
+  <rect x="250" y="294" width="410" height="64" rx="12" fill="url(#card)" stroke="#8296b4" stroke-opacity=".55"/>
+  <text x="272" y="322" fill="#f5f6f8" font-family="ui-monospace, SFMono-Regular, monospace" font-size="19" font-weight="700">Trainer</text>
+  <text x="272" y="347" fill="#b9c8da" font-family="Inter, system-ui, sans-serif" font-size="15">flags · the loop</text>
+  <rect x="670" y="294" width="480" height="64" rx="12" fill="url(#card)" stroke="#8296b4" stroke-opacity=".55"/>
+  <text x="692" y="322" fill="#f5f6f8" font-family="ui-monospace, SFMono-Regular, monospace" font-size="19" font-weight="700">LightningModule</text>
+  <text x="692" y="347" fill="#b9c8da" font-family="Inter, system-ui, sans-serif" font-size="15">training_step · weights · optimizers</text>
+
+  <!-- Hugging Face -->
+  <text x="58" y="406" fill="#f5f6f8" font-family="Inter, system-ui, sans-serif" font-size="21" font-weight="700">Hugging Face</text>
+  <rect x="250" y="366" width="230" height="64" rx="12" fill="url(#card)" stroke="#8296b4" stroke-opacity=".55"/>
+  <text x="270" y="394" fill="#f5f6f8" font-family="ui-monospace, SFMono-Regular, monospace" font-size="17" font-weight="700">TrainingArguments</text>
+  <text x="270" y="419" fill="#b9c8da" font-family="Inter, system-ui, sans-serif" font-size="15">one config object</text>
+  <rect x="495" y="366" width="655" height="64" rx="12" fill="url(#card)" stroke="#8296b4" stroke-opacity=".55"/>
+  <text x="517" y="394" fill="#f5f6f8" font-family="ui-monospace, SFMono-Regular, monospace" font-size="19" font-weight="700">Trainer</text>
+  <text x="517" y="419" fill="#b9c8da" font-family="Inter, system-ui, sans-serif" font-size="15">the loop · model · optimizer · scheduler</text>
+
+  <!-- Flax -->
+  <text x="58" y="478" fill="#f5f6f8" font-family="Inter, system-ui, sans-serif" font-size="21" font-weight="700">Flax</text>
+  <rect x="250" y="438" width="585" height="64" rx="12" fill="none" stroke="#8296b4" stroke-opacity=".8" stroke-width="2" stroke-dasharray="8 7"/>
+  <text x="272" y="466" fill="#f5f6f8" font-family="Inter, system-ui, sans-serif" font-size="19" font-weight="700">your code</text>
+  <text x="272" y="491" fill="#b9c8da" font-family="Inter, system-ui, sans-serif" font-size="15">the loop and the step, written per project</text>
+  <rect x="850" y="438" width="300" height="64" rx="12" fill="url(#card)" stroke="#8296b4" stroke-opacity=".55"/>
+  <text x="872" y="466" fill="#f5f6f8" font-family="ui-monospace, SFMono-Regular, monospace" font-size="19" font-weight="700">TrainState</text>
+  <text x="872" y="491" fill="#b9c8da" font-family="Inter, system-ui, sans-serif" font-size="15">params · tx · opt_state</text>
+
+  <!-- Dawnshard -->
+  <text x="58" y="550" fill="#efb373" font-family="Inter, system-ui, sans-serif" font-size="21" font-weight="700">Dawnshard</text>
+  <rect x="250" y="510" width="230" height="64" rx="12" fill="#efb373"/>
+  <text x="270" y="538" fill="#18243b" font-family="ui-monospace, SFMono-Regular, monospace" font-size="19" font-weight="700">EpochSpec</text>
+  <text x="270" y="563" fill="#33405a" font-family="Inter, system-ui, sans-serif" font-size="15">metrics · probes</text>
+  <rect x="495" y="510" width="340" height="64" rx="12" fill="#efb373"/>
+  <text x="515" y="538" fill="#18243b" font-family="ui-monospace, SFMono-Regular, monospace" font-size="17" font-weight="700">fit · run_epoch · train_step</text>
+  <text x="515" y="563" fill="#33405a" font-family="Inter, system-ui, sans-serif" font-size="15">plain functions</text>
+  <rect x="850" y="510" width="300" height="64" rx="12" fill="#efb373"/>
+  <text x="870" y="538" fill="#18243b" font-family="ui-monospace, SFMono-Regular, monospace" font-size="19" font-weight="700">TrainState</text>
+  <text x="870" y="563" fill="#33405a" font-family="Inter, system-ui, sans-serif" font-size="15">model · optimizer · loss · scheduler</text>
+</svg>

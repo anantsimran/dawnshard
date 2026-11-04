@@ -1,22 +1,19 @@
 # Multi30k masked-token pretraining: dropout and LR decay at convergence
 
-`Multi30kEnPredictor` is a pre-norm encoder trained with BERT-style masking on the
-English side of Multi30k. This page records a 9-run ablation made on 2026-10-15 (3
-arms, 3 seeds each, 100 epochs) that reruns two questions from the
-[2026-09-29 study](../2026-09-29/README.md) at a length where training has stopped
-improving. Every number below comes from [runs.csv](runs.csv) and
-[epochs.csv](epochs.csv), exported from the runs' history files.
+The [earlier masked-token study](../2026-09-29/README.md)
+ended while its runs were still improving, so its dropout and schedule comparisons
+could change with a longer budget. This 2026-10-15 follow-up runs a
+`Multi30kEnPredictor` for 100 epochs: 3 arms, 3 seeds each. Removing dropout raises
+mean best validation loss by 0.117. Cosine lowers it by 0.056, but that gap is within
+the control's 0.081 seed range, so the schedule result remains uncertain.
 
-The short version: **once training runs long enough to converge, dropout earns its
-place, and cosine decay probably does too.** Removing dropout cost 0.117, where at 50
-epochs it cost 0.004. Cosine beat the constant learning rate by 0.056, which is
-inside the control's unusually wide seed spread, so it is a strong lean rather than a
-result.
+The run-level record is in [runs.csv](runs.csv) and [epochs.csv](epochs.csv). The
+[ablation report](../../reports/multi30k_ablations.md) compares it with the
+translator studies. The setup, curves, and reproduction notes are below.
 
-**This page's losses do not compare with the 2026-09-29 page's.** That study's
-tokenizer had 2,000 merges; this one's has 10,000. Val loss is a mean per masked BPE
-token, and a token from a vocabulary five times larger is harder to predict, so every
-loss here is about 0.45 higher for reasons that have nothing to do with the model.
+**Compare arms within this study only.** The earlier study used 2,000 merges and this
+one used 10,000. The target tokens and vocabulary changed, so absolute loss across
+the two studies does not measure a model improvement or regression.
 
 ______________________________________________________________________
 

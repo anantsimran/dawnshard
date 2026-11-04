@@ -108,6 +108,34 @@ sh .githooks/pre-commit
 
 Where the root `README.md` or the site pages (`tutorials/`, `tutorials/index.md`, `mkdocs.yml`, `pages/overrides/home.html`, the READMEs in `EXTRA_PAGES`) no longer match, update them in the same PR, using Where a change goes under README structure to pick the sections.
 
+## Writing Markdown: the humanizer pass
+
+Prose in a Markdown file that people read goes through the [humanizer](https://github.com/blader/humanizer) skill before you report it done. That covers the root `README.md`, the package READMEs, `tutorials/`, `knowledge_sharing/`, `experiments/reports/`, the experiment READMEs under `experiments/`, and specs or tickets such as `model_config_spec.md`. Agent instruction files (`CLAUDE.md`, `knowledge_sharing/AGENTS.md`, skills) and memory files are out of scope; their bold labels and terse rules are there for an agent.
+
+Existing rules take precedence. Where humanizer conflicts with a rule in this file or in `knowledge_sharing/AGENTS.md`, follow the existing rule, including conflicts the table below does not list.
+
+1. Write the content to the structure rules for its file: README structure, Tutorials site, or Knowledge sharing articles.
+1. Run humanizer in embedded mode over the paragraphs you wrote or changed, and put its final text in their place. Run it over a whole file only when the user asks for a full pass. A file-mode pass rewrites every paragraph, so the diff grows far past the change and reaches text the user already approved.
+1. Run `uv run mdformat <file>`, and the pinned mkdocs build when the file is published on the site.
+
+Never pass protected text to the skill. The README tagline (en dash included), the two approved intro paragraphs, `## Why the name`, and the "the part I am proudest of" opening stay exactly as written.
+
+Without a writing sample, humanizer makes technical text neutral and plain, which flattens the README. For the README, give it the two approved intro paragraphs as the sample. For a knowledge-sharing article, give it the opening paragraphs of [reproducibility.md](knowledge_sharing/reproducibility.md). Other files need no sample.
+
+The conflicts found so far:
+
+| Humanizer | In this repo |
+|---|---|
+| §20 removes horizontal rules between sections | Keep them. The README separates top-level sections with one, and topic pages separate tutorials with one. |
+| §20 drops a `#` heading that repeats the title | Keep `# Dawnshard` on the README's first line (`pages/hooks.py` strips it) and the `#` topic title on each tutorial page. |
+| §20 rewrites headings for case or clarity | Leave headings alone during the pass. Anchors come from heading text, and `home.html`, `tutorials/index.md`, and cross-page links point at them. Rename a heading only as a deliberate change, then fix its links and rerun the mkdocs build. |
+| §19 removes bold labels | Keep a bold lead-in when the lead is itself a claim (`- **It overfits.** …`), as README structure prescribes for `What that buys you`. Remove bold that only labels. |
+| §20 removes arrows | Keep arrows that carry meaning: a pipeline (`EpochRecord` → `serialize_epoch_record` → `save_history`) or a learning path in `tutorials/index.md`. |
+| §2 cuts one-line closers | Keep the two README structure prescribes: the line after the one-screen run's bullets saying that is the entire API, and the one-line verdict on the history file. |
+| §8 bans em and en dashes | Apply it to the prose you write. Leave dashes in paragraphs you are not otherwise changing; existing pages (`tutorials/pytorch.md` has over a hundred) lose them only on a full pass. |
+
+If the skill is not available in the session, say so in your report instead of skipping the pass. It installs with `/plugin marketplace add blader/humanizer` and then `/plugin install humanizer@humanizer`.
+
 ## Tutorials site
 
 `tutorials/` and the root `README.md` are published to GitHub Pages with MkDocs Material (`mkdocs.yml`, `pages/`, `.github/workflows/pages.yml`).
@@ -198,8 +226,8 @@ section titles.
   Keep the site's top navigation. Add the page to `EXTRA_PAGES` in
   `pages/hooks.py` and to `mkdocs.yml` navigation; register every image in
   `EXTRA_ASSETS` so it is served on GitHub Pages. Give the homepage a card when
-  the new article should be discoverable there. Set page template metadata in the
-  hook because the repo's `mdformat` rewrites YAML front matter in Markdown.
+  the new article should be discoverable there. Add the page to `ARTICLE_PAGES` in
+  the hook, which sets its template metadata there because the repo's `mdformat` rewrites YAML front matter in Markdown.
 - **Review the published form.** Run `mdformat --check` for the article, validate
   SVG XML, build with the pinned MkDocs command above, and inspect the rendered
   desktop and narrow-screen page. Confirm image URLs, relative links, and
@@ -231,13 +259,14 @@ Top-level sections are `##`, separated by a horizontal rule. They are not number
 |---|---|---|
 | `## A training run in one screen` | Show the design before explaining it. One training run of `TrainState`, `EpochSpec`, and `fit` over a generic `model`, `train_loader`, and `val_loader`, then a three-bullet list naming the three objects and their jobs, and one line saying that is the entire API. | **The library is general, so this section must be too.** The snippet names no dataset and no model class. Keep the code under 25 lines and keep it a real call sequence, not pseudocode. No explanation beyond the three bullets; the next section does that. If the loop's API changes, this block changes in the same PR. |
 | `## Separate state, policy, and mechanism` | **The most strongly advertised idea on the page.** Names the principle (separation of policy and mechanism, from Hydra, 1974, plus explicit state as in JAX/Flax, whose struct is also called `TrainState`) and maps every component to exactly one of the three. | Four `###` subsections, in this order: `State: TrainState` (the only object the loop mutates; checkpoints are its `state_dict`s), `Policy: EpochSpec` (read by the loop, never written), `Mechanism: the functions` (shows the `StepFn` type alias from `train_loop.py` and reads it as "state in, policy in, data in, metrics out"), and `What that buys you` (bold-lead bullets: one loop for train and eval, tests that pass a plain list as the loader, no `self` to grep, every piece replaceable alone). Every claim points at the file that proves it. If a component is added to the loop, add it to one of the three subsections; it must fit exactly one. |
+| `## How it compares` | Where Keras, PyTorch Lightning, the Hugging Face `Trainer`, Flax, and Dawnshard keep state, policy, and mechanism, and what the split buys over a trainer class. | Two `###` subsections: `Where each framework keeps state, policy, and mechanism` (one table, one row per framework, with a column for what you edit to change a step) and `What the split buys over a trainer class` (bold-lead bullets, each pointing at a file). **Advantages only**: the features the frameworks ship and Dawnshard lacks go in the [trainer design article](knowledge_sharing/trainer_design.md), not here. Check every framework claim against that framework's current documentation before writing it, never from memory. Close with the link to the article. |
 | `## Exactly one place for everything` | The consequence of the principle: every extension has one known home, so there is no hidden complexity. | Four `###` subsections: `Metrics: a function of the outputs`, `Probes: a function of the training state`, `Everything else: a named function` (a question-and-answer bullet per function: `profiled_fit`, `save_state`/`load`, the history file), and `No hidden complexity`. Keep it about where things go, not how they are implemented. No tooling or lint rules here; those belong in the next section. |
 | `## The repo keeps itself clean` | The engineering pitch: how the layout reinforces hygiene, then every rule the repo enforces and the tool that enforces it. | Two `###` subsections. `The layout enforces the boundaries`: a `Package | Owns` table with one row per package under `app/src/training/`, then a bullet list of the rules that fall out of the layout (downward-only imports, one `constants.py` and one `setup.py`, gitignored artifacts, one test file per module). `Every rule has a tool behind it`: a `Rule | Enforced by` table, one row per rule, each rule phrased "Every …" and each enforcer naming the file. A rule only belongs here if a tool checks it. When you add such a tool, add a row. When you remove one, remove its row. When you add a package, add a row to the layout table. |
 | `## Debuggability` | What a run leaves behind and how to read it. | `###` subsections in this order: `The terminal: one line per epoch`; `The history file: everything` (a numbered list of the three functions that build it: `EpochRecord` → `serialize_epoch_record` → `save_history`, then a trimmed real excerpt, then a bold-lead bullet list of what the file reveals about that run and a one-line verdict); `Plot it locally` (the `plot_metrics.py` command and its screenshot); `Compare two runs`; `Weights & Biases: the same dict, streamed`; `When the numbers aren't enough` (pointers to probes and `profiled_fit`). The excerpt and the screenshot come from a real run in `app/history/`; regenerate both when the history format or the plot script changes. Keep the excerpt trimmed to one epoch and rounded. The screenshot lives in `tutorials/assets/` (see Style). |
 | `## What's inside` | A scannable map: one table row per part of the library, with a one-line description and a link to its package. | Add a row when you add a package or a major capability. Keep descriptions to one line. |
 | `## Using the loop` | The manual: how each part of the loop behaves and how to use it. | One `###` per task, in this order: `Train and validate`, `Seed a run`, `Repeat a past run`, `Add a metric`, `Add a probe`, `Profile a few epochs`, `Save and restore a checkpoint`. Each opens with a snippet, then says what the loop does with it and, where it isn't obvious, why. Only mechanics and reasoning that no earlier section states belong here. Don't re-explain the state/policy/mechanism split, the history file (Debuggability owns it), or where things go (Exactly one place for everything owns it); link to them instead. `Train and validate` shows only the imports and points at the one-screen run rather than repeating it. A new loop feature gets one `###`. |
 | `## The BPE tokenizer` | A short section: what it is, one snippet, one number. | **Keep it short. BPE internals stay out of the README**; they live in `bpe.py`'s docstrings and in the intentional-choices list below. |
-| `## Getting started` | Everything practical, as `###` subsections: install, run something, W&B, the MNIST models, model graph, attention heatmaps, Docker, Make targets. | A new script gets a line in the "Run something" block. A new Make target gets a row in the Make targets table. |
+| `## Getting started` | Everything practical, as `###` subsections: install, run something, the MNIST models, model graph, attention heatmaps, Docker, Make targets. | A new script gets a line in the "Run something" block. A new Make target gets a row in the Make targets table. |
 | `## Tutorials` | What the learning track covers and how the site is built. | Keep the bold reminder about `tutorials/index.md` and `mkdocs.yml`. |
 | `## Project structure` | The annotated tree. It closes the page. | Add every new file or folder that a reader would look for. One-line comments, aligned with the rest. |
 
@@ -249,9 +278,26 @@ Attention design lives in `app/src/training/transformer/README.md`, not the root
 
 How a `DataLoader` is put together lives in `app/src/training/dataload/README.md`: the sampler → dataset → `collate_fn` pipeline, what a new loader has to define, shuffling, train and eval loaders, seeding, chunking long documents, and a checklist for writing a new loader. It is general, per Keep general code and docs general above: it names no dataset, and a dataset's own choices go in its module docstring. The basics (why mini-batches, transforms, normalization) stay in the DataLoader tutorial in `tutorials/pytorch.md`, and the README links there instead of repeating them. The root README's What's inside table links to it. It is published through `EXTRA_PAGES` in `pages/hooks.py` and the Code notes `nav:` group in `mkdocs.yml`.
 
+### How a package README opens
+
+Every package README (`common/`, `dataload/`, `transformer/`) opens the same way: one paragraph on what the package owns, then a one-row `Owns | Imports from the library | Never sees` table, then one sentence saying that [test_layout.py](app/tests/test_layout.py) enforces the import column. The import column must match `ALLOWED_IMPORTS` in that test. When an edge is added to or removed from the table, update the column in the same change. A new package README opens the same way.
+
+### When the loop changes
+
+Separation of state, policy, and mechanism is the repo's main claim, and the loop is where it is proven, so a change to `train/` reaches every page that describes the loop. When you change `fit`, `run_epoch`, a step function, `EpochSpec`, `TrainState`, the `StepFn` alias, the probe signature, or what the loop does with any of them, check each of these in the same change and update what no longer matches:
+
+- **Root README:** the one-screen run, the matching `###` under Separate state, policy, and mechanism (including the quoted `StepFn`), the Dawnshard row and the bullets under How it compares, the matching `###` under Exactly one place for everything, the matching `###` under Using the loop, and the mermaid flowchart under The repo keeps itself clean.
+- **Landing page (`pages/overrides/home.html`):** the hero code block, the hero description, and every design card whose claim changed, including the Comparison card.
+- **Trainer design article (`knowledge_sharing/trainer_design.md`):** the quoted `StepFn`, the sections on Dawnshard, the Dawnshard column of the capability table (a feature built into the loop stops being "not built in"), the paragraph saying where each missing feature would go, and the bottom row of `knowledge_sharing/assets/trainer-ownership.svg`.
+- **Reproducibility article and its SVGs:** whenever seeding or the order of random draws changes.
+- **Diagrams in docstrings:** the ASCII forward-pass diagrams in each `nn.Module` docstring, if the loop's contract with a model changes.
+- **Tutorials:** `tutorials/training.md` where it describes this loop, and `tutorials/index.md` if a heading moves.
+
+Then rerun the pinned mkdocs build and read `home.html` next to the README diff.
+
 ### Anchors other files depend on
 
-`pages/overrides/home.html` links to `#a-training-run-in-one-screen`, `#separate-state-policy-and-mechanism`, `#exactly-one-place-for-everything`, `#the-repo-keeps-itself-clean`, and `#debuggability`, and its design cards summarize the README. Those links only resolve because `pages/hooks.py` renders the README below the hero, so they are anchors on the landing page itself. The walkthrough links to `#visualizing-attention` and `#debuggability`, and Debuggability links to `#add-a-probe` and `#profile-a-few-epochs`. When you rename or remove one of those headings, update the links in the same change, then run the mkdocs build above; it warns about anchors that no longer exist.
+`pages/overrides/home.html` links to `#a-training-run-in-one-screen`, `#separate-state-policy-and-mechanism`, `#how-it-compares`, `#exactly-one-place-for-everything`, `#the-repo-keeps-itself-clean`, and `#debuggability`, and its design cards summarize the README. Those links only resolve because `pages/hooks.py` renders the README below the hero, so they are anchors on the landing page itself. The walkthrough links to `#visualizing-attention` and `#debuggability`, and Debuggability links to `#add-a-probe` and `#profile-a-few-epochs`. When you rename or remove one of those headings, update the links in the same change, then run the mkdocs build above; it warns about anchors that no longer exist.
 
 ### Where a change goes
 
@@ -259,7 +305,7 @@ Use this to decide which README sections a code change touches. A pre-PR hook (`
 
 | You changed | Update |
 |---|---|
-| The loop's API (`fit`, `EpochSpec`, `TrainState`, probes) | The one-screen run, the matching `###` under Separate state, policy, and mechanism, the matching `###` under Exactly one place for everything, and the matching `###` under Using the loop. |
+| The loop's API (`fit`, `EpochSpec`, `TrainState`, probes) or what the loop does | Everything in When the loop changes below. |
 | A rule or the tool that enforces it (linter, hook, Make target, typing) | Its paragraph under The repo keeps itself clean, and the Make targets table if a target changed. |
 | A package, module, or major capability | Its row in What's inside, its line in Project structure, and the layout paragraph under The repo keeps itself clean if it is a new package. |
 | A script that is run from the command line | The "Run something" block. |

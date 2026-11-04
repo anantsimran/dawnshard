@@ -18,8 +18,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent  # noqa: NAR001
 BRANCH = "main"
 HOME_PAGE = "README.md"
 REPRODUCIBILITY_PAGE = "knowledge_sharing/reproducibility.md"
-TOKENISATION_REPORT = "reports/multi30k_tokenisation.md"
-ABLATION_REPORT = "reports/multi30k_ablations.md"
+TRAINER_DESIGN_PAGE = "knowledge_sharing/trainer_design.md"
+# Knowledge-sharing articles share one article template.
+ARTICLE_PAGES = {REPRODUCIBILITY_PAGE, TRAINER_DESIGN_PAGE}
+TOKENISATION_REPORT = "experiments/reports/multi30k_tokenisation.md"
+ABLATION_REPORT = "experiments/reports/multi30k_ablations.md"
 STUDY_DETAILS = {
     "experiments/multi30ken_predictor/2026-09-29/README.md": (
         "Masked-token pretraining",
@@ -49,6 +52,7 @@ STUDY_DETAILS = {
 EXTRA_PAGES = [
     HOME_PAGE,
     REPRODUCIBILITY_PAGE,
+    TRAINER_DESIGN_PAGE,
     TOKENISATION_REPORT,
     ABLATION_REPORT,
     "app/src/training/common/README.md",
@@ -63,19 +67,19 @@ EXTRA_PAGES = [
 # Images and downloads used by EXTRA_PAGES. Without them as site files, the
 # rewriter sends each one to GitHub, which serves HTML instead of the asset.
 EXTRA_ASSETS = [
-    "reports/assets/multi30k_ablations/training_budget.png",
-    "reports/assets/multi30k_ablations/training_budget.svg",
-    "reports/assets/multi30k_ablations/schedule_dynamics.png",
-    "reports/assets/multi30k_ablations/schedule_dynamics.svg",
-    "reports/assets/multi30k_ablations/loss_and_accuracy.png",
-    "reports/assets/multi30k_ablations/loss_and_accuracy.svg",
-    "reports/assets/multi30k_ablations/translator_components.png",
-    "reports/assets/multi30k_ablations/translator_components.svg",
-    "reports/assets/multi30k_ablations/width_and_schedule.png",
-    "reports/assets/multi30k_ablations/width_and_schedule.svg",
-    "reports/assets/multi30k_ablations/masked_token_convergence.png",
-    "reports/assets/multi30k_ablations/masked_token_convergence.svg",
-    "reports/assets/multi30k_ablations/summary.csv",
+    "experiments/reports/assets/multi30k_ablations/training_budget.png",
+    "experiments/reports/assets/multi30k_ablations/training_budget.svg",
+    "experiments/reports/assets/multi30k_ablations/schedule_dynamics.png",
+    "experiments/reports/assets/multi30k_ablations/schedule_dynamics.svg",
+    "experiments/reports/assets/multi30k_ablations/loss_and_accuracy.png",
+    "experiments/reports/assets/multi30k_ablations/loss_and_accuracy.svg",
+    "experiments/reports/assets/multi30k_ablations/translator_components.png",
+    "experiments/reports/assets/multi30k_ablations/translator_components.svg",
+    "experiments/reports/assets/multi30k_ablations/width_and_schedule.png",
+    "experiments/reports/assets/multi30k_ablations/width_and_schedule.svg",
+    "experiments/reports/assets/multi30k_ablations/masked_token_convergence.png",
+    "experiments/reports/assets/multi30k_ablations/masked_token_convergence.svg",
+    "experiments/reports/assets/multi30k_ablations/summary.csv",
     "experiments/multi30ken_predictor/2026-09-29/runs.csv",
     "experiments/multi30ken_predictor/2026-09-29/epochs.csv",
     "experiments/multi30k_translator/2026-10-13/runs.csv",
@@ -84,15 +88,16 @@ EXTRA_ASSETS = [
     "experiments/multi30ken_predictor/2026-10-15/epochs.csv",
     "experiments/multi30k_translator/2026-10-15/runs.csv",
     "experiments/multi30k_translator/2026-10-15/epochs.csv",
-    "reports/assets/multi30k_tokenisation/mean_length.png",
-    "reports/assets/multi30k_tokenisation/mean_length.svg",
-    "reports/assets/multi30k_tokenisation/tokens_per_word.png",
-    "reports/assets/multi30k_tokenisation/tokens_per_word.svg",
-    "reports/assets/multi30k_tokenisation/length_tail.png",
-    "reports/assets/multi30k_tokenisation/length_tail.svg",
-    "reports/assets/multi30k_tokenisation/stats.csv",
+    "experiments/reports/assets/multi30k_tokenisation/mean_length.png",
+    "experiments/reports/assets/multi30k_tokenisation/mean_length.svg",
+    "experiments/reports/assets/multi30k_tokenisation/tokens_per_word.png",
+    "experiments/reports/assets/multi30k_tokenisation/tokens_per_word.svg",
+    "experiments/reports/assets/multi30k_tokenisation/length_tail.png",
+    "experiments/reports/assets/multi30k_tokenisation/length_tail.svg",
+    "experiments/reports/assets/multi30k_tokenisation/stats.csv",
     "knowledge_sharing/assets/rng-state.svg",
     "knowledge_sharing/assets/dawnshard-replay.svg",
+    "knowledge_sharing/assets/trainer-ownership.svg",
     "experiments/multi30ken_predictor/2026-09-29/assets/sweep_best_val.png",
     "experiments/multi30ken_predictor/2026-09-29/assets/val_curves.png",
     "experiments/multi30ken_predictor/2026-09-29/assets/follow_up_best_val.png",
@@ -130,7 +135,7 @@ def on_files(files: Files, config: MkDocsConfig) -> Files:
 
 def on_page_markdown(markdown: str, page: Page, config: MkDocsConfig, files: Files) -> str:
     """Use the landing template for the home page and send non-page links to GitHub."""
-    if page.file.src_uri == REPRODUCIBILITY_PAGE:
+    if page.file.src_uri in ARTICLE_PAGES:
         page.meta["template"] = "reproducibility.html"
         page.meta["hide"] = ["navigation", "toc"]
     if page.file.src_uri == TOKENISATION_REPORT:

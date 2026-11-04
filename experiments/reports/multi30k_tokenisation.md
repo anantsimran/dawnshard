@@ -55,7 +55,7 @@ percentiles to understand how much text a proposed limit would exclude.
 
 ## Data and method
 
-The [Multi30k notebook](../notebooks/multi30k_dataload.ipynb) trains separate
+The [Multi30k notebook](../../notebooks/multi30k_dataload.ipynb) trains separate
 English and German byte-level BPE tokenizers on the training captions, at seven
 merge budgets from 500 to 10,000. It measures 5,000 sampled training captions per
 language, reusing that language's sample across all seven budgets. The English
@@ -65,7 +65,7 @@ on unseen text.
 
 Vocabulary sizes retain the notebook's recorded layout: 256 byte tokens, four
 protected token IDs, and the learned merges. The current
-[tokenizer](../app/src/training/common/README.md) reserves six protected IDs,
+[tokenizer](../../app/src/training/common/README.md) reserves six protected IDs,
 including beginning and end tokens for translation. That changes a 5,000-merge
 vocabulary from 5,260 to 5,262 entries; the charts preserve the saved measurements.
 
@@ -78,5 +78,5 @@ The [report generator](generate_multi30k_tokenisation.py) exports these assets
 from saved notebook output without downloading data or retraining tokenizers:
 
 ```bash
-uv run python reports/generate_multi30k_tokenisation.py
+uv run python experiments/reports/generate_multi30k_tokenisation.py
 ```

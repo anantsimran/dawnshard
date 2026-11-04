@@ -1,20 +1,34 @@
 # Transformer
 
-Attention, masks, and the encoder and decoder blocks, built from scratch. For the rest of the
-library, see the [root README](../../../../README.md).
+This package owns the transformer building blocks: attention, masks, the encoder and
+decoder blocks, position encodings, an attention-map probe, and the axis names for
+tensor shapes. The attention function returns its weights, and the normalization,
+residual, and mask operations are visible in the source.
+
+| Owns | Imports from the library | Never sees |
+|---|---|---|
+| attention, masks, blocks, position encodings, axis names | nothing | the tokenizer, datasets, the training loop |
+
+[test_layout.py](../../../tests/test_layout.py) fails if this package imports anything
+else from `training/`. Attention does not know a loop exists. `save_attention_maps`
+in [probes.py](probes.py) still plugs into the loop's `eval_probe` slot, because a
+probe is any callable with the right signature. For the training architecture, see
+the [root README](../../../../README.md).
 
 ______________________________________________________________________
 
 ## Attention
 
-Attention is implemented directly instead of using `nn.MultiheadAttention` for learning purposes.
+Attention is implemented directly so score calculation and mask semantics stay
+visible.
 
 `attention` is a plain function. It takes queries, keys, and values that are already
 split into heads, with shape `(B, h, L, d_k)`, and returns the attention weights along
 with the output, so you can look at what each head attends to. It scales the queries
 before the matmul rather than the scores after it, which touches `B·h·L·d_k` elements
-instead of `B·h·L·L`. The test suite checks it against
-`torch.nn.functional.scaled_dot_product_attention`.
+instead of `B·h·L·L`. The tests compare its output with
+[`torch.nn.functional.scaled_dot_product_attention`](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html).
+That checks the calculation; it is not a performance benchmark.
 
 `MultiHeadAttentionLayer` holds the parameters, and `EncoderBlock` wraps it with a
 pre-norm residual and a position-wise feed-forward network. Both pass the weights up

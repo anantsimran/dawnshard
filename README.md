@@ -214,6 +214,7 @@ accident.
 | `metrics/` | the `Metrics` subclasses and their three functions |
 | `transformer/` | attention, the encoder block, masks, probes, axis names |
 | `common/` | the BPE tokenizer and the indexed max-heap it trains with |
+| `serve/` | the inference engine: paged KV blocks, continuous batching, chunked prefill, preemption, prefix caching, sampling, an OpenAI-compatible API, and an open-loop load generator |
 | `launch/` | `JobSpec`, the `Backend` interface, and the local, Kubernetes JobSet, KubeRay, and SageMaker adapters |
 | `parallel/` | process-group setup, naive and bucketed DDP, ZeRO-2, tensor and pipeline parallelism by hand, FSDP2, and one mesh for every combination |
 | `env/` | sandboxed coding episodes: environment, sandbox runtimes, verifier, failure classifier, agent loop, probes |
@@ -407,6 +408,7 @@ ______________________________________________________________________
 | Models | three MNIST classifiers, an AG News transformer classifier, a Multi30k masked-token predictor, a Multi30k encoder-decoder translator that decodes a saved bundle and scores it with BLEU, and a Qwen3-style decoder (RMSNorm, RoPE, GQA with QK-norm, SwiGLU, tied head) built from the official config fields | [model/](app/src/training/model/) |
 | Experiments | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation and its scale study, each a grid search ranked by best val loss; the sandboxed MBPP benchmark per runtime | [experiments/](app/src/training/experiments/) |
 | Parallelism | DDP twice by hand (naive, and bucketed with all-reduces overlapped with backward), ZeRO-2 by hand, FSDP2 and HSDP through `apply_fsdp`; tensor parallelism by hand (column/row linears, vocabulary-parallel embedding and cross-entropy, sequence-parallel primitives) and through DTensor; pipeline schedules as data (GPipe, 1F1B) with a simulator, an executor, and a FLOP-balanced partitioner; `fit` runs unchanged under `torchrun`, writing history from rank 0 only | [parallel/](app/src/training/parallel/) |
+| Inference engine | iteration-level scheduling over a paged KV cache with prefix caching, chunked prefill, and preemption by recompute; per-request sampling with UTF-8-safe streaming and stop strings; an OpenAI-compatible streaming endpoint; Qwen3 loads official checkpoints and matches a no-cache forward token for token | [serve/](app/src/training/serve/) |
 | Compute backends | one immutable `JobSpec` (image pinned by digest) submitted unchanged to a local `torchrun`, a Kubernetes JobSet (Kueue-ready), a KubeRay RayJob running Ray Train, or a SageMaker training job; launch telemetry and cost arithmetic | [launch/](app/src/training/launch/), [infra/](infra/) |
 | Environments | a Gymnasium-shaped coding environment for LLM agents: subprocess, runc and gVisor sandboxes behind one interface, a warm pool, a hash-checked verifier with reward-hacking defenses, infra-vs-task failure classification with retries, replayable episode state, and a probe suite | [env/](app/src/training/env/) |
 | Visualization | a run's metrics, two runs side by side, a model's autograd graph, attention heatmaps, BPE sequence length against merges, kernels on the device's roofline | [viz/](app/src/training/viz/) |
@@ -916,6 +918,11 @@ uv run python app/src/training/experiments/data_loading.py all
 # FLOP-balanced stages for Qwen3-1.7B, and predicted TP communication per link
 uv run python app/src/training/experiments/tp_pp.py all
 
+# Serve Qwen3 over an OpenAI-compatible streaming endpoint (random init, or --weights
+# with official safetensors), and benchmark engine versions on seeded open-loop traces
+uv run python -m training.model.qwen3_serve serve --config tiny --port 8000
+uv run python -m training.model.qwen3_serve bench --config tiny
+
 # Place five kernels of a training step on the device's roofline
 uv run python app/src/training/viz/roofline.py --peak-tflops 165 --bandwidth-gbs 1008
 
@@ -1146,7 +1153,8 @@ dawnshard/
 │   │       │   ├── ag_news_classifier.py   # text classifier and attention probe
 │   │       │   ├── multi30ken_predictor.py # masked-token predictor and its single run
 │   │       │   ├── multi30k_translator.py  # encoder-decoder translator, its single run, bundle, decode + BLEU
-│   │       │   └── qwen3.py                # Qwen3 decoder, its TP plans, and the torchrun training entry point
+│   │       │   ├── qwen3.py                # Qwen3 decoder, TP plans, paged forward, checkpoint loader, training
+│   │       │   └── qwen3_serve.py          # serve Qwen3 on the engine; benchmark engine versions
 │   │       ├── parallel/             # data, tensor, and pipeline parallelism; train/ never imports it
 │   │       │   ├── process_group.py  # join the torchrun group, rank-tagged logs, weight checksum
 │   │       │   ├── ddp.py            # NaiveDDP, BucketedDDP (async buckets under backward), no_sync
@@ -1155,6 +1163,14 @@ dawnshard/
 │   │       │   ├── tensor.py         # column/row parallel linears, vocab-parallel embedding and loss
 │   │       │   ├── pipeline.py       # GPipe/1F1B schedules as data, simulator, partitioner, executor
 │   │       │   └── mesh.py           # ParallelismSpec → DeviceMesh, TP innermost, PP outermost
+│   │       ├── serve/                # inference engine; imports no model
+│   │       │   ├── block_manager.py  # paged KV blocks, refcounts, chain-hash prefix cache, LRU
+│   │       │   ├── scheduler.py      # token budget, continuous batching, chunked prefill, preemption
+│   │       │   ├── runner.py         # ragged batch, KV pool, gather-based paged attention
+│   │       │   ├── sampler.py        # per-request sampling, incremental detokenizer, stop strings
+│   │       │   ├── engine.py         # schedule → forward → sample → update loop
+│   │       │   ├── api.py            # OpenAI-compatible /v1/completions with SSE streaming
+│   │       │   └── load_gen.py       # seeded traces, open-loop replay, TTFT/ITL/goodput
 │   │       ├── launch/               # one JobSpec on local, Kubernetes, Ray, and SageMaker
 │   │       │   ├── spec.py           # JobSpec: digest-pinned image, module, width, data and checkpoint URIs
 │   │       │   ├── backend.py        # Backend interface, JobState, torchrun command, cost arithmetic

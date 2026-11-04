@@ -112,3 +112,24 @@ def test_a_packed_document_ignores_the_one_before_it():
         alone = model(doc_b.unsqueeze(0)).view(4, -1)
         in_pack = model(packed).view(8, -1)[4:]
     torch.testing.assert_close(actual=in_pack, expected=alone, atol=1e-5, rtol=1e-5)
+
+
+def test_every_official_tensor_name_maps_and_mismatches_fail_loudly():
+    from training.model.qwen3 import load_official_state_dict, official_tensor_names
+
+    torch.manual_seed(seed=0)
+    source = Qwen3(config=QWEN3_TINY)
+    official = {f"model.{k}": v.clone() for k, v in source.state_dict().items()}
+    assert set(official) == set(official_tensor_names(config=QWEN3_TINY))
+    official["lm_head.weight"] = official["model.embed_tokens.weight"].clone()
+    target = Qwen3(config=QWEN3_TINY)
+    load_official_state_dict(model=target, tensors=official)
+    assert target.lm_head_weight is target.embed_tokens.weight
+    torch.testing.assert_close(actual=target.layers[1].mlp.up_proj.weight, expected=source.layers[1].mlp.up_proj.weight)
+    missing = dict(official)
+    del missing["model.norm.weight"]
+    with pytest.raises(KeyError):
+        load_official_state_dict(model=target, tensors=missing)
+    untied_head = dict(official, **{"lm_head.weight": torch.zeros_like(official["lm_head.weight"])})
+    with pytest.raises(KeyError):
+        load_official_state_dict(model=target, tensors=untied_head)

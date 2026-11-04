@@ -1,0 +1,11 @@
+trace,version,requests,completed,ttft_p50_s,ttft_p99_s,itl_p99_s,output_tokens_per_s,goodput_rps,prefix_hit_rate,preemptions
+A,v0 static batching,60,60,23.05,53.159,2.008,22.0,0.015,0.0,0
+A,v2 continuous batching,60,60,7.6312,14.7029,6.6786,25.0,0.0,0.0,0
+A,v5 + prefix caching,60,60,6.2716,12.5847,6.936,18.6,0.013,0.016,0
+A,v6 + chunked prefill 256,60,60,2.9368,19.0832,3.648,21.6,0.015,0.016,0
+A,v6 + chunked prefill 64,60,60,56.8643,96.5769,1.824,12.6,0.0,0.016,0
+B,v0 static batching,60,60,12.8111,46.2789,1.916,20.0,0.017,0.0,0
+B,v2 continuous batching,60,60,0.9858,5.0223,3.8961,25.8,0.111,0.0,0
+B,v5 + prefix caching,60,60,4.7171,9.6704,6.0839,32.9,0.0,0.779,0
+B,v6 + chunked prefill 256,60,60,6.9191,9.4111,3.304,31.4,0.0,0.817,0
+B,v6 + chunked prefill 64,60,60,23.7838,61.587,2.356,15.3,0.0,0.824,0

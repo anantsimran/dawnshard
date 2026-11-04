@@ -28,6 +28,7 @@ import json
 import math
 import os
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 from functools import partial
 from pathlib import Path
@@ -143,6 +144,57 @@ def count_parameters(config: Qwen3Config) -> int:
     embedding = config.vocab_size * d
     head = 0 if config.tie_word_embeddings else embedding
     return config.num_hidden_layers * per_layer + embedding + d + head
+
+
+def official_tensor_names(config: Qwen3Config) -> list[str]:
+    """Every tensor name in a released Qwen3 checkpoint with this config (Hugging Face layout)."""
+    per_layer = [
+        "input_layernorm.weight",
+        "self_attn.q_proj.weight",
+        "self_attn.k_proj.weight",
+        "self_attn.v_proj.weight",
+        "self_attn.o_proj.weight",
+        "self_attn.q_norm.weight",
+        "self_attn.k_norm.weight",
+        "post_attention_layernorm.weight",
+        "mlp.gate_proj.weight",
+        "mlp.up_proj.weight",
+        "mlp.down_proj.weight",
+    ]
+    names = ["model.embed_tokens.weight", "model.norm.weight"]
+    names += [
+        f"model.layers.{i}.{name}"
+        for i in range(config.num_hidden_layers)  # noqa: NAR001
+        for name in per_layer  # noqa: NAR001
+    ]  # noqa: NAR001
+    return names if config.tie_word_embeddings else names + ["lm_head.weight"]
+
+
+def load_official_state_dict(model: "Qwen3", tensors: Mapping[str, torch.Tensor]) -> None:
+    """Copy a released checkpoint's tensors into `model`, failing loudly on any mismatch.
+
+    Names map by dropping the `model.` prefix; the attribute names were chosen to match.
+    A tied model's checkpoint may still carry `lm_head.weight`; it must equal the
+    embedding, and is not loaded twice, so the two stay one tensor.
+
+    Raises:
+        KeyError: Listing missing and unexpected names, or a tied head that differs.
+    """
+    expected = set(official_tensor_names(config=model.config))  # noqa: NAR001
+    given = set(tensors) - ({"lm_head.weight"} if model.config.tie_word_embeddings else set())  # noqa: NAR001
+    if given != expected:
+        raise KeyError(  # noqa: NAR001
+            f"missing {sorted(expected - given)[:5]}, unexpected {sorted(given - expected)[:5]}"  # noqa: NAR001
+        )  # noqa: NAR001
+    if model.config.tie_word_embeddings and "lm_head.weight" in tensors:
+        if not torch.equal(tensors["lm_head.weight"], tensors["model.embed_tokens.weight"]):  # noqa: NAR001
+            raise KeyError("lm_head.weight differs from the embedding in a tied checkpoint")  # noqa: NAR001
+    local = {
+        name.removeprefix("model."): tensor  # noqa: NAR001
+        for name, tensor in tensors.items()
+        if name in expected  # noqa: NAR001
+    }  # noqa: NAR001
+    model.load_state_dict(state_dict=local, strict=True)
 
 
 def model_shape(config: Qwen3Config) -> ModelShape:
@@ -503,6 +555,45 @@ class Qwen3(nn.Module):
             return hidden.reshape(-1, self.config.hidden_size)  # noqa: NAR001
         logits = hidden @ self.lm_head_weight.T  # a vocabulary shard under tensor parallelism
         return logits.reshape(-1, logits.shape[-1])  # noqa: NAR001
+
+    def forward_paged(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        attend: Callable[[int, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
+    ) -> torch.Tensor:
+        """Run a flat, ragged batch for an inference engine; return `(T, d_model)` hidden states.
+
+        The same layers as `hidden_states`, but every request's new tokens are
+        concatenated on one axis with their own positions, and attention is delegated:
+        `attend(layer, q, k, v)`, each `(T, heads, head_dim)` after QK-norm and RoPE,
+        must store the new keys and values and return each query's output over its own
+        request's whole context. The engine owns the KV cache; the model owns the math.
+
+        Args:
+            input_ids: `(T,)` new tokens of every request in the batch.
+            positions: `(T,)` each token's position within its own request.
+        """
+        cos = self.rope_cos[positions].unsqueeze(dim=1).to(dtype=self.embed_tokens.weight.dtype)
+        sin = self.rope_sin[positions].unsqueeze(dim=1).to(dtype=self.embed_tokens.weight.dtype)
+        x = self.embed_tokens(input_ids)  # noqa: NAR001
+        tokens = input_ids.shape[0]
+        for index, block in enumerate(self.layers):  # noqa: NAR001
+            layer = cast(Qwen3Block, block)  # noqa: NAR001
+            attn, normed = layer.self_attn, layer.input_layernorm(x)  # noqa: NAR001
+            q = attn.q_norm(attn.q_proj(normed).view(tokens, attn.num_heads, attn.head_dim))  # noqa: NAR001
+            k = attn.k_norm(attn.k_proj(normed).view(tokens, attn.num_kv_heads, attn.head_dim))  # noqa: NAR001
+            v = attn.v_proj(normed).view(tokens, attn.num_kv_heads, attn.head_dim)  # noqa: NAR001
+            out = attend(  # noqa: NAR001
+                index, apply_rope(x=q, cos=cos, sin=sin), apply_rope(x=k, cos=cos, sin=sin), v
+            )  # noqa: NAR001
+            x = x + attn.o_proj(out.reshape(tokens, -1))  # noqa: NAR001
+            x = x + layer.mlp(x=layer.post_attention_layernorm(x))  # noqa: NAR001
+        return self.norm(x)  # noqa: NAR001
+
+    def logits(self, hidden: torch.Tensor) -> torch.Tensor:
+        """`(R, vocab)` logits for `(R, d_model)` final hidden states."""
+        return hidden @ self.lm_head_weight.T
 
 
 def parallelize_tensor_parallel(model: Qwen3, group: Optional[dist.ProcessGroup]) -> nn.Module:

@@ -91,3 +91,15 @@ def test_step_timer_counts_whole_steps_after_warmup():
     assert timer.tokens_per_s() == pytest.approx(200.0)
     timer(None, None, None, None, 1, 0, None)
     assert len(timer.stamps) == 4
+
+
+@pytest.mark.parametrize(
+    ("strategy", "per_param", "gigabytes"),
+    [("ddp", 16, 27.5), ("zero1", 7, 12.0), ("zero2", 5.5, 9.5), ("zero3", 4, 6.9)],
+)
+def test_sharded_memory_matches_the_ticket_table(strategy, per_param, gigabytes):
+    from training.train.perf import static_bytes_per_parameter
+
+    bytes_per = static_bytes_per_parameter(strategy=strategy, world_size=4)
+    assert bytes_per == per_param
+    assert bytes_per * 1.72e9 / 1e9 == pytest.approx(gigabytes, abs=0.1)

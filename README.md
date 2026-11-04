@@ -215,6 +215,7 @@ accident.
 | `transformer/` | attention, the encoder block, masks, probes, axis names |
 | `common/` | the BPE tokenizer and the indexed max-heap it trains with |
 | `launch/` | `JobSpec`, the `Backend` interface, and the local, Kubernetes JobSet, KubeRay, and SageMaker adapters |
+| `parallel/` | process-group setup, naive and bucketed DDP by hand, ZeRO-2 by hand, and one function that applies FSDP2 |
 | `env/` | sandboxed coding episodes: environment, sandbox runtimes, verifier, failure classifier, agent loop, probes |
 | `dataload/` | dataset caches and the AG News, Multi30k, and MBPP pipelines |
 | `model/` | the MNIST classifiers, AG News classifier, Multi30k predictor and translator, and the Qwen3 decoder |
@@ -305,7 +306,8 @@ Three functions build it:
    `peak_flops`, `mfu`; otherwise neither appears.
 1. `serialize_epoch_record` flattens that into one dict, hoisting the system fields to
    the top level and dropping anything unset.
-1. When `fit` returns, `save_history` writes the records to
+1. When `fit` returns, `save_history` writes the records (on rank 0 only, in a
+   distributed run) to
    `app/history/<run-uuid>.json` under a `meta` block with the git commit, a summary
    of the `TrainState` (type names, the model's parameter count and the shape of
    every named parameter, and the optimizer's parameter groups, never weights), the
@@ -403,6 +405,7 @@ ______________________________________________________________________
 | Data | MNIST through torchvision; AG News and Multi30k sampled, tokenized, and cached; how a `DataLoader` is built in the [dataload README](app/src/training/dataload/README.md) | [dataload/](app/src/training/dataload/), [mnist.py](app/src/training/model/mnist.py) |
 | Models | three MNIST classifiers, an AG News transformer classifier, a Multi30k masked-token predictor, a Multi30k encoder-decoder translator that decodes a saved bundle and scores it with BLEU, and a Qwen3-style decoder (RMSNorm, RoPE, GQA with QK-norm, SwiGLU, tied head) built from the official config fields | [model/](app/src/training/model/) |
 | Experiments | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation and its scale study, each a grid search ranked by best val loss; the sandboxed MBPP benchmark per runtime | [experiments/](app/src/training/experiments/) |
+| Data parallelism | DDP twice by hand (naive, and bucketed with all-reduces overlapped with backward), ZeRO-2 by hand, FSDP2 and HSDP through `apply_fsdp`; `fit` runs unchanged under `torchrun`, writing history from rank 0 only | [parallel/](app/src/training/parallel/) |
 | Compute backends | one immutable `JobSpec` (image pinned by digest) submitted unchanged to a local `torchrun`, a Kubernetes JobSet (Kueue-ready), a KubeRay RayJob running Ray Train, or a SageMaker training job; launch telemetry and cost arithmetic | [launch/](app/src/training/launch/), [infra/](infra/) |
 | Environments | a Gymnasium-shaped coding environment for LLM agents: subprocess, runc and gVisor sandboxes behind one interface, a warm pool, a hash-checked verifier with reward-hacking defenses, infra-vs-task failure classification with retries, replayable episode state, and a probe suite | [env/](app/src/training/env/) |
 | Visualization | a run's metrics, two runs side by side, a model's autograd graph, attention heatmaps, BPE sequence length against merges, kernels on the device's roofline | [viz/](app/src/training/viz/) |
@@ -772,7 +775,9 @@ With `accumulation_steps=k`, `train_step` zeroes gradients on every k-th batch,
 divides each batch's loss by k before `backward`, and steps the optimizer after the
 k-th, so k micro-batches act as one batch of k times the size without its activation
 memory. The loader's length should be a multiple of k; a trailing partial group is
-never stepped. `autocast_dtype` runs the forward and the loss under `torch.autocast`
+never stepped. If the model has a `no_sync()` context, as PyTorch DDP and the wrappers
+in [parallel/](app/src/training/parallel/) do, the k-1 non-stepping micro-batches run
+inside it, so gradients cross ranks once per step. `autocast_dtype` runs the forward and the loss under `torch.autocast`
 in both steps; weights, gradients, and optimizer state keep their own dtype.
 
 `flops_per_target` turns on throughput in the history: each record gains
@@ -893,6 +898,11 @@ make launch BACKEND=local SPEC=infra/jobs/qwen3_tiny_local.json
 # <run>.perf.json with predicted and measured memory, tokens/s, and MFU
 uv run python -m training.model.qwen3 --config 0.6b --tokens <tokens.bin> --seq-len 2048 \
     --batch-size 1 --accumulation 32 --steps 300 --precision bf16 --peak-tflops 165
+
+# The same run on 2 ranks with a data-parallel strategy: ddp-naive, ddp-bucketed,
+# ddp-torch, zero2, or fsdp (--replicate 2 for HSDP); only rank 0 writes history
+uv run torchrun --standalone --nproc-per-node=2 -m training.model.qwen3 --config tiny \
+    --synthetic --steps 30 --strategy ddp-bucketed
 
 # Place five kernels of a training step on the device's roofline
 uv run python app/src/training/viz/roofline.py --peak-tflops 165 --bandwidth-gbs 1008
@@ -1123,6 +1133,11 @@ dawnshard/
 │   │       │   ├── multi30ken_predictor.py # masked-token predictor and its single run
 │   │       │   ├── multi30k_translator.py  # encoder-decoder translator, its single run, bundle, decode + BLEU
 │   │       │   └── qwen3.py                # Qwen3-style decoder from a config; torchrun training entry point
+│   │       ├── parallel/             # data parallelism; train/ never imports it
+│   │       │   ├── process_group.py  # join the torchrun group, rank-tagged logs, weight checksum
+│   │       │   ├── ddp.py            # NaiveDDP, BucketedDDP (async buckets under backward), no_sync
+│   │       │   ├── zero.py           # Zero2AdamW: per-parameter owners, fp32 masters, sharded Adam
+│   │       │   └── fsdp.py           # apply_fsdp: fully_shard per block then root; HSDP mesh
 │   │       ├── launch/               # one JobSpec on local, Kubernetes, Ray, and SageMaker
 │   │       │   ├── spec.py           # JobSpec: digest-pinned image, module, width, data and checkpoint URIs
 │   │       │   ├── backend.py        # Backend interface, JobState, torchrun command, cost arithmetic

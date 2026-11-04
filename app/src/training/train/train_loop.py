@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
 import torch
+import torch.distributed as dist
 from loguru import logger
 from torch import Tensor
 from torch.utils.data import DataLoader
@@ -19,6 +21,11 @@ from training.train.utils import save_history
 
 Batch = tuple[Tensor, Tensor]
 StepFn = Callable[["TrainState", "EpochSpec", Batch, int, int, Optional[int]], "Metrics"]
+
+
+def _is_main_process() -> bool:
+    """Rank 0 of a distributed run, or the only process: the one that writes files."""
+    return not dist.is_initialized() or dist.get_rank() == 0
 
 
 def _autocast(epoch_spec: EpochSpec) -> torch.autocast:
@@ -63,7 +70,9 @@ def train_step(
     `epoch_spec.accumulation_steps = k`, gradients are zeroed on batches 0, k, 2k, ...,
     each batch's loss is divided by k before backward so the summed gradient is the
     mean over the group, and the optimizer steps after batches k-1, 2k-1, ....
-    Forward and loss run under autocast when `epoch_spec.autocast_dtype` is set.
+    Forward and loss run under autocast when `epoch_spec.autocast_dtype` is set. A
+    model with a `no_sync()` context, such as a DistributedDataParallel wrapper, runs
+    the non-stepping micro-batches inside it, so gradients cross ranks once per step.
 
     If `epoch_spec.train_probe` is set, it is called after the backward (and any
     optimizer step) with this batch's input, target, detached predictions, `epoch`,
@@ -79,11 +88,16 @@ def train_step(
     accumulation = epoch_spec.accumulation_steps
     if batch_index % accumulation == 0:
         train_state.optimizer.zero_grad(set_to_none=True)
-    with _autocast(epoch_spec=epoch_spec):
-        predicted = train_state.model(input_tensor)  # noqa: NAR001
-        loss = train_state.criterion(predicted, target_tensor)  # noqa: NAR001
-    (loss / accumulation).backward()
-    if (batch_index + 1) % accumulation == 0:
+    steps = (batch_index + 1) % accumulation == 0
+    # A data-parallel wrapper skips gradient communication on micro-batches that do
+    # not step; it is found by duck typing, so the loop never imports a wrapper.
+    no_sync = getattr(train_state.model, "no_sync", None)  # noqa: NAR001
+    with no_sync() if no_sync is not None and not steps else nullcontext():
+        with _autocast(epoch_spec=epoch_spec):
+            predicted = train_state.model(input_tensor)  # noqa: NAR001
+            loss = train_state.criterion(predicted, target_tensor)  # noqa: NAR001
+        (loss / accumulation).backward()
+    if steps:
         train_state.optimizer.step()
     predicted = predicted.detach()
     metrics = epoch_spec.calculate_metrics(predicted, target_tensor)  # noqa: NAR001
@@ -217,7 +231,9 @@ def fit(
         Per-epoch history.
 
     Side effects:
-        Seeds the global torch RNG from `train_seed`, and writes the history file.
+        Seeds the global torch RNG from `train_seed`, and writes the history file. In a
+        distributed run only rank 0 writes it and logs to W&B; every rank logs its own
+        peak memory each epoch.
     """
     if run_uuid is None:
         run_uuid = str(uuid4())  # noqa: NAR001
@@ -289,17 +305,25 @@ def fit(
                 seconds=epoch_duration_seconds,
             ),
         )
+        if dist.is_initialized():
+            logger.info(  # noqa: NAR001
+                "rank {} | peak allocated {} GB",
+                dist.get_rank(),
+                epoch_record.system_metrics.gpu_peak_memory_allocated_gb,
+            )
         record_dict = serialize_epoch_record(record=epoch_record)
         if wandb_run is not None:
-            wandb_run.log(data=record_dict)
+            if _is_main_process():
+                wandb_run.log(data=record_dict)
         history.append(epoch_record)  # noqa: NAR001
-    save_history(
-        history=[serialize_epoch_record(record=record) for record in history],
-        history_path=history_path,
-        train_state=state,
-        epoch_spec=epoch_spec,
-        seeds={"train": train_seed, "val": val_seed, "test": test_seed},
-    )
+    if _is_main_process():
+        save_history(
+            history=[serialize_epoch_record(record=record) for record in history],
+            history_path=history_path,
+            train_state=state,
+            epoch_spec=epoch_spec,
+            seeds={"train": train_seed, "val": val_seed, "test": test_seed},
+        )
     return history
 
 
@@ -499,25 +523,28 @@ def profiled_fit(
         )
         record_dict = serialize_epoch_record(record=epoch_record)
         if wandb_run is not None:
-            wandb_run.log(data=record_dict)
+            if _is_main_process():
+                wandb_run.log(data=record_dict)
         history.append(epoch_record)  # noqa: NAR001
         detailed_record = (
             {**record_dict, **profiling_metrics} if profiling_metrics is not None else record_dict
         )
         history_detailed.append(detailed_record)  # noqa: NAR001
     seeds = {"train": train_seed, "val": val_seed, "test": test_seed}
-    save_history(
-        history=[serialize_epoch_record(record=record) for record in history],
-        history_path=history_path,
-        train_state=state,
-        epoch_spec=epoch_spec,
-        seeds=seeds,
-    )
-    save_history(
-        history=history_detailed,
-        history_path=history_detailed_path,
-        train_state=state,
-        epoch_spec=epoch_spec,
-        seeds=seeds,
-    )
+    if _is_main_process():
+        save_history(
+            history=[serialize_epoch_record(record=record) for record in history],
+            history_path=history_path,
+            train_state=state,
+            epoch_spec=epoch_spec,
+            seeds=seeds,
+        )
+    if _is_main_process():
+        save_history(
+            history=history_detailed,
+            history_path=history_detailed_path,
+            train_state=state,
+            epoch_spec=epoch_spec,
+            seeds=seeds,
+        )
     return history

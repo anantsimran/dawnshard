@@ -374,3 +374,32 @@ def test_autocast_dtype_runs_the_forward_in_bfloat16():
     train_step(train_state=state, epoch_spec=config, batch=(torch.randn(4, 2), torch.randn(4, 1)), epoch=1, batch_index=0, seed=None)
     assert seen == [torch.bfloat16]
     assert state.model.weight.dtype == torch.float32
+
+
+def test_accumulation_runs_non_stepping_micro_batches_inside_no_sync():
+    from contextlib import contextmanager
+
+    class Wrapped(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.inner = nn.Linear(in_features=2, out_features=1)
+            self.synced = []
+            self.inside = False
+
+        @contextmanager
+        def no_sync(self):
+            self.inside = True
+            yield
+            self.inside = False
+
+        def forward(self, x):
+            self.synced.append(not self.inside)
+            return self.inner(x)
+
+    state, config = make_state_and_config()
+    state.model = Wrapped()
+    state.optimizer = torch.optim.SGD(params=state.model.parameters(), lr=0.1)
+    config.accumulation_steps = 3
+    for index in range(6):
+        train_step(train_state=state, epoch_spec=config, batch=(torch.randn(2, 2), torch.randn(2, 1)), epoch=1, batch_index=index, seed=None)
+    assert state.model.synced == [False, False, True, False, False, True]

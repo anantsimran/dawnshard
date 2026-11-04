@@ -39,6 +39,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from beartype import beartype
 from jaxtyping import Float, Int, jaxtyped
+from loguru import logger
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn.parallel import DistributedDataParallel
@@ -51,6 +52,10 @@ from training.metrics.loss_only_metrics import (
     calculate_metrics,
     reduce_metrics,
 )
+from training.parallel.ddp import BucketedDDP, NaiveDDP, broadcast_parameters
+from training.parallel.fsdp import ParallelismSpec, apply_fsdp
+from training.parallel.process_group import init_process_group, parameter_checksum
+from training.parallel.zero import Zero2AdamW
 from training.setup import DEVICE
 from training.train.losses import ChunkedCrossEntropy
 from training.train.model import EpochSpec, Metrics, TrainState
@@ -451,26 +456,6 @@ class Qwen3(nn.Module):
         return (hidden @ self.lm_head_weight.T).reshape(-1, self.config.vocab_size)  # noqa: NAR001
 
 
-def init_distributed() -> tuple[int, int, torch.device]:
-    """Join the `torchrun` process group if there is one; return `(rank, world, device)`.
-
-    Uses NCCL on CUDA and gloo otherwise. Leaves an existing group alone, which is
-    how it runs under Ray Train.
-
-    Side effects:
-        May initialize the default process group and set the CUDA device.
-    """
-    world = int(os.environ.get("WORLD_SIZE", "1"))  # noqa: NAR001
-    if world > 1 and not dist.is_initialized():
-        dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
-    rank = dist.get_rank() if dist.is_initialized() else 0
-    if torch.cuda.is_available():
-        local_rank = int(os.environ.get("LOCAL_RANK", "0"))  # noqa: NAR001
-        torch.cuda.set_device(device=local_rank)
-        return rank, world, torch.device("cuda", local_rank)  # noqa: NAR001
-    return rank, world, DEVICE if world == 1 else torch.device("cpu")  # noqa: NAR001
-
-
 SDPA_BACKENDS = {
     "auto": [
         SDPBackend.FLASH_ATTENTION,
@@ -514,6 +499,9 @@ def parse_args() -> argparse.Namespace:
     add("--chunked-ce", action="store_true", help="Loss from hidden states, in chunks.")  # noqa: NAR001
     add("--peak-tflops", type=float, help="Dense peak of the device, for MFU.")  # noqa: NAR001
     add("--memory-snapshot", type=Path, help="CUDA only: write a memory snapshot here.")  # noqa: NAR001
+    add("--strategy", choices=["none", "ddp-naive", "ddp-bucketed", "ddp-torch", "zero2", "fsdp"])  # noqa: NAR001
+    add("--replicate", type=int, default=1, help="FSDP replicate groups; >1 is HSDP.")  # noqa: NAR001
+    add("--no-reshard", action="store_true", help="FSDP: keep blocks gathered after forward.")  # noqa: NAR001
     return parser.parse_args()
 
 
@@ -549,10 +537,16 @@ def build_loader(args: argparse.Namespace, config: Qwen3Config, rank: int) -> Da
 def build_state(
     args: argparse.Namespace, config: Qwen3Config, device: torch.device, world: int
 ) -> TrainState:
-    """Build the model, optimizer, and loss the flags ask for.
+    """Build the model, its data-parallel strategy, the optimizer, and the loss.
+
+    `--strategy`: "none"; "ddp-naive" and "ddp-bucketed" (by hand, `parallel.ddp`);
+    "ddp-torch" (PyTorch DDP, gradients as bucket views); "zero2" (`Zero2AdamW` on the
+    bare model); "fsdp" (FSDP2 per block then root, bf16 params, fp32 reduce). The
+    optimizer is always built after the wrapping, which FSDP requires.
 
     Side effects:
-        Sets the global TF32 matmul flag; draws the weight init from the global RNG.
+        Sets the global TF32 matmul flag; draws the weight init from the global RNG;
+        may broadcast weights from rank 0.
     """
     torch.backends.cuda.matmul.allow_tf32 = args.precision == "tf32"
     qwen = Qwen3(
@@ -563,12 +557,32 @@ def build_state(
     criterion: nn.Module = (
         ChunkedCrossEntropy(head=qwen) if args.chunked_ce else nn.CrossEntropyLoss()
     )
-    model: nn.Module = DistributedDataParallel(module=qwen) if world > 1 else qwen
+    strategy = args.strategy or ("ddp-torch" if world > 1 else "none")
+    model: nn.Module = qwen
+    if strategy == "ddp-naive":
+        model = NaiveDDP(module=qwen)
+    elif strategy == "ddp-bucketed":
+        model = BucketedDDP(module=qwen)
+    elif strategy == "ddp-torch":
+        model = DistributedDataParallel(module=qwen, gradient_as_bucket_view=True)
+    elif strategy == "fsdp":
+        model = apply_fsdp(
+            model=qwen,
+            block_type=Qwen3Block,
+            spec=ParallelismSpec(
+                replicate=args.replicate, reshard_after_forward=not args.no_reshard
+            ),
+            device_type=device.type,
+        )
     if args.compile:
         model = cast(nn.Module, torch.compile(model=model))  # noqa: NAR001
-    optimizer = torch.optim.AdamW(
-        params=qwen.parameters(), lr=args.lr, fused=True if args.fused_adamw else None
-    )
+    if strategy == "zero2":
+        broadcast_parameters(module=qwen)
+        optimizer: torch.optim.Optimizer = Zero2AdamW(params=list(qwen.parameters()), lr=args.lr)  # noqa: NAR001
+    else:
+        optimizer = torch.optim.AdamW(
+            params=model.parameters(), lr=args.lr, fused=True if args.fused_adamw else None
+        )
     return TrainState(model=model, optimizer=optimizer, criterion=criterion)
 
 
@@ -593,11 +607,14 @@ def build_spec(
 def main() -> None:
     """Train for `--steps` steps, alone or under `torchrun`; write launch and perf records."""
     args = parse_args()
-    rank, world, device = init_distributed()
+    info = init_process_group(cpu_device=DEVICE)
+    rank, world, device = info.rank, info.world_size, info.device
     telemetry: dict = {"process_start": PROCESS_START, "process_group_ready": time.time()}
     config = CONFIGS[args.config]
     torch.manual_seed(seed=args.seed)
     state = build_state(args=args, config=config, device=device, world=world)
+    # Equal on every rank iff every replica starts from the same weights.
+    logger.info("weight checksum at step 0: {:.6f}", parameter_checksum(model=state.model))  # noqa: NAR001
     tokens_per_step = args.batch_size * args.seq_len * args.accumulation
     timer = StepTimer(accumulation_steps=args.accumulation, tokens_per_step=tokens_per_step)
     probe = partial(record_steps, telemetry, timer)  # noqa: NAR001

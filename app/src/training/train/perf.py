@@ -132,6 +132,32 @@ def predict_memory(
     )
 
 
+type ShardingStrategy = Literal["ddp", "zero1", "zero2", "zero3"]
+
+
+def static_bytes_per_parameter(
+    strategy: ShardingStrategy,
+    world_size: int,
+    low_precision_bytes: int = 2,
+    fp32_state_bytes: int = 12,
+) -> float:
+    """Static bytes per parameter per GPU under mixed precision.
+
+    Weights and grads in a low-precision dtype (2 bytes each for bf16); fp32 master
+    weights and Adam's two moments are `fp32_state_bytes` (12). Each ZeRO stage
+    shards one more of them across `world_size` ranks: stage 1 the fp32 state,
+    stage 2 also the grads, stage 3 (FSDP) also the weights.
+    """
+    w, g, state, n = low_precision_bytes, low_precision_bytes, fp32_state_bytes, world_size
+    per_strategy = {
+        "ddp": w + g + state,
+        "zero1": w + g + state / n,
+        "zero2": w + (g + state) / n,
+        "zero3": (w + g + state) / n,
+    }
+    return per_strategy[strategy]
+
+
 def static_bytes(model: torch.nn.Module, optimizer: torch.optim.Optimizer) -> int:
     """Measured static memory: every parameter, gradient, and optimizer-state tensor."""
     tensors = [p for p in model.parameters()]

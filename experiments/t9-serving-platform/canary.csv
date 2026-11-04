@@ -1,0 +1,3 @@
+event
+rollback at 5%: canary misses 30/30
+stopped after 844 requests

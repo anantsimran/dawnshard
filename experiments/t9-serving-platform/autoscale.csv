@@ -1,0 +1,2 @@
+t_s,from,to,capacity_arrives_s,leg_node_s,leg_image_s,leg_weights_s,leg_warmup_s
+60,4,12,300.0,150.0,50.0,7.0,33.0

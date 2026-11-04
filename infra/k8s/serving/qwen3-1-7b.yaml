@@ -1,0 +1,50 @@
+# Rendered by serve.autoscale.render_manifests; edit the ScalingPolicy, not this file.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen3-1-7b
+  labels: &id001
+    app: qwen3-1-7b
+spec:
+  replicas: 4
+  selector:
+    matchLabels: *id001
+  template:
+    metadata:
+      labels: *id001
+    spec:
+      containers:
+      - name: vllm
+        image: vllm/vllm-openai@sha256:REPLACE_WITH_PINNED_DIGEST
+        args:
+        - vllm
+        - serve
+        - Qwen/Qwen3-1.7B
+        - --enable-prefix-caching
+        ports:
+        - containerPort: 8000
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 5
+      terminationGracePeriodSeconds: 120
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: qwen3-1-7b
+spec:
+  scaleTargetRef:
+    name: qwen3-1-7b
+  minReplicaCount: 4
+  maxReplicaCount: 12
+  cooldownPeriod: 300
+  triggers:
+  - type: prometheus
+    metadata:
+      query: sum(vllm:num_requests_waiting{app="qwen3-1-7b"})
+      threshold: '4.0'

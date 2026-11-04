@@ -214,7 +214,7 @@ accident.
 | `metrics/` | the `Metrics` subclasses and their three functions |
 | `transformer/` | attention, the encoder block, masks, probes, axis names |
 | `common/` | the BPE tokenizer and the indexed max-heap it trains with |
-| `serve/` | the inference engine: paged KV blocks, continuous batching, chunked prefill, preemption, prefix caching, sampling, an OpenAI-compatible API, and an open-loop load generator |
+| `serve/` | the inference engine (paged KV blocks, continuous batching, chunked prefill, preemption, prefix caching, sampling, an OpenAI-compatible API, an open-loop load generator) and the serving platform in front of replicas (routing policies, admission, autoscaling, canary) |
 | `launch/` | `JobSpec`, the `Backend` interface, and the local, Kubernetes JobSet, KubeRay, and SageMaker adapters |
 | `parallel/` | process-group setup, naive and bucketed DDP, ZeRO-2, tensor and pipeline parallelism by hand, FSDP2, and one mesh for every combination |
 | `env/` | sandboxed coding episodes: environment, sandbox runtimes, verifier, failure classifier, agent loop, probes |
@@ -409,6 +409,7 @@ ______________________________________________________________________
 | Experiments | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation and its scale study, each a grid search ranked by best val loss; the sandboxed MBPP benchmark per runtime | [experiments/](app/src/training/experiments/) |
 | Parallelism | DDP twice by hand (naive, and bucketed with all-reduces overlapped with backward), ZeRO-2 by hand, FSDP2 and HSDP through `apply_fsdp`; tensor parallelism by hand (column/row linears, vocabulary-parallel embedding and cross-entropy, sequence-parallel primitives) and through DTensor; pipeline schedules as data (GPipe, 1F1B) with a simulator, an executor, and a FLOP-balanced partitioner; `fit` runs unchanged under `torchrun`, writing history from rank 0 only | [parallel/](app/src/training/parallel/) |
 | Inference engine | iteration-level scheduling over a paged KV cache with prefix caching, chunked prefill, and preemption by recompute; per-request sampling with UTF-8-safe streaming and stop strings; an OpenAI-compatible streaming endpoint; Qwen3 loads official checkpoints and matches a no-cache forward token for token | [serve/](app/src/training/serve/) |
+| Serving platform | routing policies as pure functions (round robin, least outstanding, power of two, prefix hash with bounded load, adapter aware), admission control with 429s, a proxy that rebuilds state from replica metrics, an autoscaler decision with hysteresis and cooldown rendered to KEDA, and a canary controller with SLO rollback | [serve/](app/src/training/serve/), [infra/k8s/serving/](infra/k8s/serving/) |
 | Compute backends | one immutable `JobSpec` (image pinned by digest) submitted unchanged to a local `torchrun`, a Kubernetes JobSet (Kueue-ready), a KubeRay RayJob running Ray Train, or a SageMaker training job; launch telemetry and cost arithmetic | [launch/](app/src/training/launch/), [infra/](infra/) |
 | Environments | a Gymnasium-shaped coding environment for LLM agents: subprocess, runc and gVisor sandboxes behind one interface, a warm pool, a hash-checked verifier with reward-hacking defenses, infra-vs-task failure classification with retries, replayable episode state, and a probe suite | [env/](app/src/training/env/) |
 | Visualization | a run's metrics, two runs side by side, a model's autograd graph, attention heatmaps, BPE sequence length against merges, kernels on the device's roofline | [viz/](app/src/training/viz/) |
@@ -923,6 +924,9 @@ uv run python app/src/training/experiments/tp_pp.py all
 uv run python -m training.model.qwen3_serve serve --config tiny --port 8000
 uv run python -m training.model.qwen3_serve bench --config tiny
 
+# Judge routing, admission, canary, and autoscaling policies on one seeded trace
+uv run python app/src/training/experiments/serving_platform.py
+
 # Place five kernels of a training step on the device's roofline
 uv run python app/src/training/viz/roofline.py --peak-tflops 165 --bandwidth-gbs 1008
 
@@ -1170,7 +1174,10 @@ dawnshard/
 │   │       │   ├── sampler.py        # per-request sampling, incremental detokenizer, stop strings
 │   │       │   ├── engine.py         # schedule → forward → sample → update loop
 │   │       │   ├── api.py            # OpenAI-compatible /v1/completions with SSE streaming
-│   │       │   └── load_gen.py       # seeded traces, open-loop replay, TTFT/ITL/goodput
+│   │       │   ├── load_gen.py       # seeded traces, open-loop replay, TTFT/ITL/goodput
+│   │       │   ├── router.py         # routing policies, admission control, the proxy
+│   │       │   ├── autoscale.py      # scaling decision, scale-up legs, Deployment + KEDA manifests
+│   │       │   └── canary.py         # staged traffic split with SLO-based rollback
 │   │       ├── launch/               # one JobSpec on local, Kubernetes, Ray, and SageMaker
 │   │       │   ├── spec.py           # JobSpec: digest-pinned image, module, width, data and checkpoint URIs
 │   │       │   ├── backend.py        # Backend interface, JobState, torchrun command, cost arithmetic
@@ -1185,7 +1192,8 @@ dawnshard/
 │   │       │   ├── multi30k_translator_ablation.py  # component, depth, LR, language ablation
 │   │       │   ├── sandbox_benchmark.py # MBPP episodes per sandbox runtime: oracle, agent, replay, probes
 │   │       │   ├── data_loading.py   # loader audit, shuffle quality, bitwise resume, data stall
-│   │       │   └── tp_pp.py          # TP parity, pipeline bubble, stage balance, TP comm prediction
+│   │       │   ├── tp_pp.py          # TP parity, pipeline bubble, stage balance, TP comm prediction
+│   │       │   └── serving_platform.py # routing, admission, canary, autoscaler on a simulated fleet
 │   │       ├── viz/                  # metrics, run comparison, model graph, attention, BPE length, roofline
 │   │       ├── analytics/            # printed stats: Multi30k EN BPE length percentiles
 │   │       ├── utils/                # git commit, log_elapsed timing
@@ -1201,7 +1209,7 @@ dawnshard/
 ├── reports/                      # measured tradeoffs, report generators, CSV data, PNG/SVG figures
 ├── notebooks/hello_world.ipynb   # starter notebook: the sys.path cell to borrow, then imports
 ├── pages/                        # MkDocs hooks and theme overrides for the website
-├── infra/                        # job specs (jobs/), kind and Kueue manifests (k8s/)
+├── infra/                        # job specs (jobs/), kind, Kueue, and rendered serving manifests (k8s/)
 ├── scripts/
 │   ├── check_named_args.py       # keyword-argument linter
 │   ├── check_docstrings.py       # docstring-presence linter

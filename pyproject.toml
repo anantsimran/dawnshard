@@ -13,6 +13,7 @@ dependencies = [
     "matplotlib",
     "sortedcontainers",
     "regex",
+    "sacrebleu>=2.6.0",
 ]
 
 [dependency-groups]

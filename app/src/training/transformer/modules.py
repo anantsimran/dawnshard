@@ -13,8 +13,10 @@ import torch
 from beartype import beartype
 from jaxtyping import Bool, Float, jaxtyped
 from torch import nn
-from training.transformer.constants import D_MODEL, B, H, L, S
+from training.transformer.constants import D_K, D_MODEL, B, H, L, S
 from training.transformer.functions import attention
+from training.transformer.kv_cache import KVCache
+from training.transformer.mask import causal_keep_mask
 
 
 class SinusoidalEmbedding(nn.Module):
@@ -90,7 +92,7 @@ class SinusoidalEmbedding(nn.Module):
 
     @jaxtyped(typechecker=beartype)
     def forward(
-        self, batch: Float[torch.Tensor, f"{B} {L} {D_MODEL}"]
+        self, batch: Float[torch.Tensor, f"{B} {L} {D_MODEL}"], offset: int = 0
     ) -> Float[torch.Tensor, f"{B} {L} {D_MODEL}"]:
         """Add the position table to `batch`, broadcasting over the batch.
 
@@ -99,16 +101,19 @@ class SinusoidalEmbedding(nn.Module):
                 so a right-padded row gets encodings on its pad positions too;
                 the padding mask is what keeps those out of attention and the
                 pool.
+            offset: Position of `batch`'s first token. Incremental decoding feeds
+                only the newest token, which sits at `offset = tokens seen so far`;
+                a full sequence starts at 0.
 
         Raises:
-            ValueError: If the sequence is longer than the table.
+            ValueError: If the sequence ends past the table.
         """
-        seq_length = batch.shape[1]
-        if seq_length > self.pe.shape[0]:
+        end = offset + batch.shape[1]
+        if end > self.pe.shape[0]:
             raise ValueError(  # noqa: NAR001
-                f"sequence length {seq_length} exceeds table {self.pe.shape[0]}"
+                f"sequence end {end} exceeds table {self.pe.shape[0]}"
             )
-        return batch + self.pe[0:seq_length, :]
+        return batch + self.pe[offset:end, :]
 
 
 class MultiHeadAttentionLayer(nn.Module):
@@ -152,6 +157,12 @@ class MultiHeadAttentionLayer(nn.Module):
     per-head outputs only become a single vector at `w_o` — attention itself
     never mixes across heads.
 
+    Keys and values can also arrive precomputed through `kv`, as `project_kv`
+    returns them. That is the incremental-decoding path: a `KVCache` holds the
+    projections of every earlier position, so each step projects only the newest
+    token and attends over the cached rest. Passing `kv` skips the `w_k` / `w_v`
+    branch of the diagram and nothing else changes.
+
     `forward` returns `(out, weights)` and holds no state between calls.
     """
 
@@ -187,11 +198,33 @@ class MultiHeadAttentionLayer(nn.Module):
         self.k_norm = nn.RMSNorm(normalized_shape=self.d_k) if qk_norm else nn.Identity()
 
     @jaxtyped(typechecker=beartype)
+    def project_kv(
+        self, source: Float[torch.Tensor, f"{B} {S} {D_MODEL}"]
+    ) -> tuple[
+        Float[torch.Tensor, f"{B} {H} {S} {D_K}"], Float[torch.Tensor, f"{B} {H} {S} {D_K}"]
+    ]:
+        """Return `(k, v)` for `source`, split into heads, `k` QK-normed if enabled.
+
+        Args:
+            source: What the keys and values are read from: `x` for
+                self-attention, `memory` for cross-attention.
+        """
+        k = self.k_norm(source.unsqueeze(dim=1) @ self.w_k)  # noqa: NAR001
+        v = source.unsqueeze(dim=1) @ self.w_v
+        return k, v
+
+    @jaxtyped(typechecker=beartype)
     def forward(
         self,
         x: Float[torch.Tensor, f"{B} {L} {D_MODEL}"],
         mask: Optional[Bool[torch.Tensor, f"#{B} #{H} #{L} {S}"]],
         memory: Optional[Float[torch.Tensor, f"{B} {S} {D_MODEL}"]] = None,
+        kv: Optional[
+            tuple[
+                Float[torch.Tensor, f"{B} {H} {S} {D_K}"],
+                Float[torch.Tensor, f"{B} {H} {S} {D_K}"],
+            ]
+        ] = None,
     ) -> tuple[
         Float[torch.Tensor, f"{B} {L} {D_MODEL}"],
         Float[torch.Tensor, f"{B} {H} {L} {S}"],
@@ -206,6 +239,8 @@ class MultiHeadAttentionLayer(nn.Module):
                 everywhere.
             memory: Source of keys and values, such as an encoder's output. None
                 makes this self-attention over `x`.
+            kv: Precomputed `(k, v)` from `project_kv`, such as a `KVCache`'s
+                rows. Takes precedence over `memory` and `x` as the key source.
 
         Returns:
             (out, weights): the mixed output, and each head's post-softmax
@@ -213,12 +248,10 @@ class MultiHeadAttentionLayer(nn.Module):
         """
         batch_size, n, d_model = x.shape
         q = self.q_norm(x.unsqueeze(dim=1) @ self.w_q)  # noqa: NAR001
-        if memory is not None:
-            k = self.k_norm(memory.unsqueeze(dim=1) @ self.w_k)  # noqa: NAR001
-            v = memory.unsqueeze(dim=1) @ self.w_v
+        if kv is not None:
+            k, v = kv
         else:
-            k = self.k_norm(x.unsqueeze(dim=1) @ self.w_k)  # noqa: NAR001
-            v = x.unsqueeze(dim=1) @ self.w_v
+            k, v = self.project_kv(source=memory if memory is not None else x)
         out, weights = attention(q=q, k=k, v=v, mask=mask)
         concat = out.transpose(dim0=1, dim1=2).reshape(  # noqa: NAR001
             batch_size, n, d_model
@@ -390,8 +423,13 @@ class DecoderBlock(nn.Module):
     lets every position read its own future, so the caller has to pass one.
     `memory_mask` may be `None` when no source sequence is padded.
 
+    `forward_step` is the same block for incremental decoding: it takes only the
+    newest target positions and reads every earlier one from a `KVCache`, so a
+    step costs one position, not the whole prefix. `forward` stays the
+    teacher-forced path that training uses, and the two agree position for position.
+
     `forward` returns `(out, self_attn_weights, cross_attn_weights)` and holds no
-    state between calls.
+    state between calls; `forward_step` mutates only the cache it is given.
     """
 
     def __init__(
@@ -475,3 +513,53 @@ class DecoderBlock(nn.Module):
         ffn_output = self.ffn(ffn_in_normalized)  # noqa: NAR001
         x = x + self.dropout(ffn_output)  # noqa: NAR001
         return x, self_attn_weights, cross_attn_weights
+
+    @jaxtyped(typechecker=beartype)
+    def forward_step(
+        self,
+        x: Float[torch.Tensor, f"{B} {L} {D_MODEL}"],
+        memory: Float[torch.Tensor, f"{B} {S} {D_MODEL}"],
+        memory_mask: Optional[Bool[torch.Tensor, f"#{B} #{H} #{L} {S}"]],
+        cache: KVCache,
+        layer: int,
+    ) -> Float[torch.Tensor, f"{B} {L} {D_MODEL}"]:
+        """Run only the newest target positions, reading earlier ones from `cache`.
+
+        The same three sublayers as `forward`, in the same order. Self-attention
+        appends this step's keys and values to `cache` and attends over every cached
+        position, causally; cross-attention reuses the cached source K/V. Weights are
+        not returned, because no probe reads them during decoding.
+
+        Args:
+            x: Embeddings of the newest `L` target positions, usually one, already
+                position-encoded at offset `cache.length`.
+            memory: As in `forward`. Read only when the cross K/V are not cached.
+            memory_mask: As in `forward`.
+            cache: Holds this block's earlier keys and values under `layer`.
+            layer: This block's index in the stack.
+
+        Returns:
+            The block output for the newest positions, same shape as `x`.
+
+        Side effects:
+            Appends to `cache` at `layer`, and stores the cross K/V on first use.
+        """
+        self_attn_in_normalized = self.self_attn_norm(x)  # noqa: NAR001
+        keys, values = cache.append(
+            layer=layer, kv=self.self_attn.project_kv(source=self_attn_in_normalized)
+        )
+        start = keys.shape[2] - x.shape[1]
+        step_mask = causal_keep_mask(seq_len=keys.shape[2], device=x.device)[:, :, start:]
+        self_attn, _ = self.self_attn(x=self_attn_in_normalized, mask=step_mask, kv=(keys, values))
+        x = x + self.dropout(self_attn)  # noqa: NAR001
+
+        cross_kv = cache.cross(layer=layer)
+        if cross_kv is None:
+            cross_kv = self.cross_attn.project_kv(source=memory)
+            cache.store_cross(layer=layer, kv=cross_kv)
+        cross_attn_in_normalized = self.cross_attn_norm(x)  # noqa: NAR001
+        cross_attn, _ = self.cross_attn(x=cross_attn_in_normalized, mask=memory_mask, kv=cross_kv)
+        x = x + self.dropout(cross_attn)  # noqa: NAR001
+
+        ffn_output = self.ffn(self.ffn_norm(x))  # noqa: NAR001
+        return x + self.dropout(ffn_output)  # noqa: NAR001

@@ -19,7 +19,8 @@ the same model at 256 wide, deeper, at 512 wide, and with other schedules and
 dropout. Both load the default merges files rather than retraining BPE; to set them,
 call the loader once per language pair with `retrain_tokenizer=True,
 set_default_tokenizer=True`. "best" is not a study: it retrains the scale study's best
-arm once (`train_best`) and saves a checkpoint to BEST_CHECKPOINT_PATH.
+arm once (`train_best`) and saves a checkpoint to BEST_CHECKPOINT_PATH and a decoding
+bundle to `BUNDLE_PATH`, which `multi30k_translator.py decode` reads.
 
 Run from the repo root, naming the study (default "ablation"); losses are logged to the
 terminal after every epoch, and the ranked results once every config has finished:
@@ -58,7 +59,7 @@ from training.metrics.masked_token_metrics import (
     calculate_metrics,
     reduce_metrics,
 )
-from training.model.multi30k_translator import Multi30kTranslator
+from training.model.multi30k_translator import BUNDLE_PATH, Multi30kTranslator, save_bundle
 from training.setup import DEVICE
 from training.train.model import EpochSpec, TrainState
 from training.train.train_loop import fit
@@ -265,21 +266,26 @@ def build_epoch_spec(probe_dir: Path) -> EpochSpec:
 
 
 def train_best() -> None:
-    """Retrain BEST_CONFIG for BEST_EPOCH epochs and checkpoint it.
+    """Retrain BEST_CONFIG for BEST_EPOCH epochs, then checkpoint and bundle it.
 
     The scheduler is sized for SCALE_EPOCHS, as in the study, so the epochs that run
-    see the same learning rates the study's run did.
+    see the same learning rates the study's run did. The loader is called directly,
+    not through `get_loaders`, because the bundle needs the merges themselves.
 
     Side effects:
         Seeds the global torch RNG, writes the run's history file and attention
-        probes, and overwrites BEST_CHECKPOINT_PATH with the model, optimizer, and
-        scheduler state.
+        probes, overwrites BEST_CHECKPOINT_PATH with the model, optimizer, and
+        scheduler state, and overwrites BUNDLE_PATH.
     """
-    train_loader, val_loader, vocab_sizes = get_loaders(
-        seq_len=BEST_CONFIG.seq_len,
-        src_lang=BEST_CONFIG.src_lang,
-        tgt_lang=BEST_CONFIG.tgt_lang,
+    train_loader, val_loader, _, src_merges, src_vocab, tgt_merges, tgt_vocab = (
+        get_multi30k_translation_dataloader(
+            seq_len=BEST_CONFIG.seq_len,
+            batch_size=BATCH_SIZE,
+            src_lang=BEST_CONFIG.src_lang,
+            tgt_lang=BEST_CONFIG.tgt_lang,
+        )
     )
+    vocab_sizes = (len(src_vocab), len(tgt_vocab))  # noqa: NAR001
     # fit reseeds from it, but only after the model exists; seed here so weight init
     # uses the recorded seed too.
     torch.manual_seed(seed=BEST_TRAIN_SEED)
@@ -301,6 +307,9 @@ def train_best() -> None:
     BEST_CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
     save_state(state=state, checkpoint_path=BEST_CHECKPOINT_PATH)
     logger.info("saved checkpoint to {}", BEST_CHECKPOINT_PATH)  # noqa: NAR001
+    assert isinstance(state.model, Multi30kTranslator)  # noqa: NAR001
+    save_bundle(model=state.model, src_merges=src_merges, tgt_merges=tgt_merges, path=BUNDLE_PATH)
+    logger.info("saved decoding bundle to {}", BUNDLE_PATH)  # noqa: NAR001
 
 
 def main():

@@ -334,6 +334,24 @@ def tokenizer_from_pairs(
     return merges, vocab
 
 
+def merge_pairs(merges: List[Phrase]) -> List[Tuple[int, int]]:
+    """Return each merge's (first_id, second_id), the inverse of tokenizer_from_pairs.
+
+    The pairs are plain ints, so they serialize anywhere a token list does, and
+    tokenizer_from_pairs rebuilds the exact merges from them.
+
+    Args:
+        merges: Merge list from train, in rank order.
+    """
+    ids = {Phrase(encoding=b): b for b in range(256)}  # noqa: NAR001
+    ids.update({m: FIRST_MERGE_ID + k for k, m in enumerate(merges)})  # noqa: NAR001
+    pairs = []
+    for m in merges:
+        assert m.first is not None and m.second is not None
+        pairs.append((ids[m.first], ids[m.second]))  # noqa: NAR001
+    return pairs
+
+
 def encode(text: str, merges: List[Phrase]) -> List[int]:
     """Tokenize text with merges learned by train.
 

@@ -393,10 +393,10 @@ ______________________________________________________________________
 |---|---|---|
 | Training loop | `fit`, `profiled_fit`, `run_epoch`, `train_step`, `eval_step`; checkpoints, probes, and a history file per run | [train/](app/src/training/train/) |
 | Metrics | loss-only; classification with accuracy and macro-averaged precision and recall; masked-token accuracy and perplexity for per-position targets; each as three functions the loop injects | [metrics/](app/src/training/metrics/) |
-| Attention | scaled dot-product attention, multi-head self- and cross-attention with optional QK norm, fixed sinusoidal position encodings, pre-norm encoder and decoder blocks, padding and causal masks; design notes and axis names in the [transformer README](app/src/training/transformer/README.md) | [transformer/](app/src/training/transformer/) |
+| Attention | scaled dot-product attention, multi-head self- and cross-attention with optional QK norm, fixed sinusoidal position encodings, pre-norm encoder and decoder blocks, padding and causal masks, a KV cache, and one decode loop with greedy and beam search; design notes and axis names in the [transformer README](app/src/training/transformer/README.md) | [transformer/](app/src/training/transformer/) |
 | Tokenizer | byte-level BPE, written from scratch, with an indexed max-heap so each merge updates pair counts in O(log n) | [common/](app/src/training/common/) |
 | Data | MNIST through torchvision; AG News and Multi30k sampled, tokenized, and cached; how a `DataLoader` is built in the [dataload README](app/src/training/dataload/README.md) | [dataload/](app/src/training/dataload/), [mnist.py](app/src/training/model/mnist.py) |
-| Models | three MNIST classifiers, an AG News transformer classifier, a Multi30k masked-token predictor, and a Multi30k encoder-decoder translator | [model/](app/src/training/model/) |
+| Models | three MNIST classifiers, an AG News transformer classifier, a Multi30k masked-token predictor, and a Multi30k encoder-decoder translator that decodes a saved bundle and scores it with BLEU | [model/](app/src/training/model/) |
 | Experiments | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation and its scale study, each a grid search ranked by best val loss | [experiments/](app/src/training/experiments/) |
 | Visualization | a run's metrics, two runs side by side, a model's autograd graph, attention heatmaps, BPE sequence length against merges | [viz/](app/src/training/viz/) |
 | Analytics | BPE length stats (mean, min, max, percentiles) for each Multi30k EN split | [analytics/](app/src/training/analytics/) |
@@ -837,6 +837,10 @@ uv run python app/src/training/experiments/multi30k_translator_ablation.py scale
 # Retrain the scale study's best arm to its best epoch and save it to app/history/checkpoints/
 uv run python app/src/training/experiments/multi30k_translator_ablation.py best
 
+# Decode the test split from that bundle with beam search and a KV cache; BLEU, speed,
+# and cache memory are appended to experiments/t1-decoding/results.csv
+uv run python app/src/training/model/multi30k_translator.py decode --strategy beam --beam-size 4
+
 # Plot one run's per-epoch metrics
 uv run python app/src/training/viz/plot_metrics.py app/history/<run-id>.json
 
@@ -1030,6 +1034,8 @@ dawnshard/
 │   │       │   ├── modules.py        # SinusoidalEmbedding, MultiHeadAttentionLayer (optional QK norm), EncoderBlock, DecoderBlock
 │   │       │   ├── probes.py         # save_attention_maps: probe that saves attention maps per epoch
 │   │       │   ├── mask.py           # padding and causal keep masks, pad-masked mean pool
+│   │       │   ├── kv_cache.py       # KVCache: preallocated decoder K/V, beam reorder, bytes formula
+│   │       │   ├── decoding.py       # generate: one decode loop; Greedy and BeamSearch strategies
 │   │       │   └── constants.py      # axis names for shape strings: B, L, D_MODEL, H, D_K
 │   │       ├── common/
 │   │       │   ├── README.md         # BPE usage: batching, saving, translation, chunking
@@ -1046,7 +1052,7 @@ dawnshard/
 │   │       │   ├── mnist.py                # three digit classifiers
 │   │       │   ├── ag_news_classifier.py   # text classifier and attention probe
 │   │       │   ├── multi30ken_predictor.py # masked-token predictor and its single run
-│   │       │   └── multi30k_translator.py  # encoder-decoder translator and its single run
+│   │       │   └── multi30k_translator.py  # encoder-decoder translator, its single run, bundle, decode + BLEU
 │   │       ├── experiments/          # config studies over a model's entry point
 │   │       │   ├── common.py         # grid_search, LR schedules, norm names, seed repeats
 │   │       │   ├── multi30ken_predictor_ablation.py # sweep, follow-ups, ablation
@@ -1061,6 +1067,7 @@ dawnshard/
 │   └── datasets/                 # downloaded dataset cache (gitignored)
 ├── tutorials/                    # theory and revision, one file per topic: pytorch.md, training.md, transformer.md, math.md, vision.md; index.md
 ├── experiments/<model>/<date>/   # one study per folder: write-up, CSV exports, plots
+├── experiments/t<n>-<topic>/     # one infrastructure ticket per folder: DESIGN.md (choices, tradeoffs), results
 ├── knowledge_sharing/            # standalone engineering articles and SVG diagrams
 ├── reports/                      # measured tradeoffs, report generators, CSV data, PNG/SVG figures
 ├── notebooks/hello_world.ipynb   # starter notebook: the sys.path cell to borrow, then imports

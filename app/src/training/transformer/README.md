@@ -129,6 +129,84 @@ for block in decoder_blocks:
 
 ______________________________________________________________________
 
+## Decoding
+
+A decoder trained by teacher forcing sees the whole target at once. Generating text
+means feeding its own output back one token at a time, and three pieces make that
+fast and pluggable.
+
+### The KV cache
+
+In a causal decoder, the keys and values of position `t` depend only on tokens
+`0..t`, so they never change once computed. [kv_cache.py](kv_cache.py) keeps them:
+`KVCache` preallocates `(layers, B, h, max_len, d_k)` tensors for self-attention and
+writes each step's row in place, and stores cross-attention K/V once per source,
+because they depend only on the encoder output. `DecoderBlock.forward_step` is the
+cached path: it projects only the newest token, appends to the cache, and attends
+over every cached position. Without it, step `t` reruns all `t` positions, so an
+`n`-token output costs about `n²/2` token-forwards instead of `n`.
+
+- **Preallocated, not concatenated.** A step writes into a slice; nothing is
+  reallocated, so per-step cost stays flat and the peak size is known up front.
+- **Size is a formula.** `kv_cache_bytes` returns
+  `2 × layers × rows × h × d_k × positions × itemsize`, and the tests check it
+  against the bytes the tensors actually hold.
+- **Reorder by index.** Beam search forks and prunes rows; `reorder` gathers every
+  cached tensor's batch rows by parent index, so a row's cache always follows the
+  hypothesis it belongs to.
+- **Cross caching is a flag.** `cache_cross=False` recomputes the source K/V every
+  step, which isolates what caching them saves.
+
+`MultiHeadAttentionLayer.forward` takes precomputed keys and values through `kv`,
+and `project_kv` produces them, so the cached path reuses the same layer and the
+same weights. `SinusoidalEmbedding.forward` takes an `offset`, the position of the
+first token it is given; an off-by-one there produces fluent but wrong text.
+
+### One loop, two strategies
+
+[decoding.py](decoding.py) has one loop, `generate`. Each step calls the model's
+step function on the tokens so far, takes log-softmax, asks the strategy for each
+row's next token and parent row, and reorders the tokens and the cache to match.
+Caching is a flag on the loop, not a second implementation: the step function feeds
+the whole prefix when the cache is `None` and only `tokens[:, cache.length:]`
+otherwise.
+
+- **`Greedy`** takes the argmax. A row that emitted EOS emits padding after it, and
+  the loop stops when every row has.
+- **`BeamSearch`** keeps `k` live hypotheses per sentence by summed log-prob. It
+  takes the top `2k` extensions so `k` non-EOS candidates always exist, moves an EOS
+  among the top `k` into the sentence's finished set (copied out, so it stops
+  growing), and divides finished scores by the GNMT length penalty
+  `((5 + length) / 6) ** alpha`. A sentence is done at `k` finished hypotheses; at
+  `max_len` the live ones join the finished set.
+
+Rows are flattened sentence-major, `b * k + j`, so a batch of sentences decodes in
+one loop whatever the beam width. With `k = 1`, beam search returns exactly what
+greedy does, and the tests check it.
+
+```python
+from training.transformer.decoding import BeamSearch, generate
+
+memory, memory_mask = model.encode(src=src)  # (B, S, d_model), once per source
+beam = BeamSearch(beam_size=4, eos_id=EOS_ID, pad_id=PAD_ID, alpha=0.6)
+memory = memory.repeat_interleave(repeats=beam.beam_size, dim=0)
+memory_mask = memory_mask.repeat_interleave(repeats=beam.beam_size, dim=0)
+cache = model.new_cache(batch_size=src.shape[0] * beam.beam_size, max_len=32)
+ids = generate(
+    step_fn=lambda tokens, cache: model.decode_step(
+        tokens=tokens, memory=memory, memory_mask=memory_mask, cache=cache
+    ),
+    strategy=beam,
+    batch_size=src.shape[0],
+    bos_id=BOS_ID,
+    max_len=32,
+    device=src.device,
+    cache=cache,
+)
+```
+
+______________________________________________________________________
+
 ## Axis names
 
 Every tensor shape in the transformer package, whether in a jaxtyping annotation, a

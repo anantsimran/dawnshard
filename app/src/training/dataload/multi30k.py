@@ -124,16 +124,28 @@ def _get_cached_or_downloaded_txts(cache: bool, data_dir: Path, lang: str) -> Mu
     return paths
 
 
+def read_multi30k_split(
+    split: str, lang: str, cache: bool = True, data_dir: Path = DATASETS_CACHE_DIR
+) -> list[str]:
+    """Return every sentence of one official split, raw and untokenized.
+
+    For scoring decoded text against references, which must be the original sentences
+    rather than tokenized and truncated ids.
+
+    Args:
+        split: "train", "val", or "test" (test_2016_flickr).
+        lang: Multi30k language code, such as "en" or "de".
+
+    Side effects:
+        May download the splits; see _get_cached_or_downloaded_txts.
+    """
+    paths = _get_cached_or_downloaded_txts(cache=cache, data_dir=data_dir, lang=lang)
+    return getattr(paths, split).read_text(encoding="utf-8").splitlines()  # noqa: NAR001
+
+
 def _save_merges(merges: list[bpe.Phrase], path: Path) -> None:
     """Write each merge as a "first_id second_id" line, in rank order."""
-    ids = {bpe.Phrase(encoding=b): b for b in range(256)}  # noqa: NAR001
-    ids.update(  # noqa: NAR001
-        {m: bpe.FIRST_MERGE_ID + k for k, m in enumerate(merges)}  # noqa: NAR001
-    )
-    lines = []
-    for m in merges:
-        assert m.first is not None and m.second is not None
-        lines.append(f"{ids[m.first]} {ids[m.second]}")  # noqa: NAR001
+    lines = [f"{first} {second}" for first, second in bpe.merge_pairs(merges=merges)]
     path.write_text(data="\n".join(lines), encoding="utf-8")  # noqa: NAR001
 
 

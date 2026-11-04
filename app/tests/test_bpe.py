@@ -110,3 +110,10 @@ def test_decode_normalizes_whitespace_to_a_single_space():
 
 def test_decode_replaces_invalid_utf8_with_replacement_char():
     assert bpe.decode(ids=[255], vocab={255: chr(255)}) == "�"
+
+
+def test_merge_pairs_round_trips_through_tokenizer_from_pairs():
+    merges, vocab = bpe.train(text="low lower lowest newer wider", num_merges=8)
+    rebuilt, rebuilt_vocab = bpe.tokenizer_from_pairs(pairs=bpe.merge_pairs(merges=merges))
+    assert rebuilt == merges
+    assert rebuilt_vocab == vocab

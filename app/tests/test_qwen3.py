@@ -77,3 +77,26 @@ def test_small_model_overfits_one_batch():
         optimizer.step()
         losses.append(loss.item())
     assert losses[-1] < losses[0] / 2
+
+
+def test_checkpointing_modes_give_the_same_gradients():
+    ids = torch.randint(low=0, high=QWEN3_TINY.vocab_size, size=(2, 9))
+    grads = []
+    for mode in ("none", "selective", "full"):
+        torch.manual_seed(seed=0)
+        model = Qwen3(config=QWEN3_TINY, checkpointing=mode)
+        F.cross_entropy(model(ids[:, :-1]), ids[:, 1:].reshape(-1)).backward()
+        grads.append(model.layers[0].mlp.up_proj.weight.grad)
+    torch.testing.assert_close(actual=grads[1], expected=grads[0])
+    torch.testing.assert_close(actual=grads[2], expected=grads[0])
+
+
+def test_hidden_output_feeds_a_head_that_reproduces_the_logits():
+    torch.manual_seed(seed=0)
+    model = Qwen3(config=QWEN3_TINY).eval()
+    ids = torch.randint(low=0, high=QWEN3_TINY.vocab_size, size=(2, 5))
+    logits = model(ids)
+    model.output = "hidden"
+    hidden = model(ids)
+    assert hidden.shape == (10, QWEN3_TINY.hidden_size)
+    torch.testing.assert_close(actual=hidden @ model.lm_head_weight.T, expected=logits)

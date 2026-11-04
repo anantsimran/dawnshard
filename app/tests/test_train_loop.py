@@ -335,3 +335,42 @@ def test_serialize_epoch_record_flattens_and_drops_unset_fields():
         "cpu_usage_percent": 10.0,
         "ram_used_gb": 3.0,
     }
+
+
+def test_accumulation_steps_once_per_group_with_the_mean_gradient():
+    torch.manual_seed(seed=0)
+    data = [(torch.randn(2, 2), torch.randn(2, 1)) for _ in range(4)]
+    big_batch = (torch.cat([x for x, _ in data]), torch.cat([y for _, y in data]))
+
+    def run(batches, accumulation_steps):
+        torch.manual_seed(seed=1)
+        state, config = make_state_and_config()
+        config.accumulation_steps = accumulation_steps
+        for index, batch in enumerate(batches):
+            train_step(train_state=state, epoch_spec=config, batch=batch, epoch=1, batch_index=index, seed=None)
+        return state.model.weight.detach().clone()
+
+    torch.testing.assert_close(actual=run(batches=data, accumulation_steps=4), expected=run(batches=[big_batch], accumulation_steps=1))
+
+
+def test_throughput_fields_appear_only_when_flops_are_given():
+    state, config = make_state_and_config()
+    loader = [(torch.randn(4, 2), torch.randn(4, 1))]
+    history = fit(state=state, epoch_spec=config, train_loader=loader, val_loader=loader, num_epochs=1,
+                  val_epoch_list=[], train_seed=0, val_seed=VAL_SEED, test_seed=TEST_SEED, history_path=None)
+    assert history[0].targets_per_s is None and history[0].mfu is None
+    config.flops_per_target, config.peak_flops = 10.0, 1e3
+    history = fit(state=state, epoch_spec=config, train_loader=loader, val_loader=loader, num_epochs=1,
+                  val_epoch_list=[], train_seed=0, val_seed=VAL_SEED, test_seed=TEST_SEED, history_path=None)
+    assert history[0].targets_per_s > 0
+    assert history[0].mfu == pytest.approx(history[0].targets_per_s * 10.0 / 1e3)
+
+
+def test_autocast_dtype_runs_the_forward_in_bfloat16():
+    state, config = make_state_and_config()
+    config.autocast_dtype = torch.bfloat16
+    seen = []
+    state.model.register_forward_hook(lambda module, inputs, output: seen.append(output.dtype))
+    train_step(train_state=state, epoch_spec=config, batch=(torch.randn(4, 2), torch.randn(4, 1)), epoch=1, batch_index=0, seed=None)
+    assert seen == [torch.bfloat16]
+    assert state.model.weight.dtype == torch.float32

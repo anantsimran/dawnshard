@@ -47,6 +47,17 @@ class EpochSpec[M: Metrics]:
     reduce_metrics: MetricsReduceFn[M]
     train_probe: Optional[Probe] = None
     eval_probe: Optional[Probe] = None
+    # Batches per optimizer step. Gradients of `accumulation_steps` batches add up
+    # before one step, so the effective batch grows without the activation memory.
+    # A loader whose length is not a multiple leaves its last partial group unstepped.
+    accumulation_steps: int = 1
+    # Run forward and loss under torch.autocast with this dtype (e.g. torch.bfloat16);
+    # weights, gradients, and the optimizer stay in their own dtype.
+    autocast_dtype: Optional[torch.dtype] = None
+    # Training FLOPs per target (per token for a language model). When set, each epoch
+    # record gains targets_per_s; with peak_flops (the device's dense peak) also mfu.
+    flops_per_target: Optional[float] = None
+    peak_flops: Optional[float] = None
 
 
 @dataclass
@@ -91,3 +102,5 @@ class EpochRecord:
     system_metrics: SystemMetrics
     val_loss: Optional[float] = None
     val_metrics: Optional[Metrics] = None
+    targets_per_s: Optional[float] = None
+    mfu: Optional[float] = None

@@ -31,6 +31,7 @@ import time
 from dataclasses import asdict, dataclass, replace
 from functools import partial
 from pathlib import Path
+from typing import Literal, cast
 from uuid import uuid4
 
 import torch
@@ -39,7 +40,9 @@ import torch.nn.functional as F
 from beartype import beartype
 from jaxtyping import Float, Int, jaxtyped
 from torch import nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn.parallel import DistributedDataParallel
+from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader, RandomSampler
 from training.constants import HISTORY_PATH, TEST_SEED, VAL_SEED
 from training.dataload.tokens import TokenWindows, lm_collate, write_tokens
@@ -49,7 +52,16 @@ from training.metrics.loss_only_metrics import (
     reduce_metrics,
 )
 from training.setup import DEVICE
+from training.train.losses import ChunkedCrossEntropy
 from training.train.model import EpochSpec, Metrics, TrainState
+from training.train.perf import (
+    Checkpointing,
+    ModelShape,
+    StepTimer,
+    flops_per_token,
+    predict_memory,
+    static_bytes,
+)
 from training.train.train_loop import fit
 from training.transformer.constants import D_MODEL, B, L, V
 
@@ -116,6 +128,21 @@ def count_parameters(config: Qwen3Config) -> int:
     embedding = config.vocab_size * d
     head = 0 if config.tie_word_embeddings else embedding
     return config.num_hidden_layers * per_layer + embedding + d + head
+
+
+def model_shape(config: Qwen3Config) -> ModelShape:
+    """Return the numbers `train.perf` predicts FLOPs and memory from."""
+    return ModelShape(
+        num_parameters=count_parameters(config=config),
+        num_layers=config.num_hidden_layers,
+        hidden_size=config.hidden_size,
+        num_heads=config.num_attention_heads,
+        num_kv_heads=config.num_key_value_heads,
+        head_dim=config.head_dim,
+        intermediate_size=config.intermediate_size,
+        vocab_size=config.vocab_size,
+        tied_head=config.tie_word_embeddings,
+    )
 
 
 def rope_tables(config: Qwen3Config) -> tuple[torch.Tensor, torch.Tensor]:
@@ -274,12 +301,17 @@ class Qwen3Block(nn.Module):
     over the tokens does not overfit. The residual stream is never normed inside a
     layer; `Qwen3.norm` normalizes it once after the last layer.
 
+    With `checkpoint_mlp`, training recomputes `mlp` in backward instead of saving
+    its four `intermediate_size`-wide activations: the selective form of activation
+    checkpointing, which drops the largest per-layer term for one extra MLP forward.
+
     `forward` holds no state between calls.
     """
 
-    def __init__(self, config: Qwen3Config) -> None:
+    def __init__(self, config: Qwen3Config, checkpoint_mlp: bool = False) -> None:
         """Build the attention and MLP sublayers and their input norms."""
         super().__init__()
+        self.checkpoint_mlp = checkpoint_mlp
         d, eps = config.hidden_size, config.rms_norm_eps
         self.input_layernorm = nn.RMSNorm(normalized_shape=d, eps=eps)
         self.self_attn = Qwen3Attention(config=config)
@@ -289,7 +321,11 @@ class Qwen3Block(nn.Module):
     def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
         """Return the layer output for `x`; `cos` and `sin` as `Qwen3Attention.forward`."""
         x = x + self.self_attn(x=self.input_layernorm(x), cos=cos, sin=sin)  # noqa: NAR001
-        return x + self.mlp(x=self.post_attention_layernorm(x))  # noqa: NAR001
+        normed = self.post_attention_layernorm(x)  # noqa: NAR001
+        if self.checkpoint_mlp and self.training:
+            mlp_out = checkpoint(self.mlp, normed, use_reentrant=False)  # noqa: NAR001
+            return x + cast(torch.Tensor, mlp_out)  # noqa: NAR001
+        return x + self.mlp(x=normed)
 
 
 class Qwen3(nn.Module):
@@ -318,9 +354,14 @@ class Qwen3(nn.Module):
         ▼  (B*L, vocab)
     ```
 
-    `hidden_states` stops before the head. A loss that never materializes the full
-    `(B*L, vocab)` logits, such as a chunked cross-entropy, starts there and reads
-    `lm_head_weight`.
+    `hidden_states` stops before the head. With `output="hidden"`, `forward` returns
+    those states flattened to `(B*L, d_model)` instead of logits, for a loss that never
+    materializes the full `(B*L, vocab)` logits, such as `ChunkedCrossEntropy`, which
+    reads `lm_head_weight` itself.
+
+    `checkpointing` trades compute for activation memory in training: "full" saves
+    only each layer's input and recomputes the layer in backward (about one extra
+    forward); "selective" recomputes only the MLP (see `Qwen3Block`).
 
     The RoPE tables are non-persistent buffers: they follow `.to(device)` but are a
     pure function of the config, so they stay out of `state_dict`.
@@ -331,16 +372,31 @@ class Qwen3(nn.Module):
     rope_cos: torch.Tensor
     rope_sin: torch.Tensor
 
-    def __init__(self, config: Qwen3Config) -> None:
-        """Build the embedding, the layers, the final norm, the head, and the RoPE tables."""
+    def __init__(
+        self,
+        config: Qwen3Config,
+        checkpointing: Checkpointing = "none",
+        output: Literal["logits", "hidden"] = "logits",
+    ) -> None:
+        """Build the embedding, the layers, the final norm, the head, and the RoPE tables.
+
+        Args:
+            checkpointing: "none", "full" (each layer), or "selective" (each MLP).
+            output: What `forward` returns: flat logits, or flat hidden states.
+        """
         super().__init__()
         self.config = config
+        self.checkpointing = checkpointing
+        self.output = output
         self.embed_tokens = nn.Embedding(
             num_embeddings=config.vocab_size, embedding_dim=config.hidden_size
         )
         self.layers = nn.ModuleList(
-            modules=[Qwen3Block(config=config) for _ in range(config.num_hidden_layers)]  # noqa: NAR001
-        )  # noqa: NAR001
+            modules=[
+                Qwen3Block(config=config, checkpoint_mlp=checkpointing == "selective")
+                for _ in range(config.num_hidden_layers)  # noqa: NAR001
+            ]
+        )
         self.norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.rms_norm_eps)
         self.lm_head = (
             None
@@ -375,15 +431,23 @@ class Qwen3(nn.Module):
         sin = self.rope_sin[:length].to(dtype=self.embed_tokens.weight.dtype)
         x = self.embed_tokens(input_ids)  # noqa: NAR001
         for layer in self.layers:
-            x = layer(x=x, cos=cos, sin=sin)
+            if self.checkpointing == "full" and self.training:
+                x = checkpoint(layer, x, cos, sin, use_reentrant=False)  # noqa: NAR001
+            else:
+                x = layer(x=x, cos=cos, sin=sin)
         return self.norm(x)  # noqa: NAR001
 
     @jaxtyped(typechecker=beartype)
     def forward(
         self, input_ids: Int[torch.Tensor, f"{B} {L}"]
     ) -> Float[torch.Tensor, f"{B}*{L} {V}"]:
-        """Return next-token logits for every position, flattened to `(B*L, vocab)`."""
+        """Return next-token logits for every position, flattened to `(B*L, vocab)`.
+
+        With `output="hidden"`, return the hidden states flattened to `(B*L, d_model)`.
+        """
         hidden = self.hidden_states(input_ids=input_ids)
+        if self.output == "hidden":
+            return hidden.reshape(-1, self.config.hidden_size)  # noqa: NAR001
         return (hidden @ self.lm_head_weight.T).reshape(-1, self.config.vocab_size)  # noqa: NAR001
 
 
@@ -407,28 +471,54 @@ def init_distributed() -> tuple[int, int, torch.device]:
     return rank, world, DEVICE if world == 1 else torch.device("cpu")  # noqa: NAR001
 
 
-def record_first_step(telemetry: dict, model, x, y, predicted, epoch, batch_index, seed) -> None:  # noqa: NAR002
-    """Train probe: stamp the first finished step's wall time into `telemetry`."""
+SDPA_BACKENDS = {
+    "auto": [
+        SDPBackend.FLASH_ATTENTION,
+        SDPBackend.EFFICIENT_ATTENTION,
+        SDPBackend.CUDNN_ATTENTION,
+        SDPBackend.MATH,
+    ],
+    "flash": [SDPBackend.FLASH_ATTENTION],
+    "efficient": [SDPBackend.EFFICIENT_ATTENTION],
+    "math": [SDPBackend.MATH],
+}
+
+
+def record_steps(
+    telemetry: dict, timer: StepTimer, model, x, y, predicted, epoch, batch_index, seed
+) -> None:  # noqa: NAR002
+    """Train probe: stamp the first step into `telemetry` and every step into `timer`."""
     if batch_index == 0 and epoch == 1:
         telemetry["first_step"] = time.time()
+    timer(model, x, y, predicted, epoch, batch_index, seed)  # noqa: NAR001
 
 
 def parse_args() -> argparse.Namespace:
     """Parse the training command line; see the module docstring."""
     parser = argparse.ArgumentParser(description="Train a Qwen3-style decoder for N steps.")
-    parser.add_argument("--config", default="small", choices=list(CONFIGS))  # noqa: NAR001
-    parser.add_argument("--tokens", type=Path, help="Flat uint32 token file.")  # noqa: NAR001
-    parser.add_argument("--synthetic", action="store_true", help="Random tokens instead.")  # noqa: NAR001
-    parser.add_argument("--steps", type=int, default=200)  # noqa: NAR001
-    parser.add_argument("--batch-size", type=int, default=8)  # noqa: NAR001
-    parser.add_argument("--seq-len", type=int, default=256)  # noqa: NAR001
-    parser.add_argument("--lr", type=float, default=3e-4)  # noqa: NAR001
-    parser.add_argument("--seed", type=int, default=0)  # noqa: NAR001
+    add = parser.add_argument
+    add("--config", default="small", choices=list(CONFIGS))  # noqa: NAR001
+    add("--tokens", type=Path, help="Flat uint32 token file.")  # noqa: NAR001
+    add("--synthetic", action="store_true", help="Random tokens instead.")  # noqa: NAR001
+    add("--steps", type=int, default=200, help="Optimizer steps.")  # noqa: NAR001
+    add("--batch-size", type=int, default=8, help="Sequences per micro-batch.")  # noqa: NAR001
+    add("--accumulation", type=int, default=1, help="Micro-batches per step.")  # noqa: NAR001
+    add("--seq-len", type=int, default=256)  # noqa: NAR001
+    add("--lr", type=float, default=3e-4)  # noqa: NAR001
+    add("--seed", type=int, default=0)  # noqa: NAR001
+    add("--precision", default="fp32", choices=["fp32", "tf32", "bf16"])  # noqa: NAR001
+    add("--sdpa", default="auto", choices=list(SDPA_BACKENDS))  # noqa: NAR001
+    add("--fused-adamw", action="store_true")  # noqa: NAR001
+    add("--compile", action="store_true")  # noqa: NAR001
+    add("--checkpointing", default="none", choices=["none", "full", "selective"])  # noqa: NAR001
+    add("--chunked-ce", action="store_true", help="Loss from hidden states, in chunks.")  # noqa: NAR001
+    add("--peak-tflops", type=float, help="Dense peak of the device, for MFU.")  # noqa: NAR001
+    add("--memory-snapshot", type=Path, help="CUDA only: write a memory snapshot here.")  # noqa: NAR001
     return parser.parse_args()
 
 
 def build_loader(args: argparse.Namespace, config: Qwen3Config, rank: int) -> DataLoader:
-    """Return a loader of exactly `args.steps` batches, drawn with a per-rank seed.
+    """Return a loader of exactly `steps * accumulation` micro-batches, seeded per rank.
 
     Side effects:
         With `--synthetic`, writes a random token file under HISTORY_PATH.
@@ -448,7 +538,7 @@ def build_loader(args: argparse.Namespace, config: Qwen3Config, rank: int) -> Da
     sampler = RandomSampler(
         data_source=dataset,
         replacement=True,
-        num_samples=args.steps * args.batch_size,
+        num_samples=args.steps * args.accumulation * args.batch_size,
         generator=torch.Generator().manual_seed(args.seed + rank),  # noqa: NAR001
     )
     return DataLoader(
@@ -456,46 +546,126 @@ def build_loader(args: argparse.Namespace, config: Qwen3Config, rank: int) -> Da
     )
 
 
-def main() -> None:
-    """Train for `--steps` steps, alone or under `torchrun`, and write launch telemetry."""
-    args = parse_args()
-    rank, world, device = init_distributed()
-    telemetry: dict = {"process_start": PROCESS_START, "process_group_ready": time.time()}
-    config = CONFIGS[args.config]
-    torch.manual_seed(seed=args.seed)
-    model: nn.Module = Qwen3(config=config).to(device=device)
-    if world > 1:
-        model = DistributedDataParallel(module=model)
-    optimizer = torch.optim.AdamW(params=model.parameters(), lr=args.lr)
-    state = TrainState(model=model, optimizer=optimizer, criterion=nn.CrossEntropyLoss())
-    loader = build_loader(args=args, config=config, rank=rank)
-    spec = EpochSpec(
+def build_state(
+    args: argparse.Namespace, config: Qwen3Config, device: torch.device, world: int
+) -> TrainState:
+    """Build the model, optimizer, and loss the flags ask for.
+
+    Side effects:
+        Sets the global TF32 matmul flag; draws the weight init from the global RNG.
+    """
+    torch.backends.cuda.matmul.allow_tf32 = args.precision == "tf32"
+    qwen = Qwen3(
+        config=config,
+        checkpointing=args.checkpointing,
+        output="hidden" if args.chunked_ce else "logits",
+    ).to(device=device)
+    criterion: nn.Module = (
+        ChunkedCrossEntropy(head=qwen) if args.chunked_ce else nn.CrossEntropyLoss()
+    )
+    model: nn.Module = DistributedDataParallel(module=qwen) if world > 1 else qwen
+    if args.compile:
+        model = cast(nn.Module, torch.compile(model=model))  # noqa: NAR001
+    optimizer = torch.optim.AdamW(
+        params=qwen.parameters(), lr=args.lr, fused=True if args.fused_adamw else None
+    )
+    return TrainState(model=model, optimizer=optimizer, criterion=criterion)
+
+
+def build_spec(
+    args: argparse.Namespace, config: Qwen3Config, device: torch.device, probe: partial
+) -> EpochSpec:
+    """Return the policy: accumulation, autocast, and the FLOPs that make MFU."""
+    return EpochSpec(
         device=device,
         metrics_type=Metrics,
         calculate_metrics=calculate_metrics,
         accumulate_metrics=accumulate_metrics,
         reduce_metrics=reduce_metrics,
-        train_probe=partial(record_first_step, telemetry),  # noqa: NAR001
+        train_probe=probe,
+        accumulation_steps=args.accumulation,
+        autocast_dtype=torch.bfloat16 if args.precision == "bf16" else None,
+        flops_per_target=flops_per_token(shape=model_shape(config=config), seq_len=args.seq_len),
+        peak_flops=args.peak_tflops * 1e12 if args.peak_tflops else None,
     )
+
+
+def main() -> None:
+    """Train for `--steps` steps, alone or under `torchrun`; write launch and perf records."""
+    args = parse_args()
+    rank, world, device = init_distributed()
+    telemetry: dict = {"process_start": PROCESS_START, "process_group_ready": time.time()}
+    config = CONFIGS[args.config]
+    torch.manual_seed(seed=args.seed)
+    state = build_state(args=args, config=config, device=device, world=world)
+    tokens_per_step = args.batch_size * args.seq_len * args.accumulation
+    timer = StepTimer(accumulation_steps=args.accumulation, tokens_per_step=tokens_per_step)
+    probe = partial(record_steps, telemetry, timer)  # noqa: NAR001
     run_id = os.environ.get("DAWNSHARD_RUN_ID") or str(uuid4())  # noqa: NAR001
-    fit(
-        state=state,
-        epoch_spec=spec,
-        train_loader=loader,
-        val_loader=loader,
-        num_epochs=1,
-        val_epoch_list=[],
-        train_seed=args.seed,
-        val_seed=VAL_SEED,
-        test_seed=TEST_SEED,
-        history_path=HISTORY_PATH / f"{run_id}.json"
-        if rank == 0
-        else HISTORY_PATH / f"{run_id}.rank{rank}.json",
-    )
+    snapshot = args.memory_snapshot is not None and torch.cuda.is_available()
+    if snapshot:
+        torch.cuda.memory._record_memory_history(max_entries=100_000)
+    with sdpa_kernel(backends=SDPA_BACKENDS[args.sdpa]):
+        fit(
+            state=state,
+            epoch_spec=build_spec(args=args, config=config, device=device, probe=probe),
+            train_loader=build_loader(args=args, config=config, rank=rank),
+            val_loader=build_loader(args=args, config=config, rank=rank),
+            num_epochs=1,
+            val_epoch_list=[],
+            train_seed=args.seed,
+            val_seed=VAL_SEED,
+            test_seed=TEST_SEED,
+            history_path=HISTORY_PATH
+            / (f"{run_id}.json" if rank == 0 else f"{run_id}.rank{rank}.json"),
+        )
+    if snapshot:
+        torch.cuda.memory._dump_snapshot(filename=str(args.memory_snapshot))  # noqa: NAR001
     if rank == 0:
         write_launch_telemetry(run_id=run_id, telemetry=telemetry, config=config, world=world)
+        write_perf_record(run_id=run_id, args=args, config=config, state=state, timer=timer)
     if dist.is_initialized():
         dist.destroy_process_group()
+
+
+def write_perf_record(
+    run_id: str, args: argparse.Namespace, config: Qwen3Config, state: TrainState, timer: StepTimer
+) -> None:
+    """Write predicted and measured memory, tokens/s, and MFU to `<run_id>.perf.json`.
+
+    The prediction uses the byte counts the flags imply: fp32 weights, grads, and
+    Adam moments always (autocast leaves them in fp32), 2-byte activations under
+    bf16, fp32 logits, and no logits term with the chunked loss.
+
+    Side effects:
+        Writes the file.
+    """
+    shape = model_shape(config=config)
+    predicted = predict_memory(
+        shape=shape,
+        tokens=args.batch_size * args.seq_len,
+        activation_bytes=2 if args.precision == "bf16" else 4,
+        checkpointing=args.checkpointing,
+        chunked_loss=args.chunked_ce,
+    )
+    tokens_per_s = timer.tokens_per_s()
+    flops = flops_per_token(shape=shape, seq_len=args.seq_len)
+    measured = {"static_bytes": static_bytes(model=state.model, optimizer=state.optimizer)}
+    if torch.cuda.is_available():
+        measured["peak_allocated_bytes"] = torch.cuda.max_memory_allocated()
+        measured["peak_reserved_bytes"] = torch.cuda.max_memory_reserved()
+    peak = args.peak_tflops * 1e12 if args.peak_tflops else None
+    payload = {
+        "flags": {key: str(value) for key, value in vars(args).items()},  # noqa: NAR001
+        "predicted": {**asdict(obj=predicted), "total": predicted.total},
+        "measured": measured,
+        "flops_per_token": flops,
+        "tokens_per_s": tokens_per_s,
+        "mfu": tokens_per_s * flops / peak if tokens_per_s and peak else None,
+        "device": torch.cuda.get_device_name() if torch.cuda.is_available() else str(DEVICE),  # noqa: NAR001
+        "torch": torch.__version__,
+    }
+    (HISTORY_PATH / f"{run_id}.perf.json").write_text(data=json.dumps(obj=payload, indent=2))
 
 
 def write_launch_telemetry(run_id: str, telemetry: dict, config: Qwen3Config, world: int) -> None:

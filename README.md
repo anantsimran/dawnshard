@@ -104,8 +104,9 @@ the caller; the checkpoint does not save it.
 ### Policy: `EpochSpec`
 
 Same file. It holds `device`, a `Metrics` type, the three functions that score a
-batch and reduce an epoch, and two optional probes. The loop reads it and never
-writes to it. Supply `Metrics` and the functions in
+batch and reduce an epoch, two optional probes, and how a batch is run:
+`accumulation_steps`, `autocast_dtype`, and, for throughput, `flops_per_target` and
+`peak_flops`. The loop reads it and never writes to it. Supply `Metrics` and the functions in
 [loss_only_metrics.py](app/src/training/metrics/loss_only_metrics.py) to use the same
 loop for a regressor. Set `train_probe` to capture gradient norms. Nothing in
 `EpochSpec` names the model or dataset it will drive.
@@ -299,7 +300,9 @@ Three functions build it:
 1. `fit` makes an `EpochRecord` for each epoch: the reduced training metrics, the
    validation metrics if the epoch had a validation pass, the wall-clock duration,
    and a `SystemMetrics` snapshot from psutil and torch with CPU percent, RAM used,
-   and peak GPU memory on CUDA or current allocation on MPS.
+   and peak GPU memory on CUDA or current allocation on MPS. When the `EpochSpec`
+   sets `flops_per_target`, the record also carries `targets_per_s`, and with
+   `peak_flops`, `mfu`; otherwise neither appears.
 1. `serialize_epoch_record` flattens that into one dict, hoisting the system fields to
    the top level and dropping anything unset.
 1. When `fit` returns, `save_history` writes the records to
@@ -393,7 +396,7 @@ ______________________________________________________________________
 
 | Part | What it is | Where |
 |---|---|---|
-| Training loop | `fit`, `profiled_fit`, `run_epoch`, `train_step`, `eval_step`; checkpoints, probes, and a history file per run | [train/](app/src/training/train/) |
+| Training loop | `fit`, `profiled_fit`, `run_epoch`, `train_step`, `eval_step`; gradient accumulation and autocast as policy; checkpoints, probes, and a history file per run; FLOPs, MFU, and memory predictions; a chunked cross-entropy that never builds full logits | [train/](app/src/training/train/) |
 | Metrics | loss-only; classification with accuracy and macro-averaged precision and recall; masked-token accuracy and perplexity for per-position targets; each as three functions the loop injects | [metrics/](app/src/training/metrics/) |
 | Attention | scaled dot-product attention, multi-head self- and cross-attention with optional QK norm, fixed sinusoidal position encodings, pre-norm encoder and decoder blocks, padding and causal masks, a KV cache, and one decode loop with greedy and beam search; design notes and axis names in the [transformer README](app/src/training/transformer/README.md) | [transformer/](app/src/training/transformer/) |
 | Tokenizer | byte-level BPE, written from scratch, with an indexed max-heap so each merge updates pair counts in O(log n) | [common/](app/src/training/common/) |
@@ -402,7 +405,7 @@ ______________________________________________________________________
 | Experiments | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation and its scale study, each a grid search ranked by best val loss; the sandboxed MBPP benchmark per runtime | [experiments/](app/src/training/experiments/) |
 | Compute backends | one immutable `JobSpec` (image pinned by digest) submitted unchanged to a local `torchrun`, a Kubernetes JobSet (Kueue-ready), a KubeRay RayJob running Ray Train, or a SageMaker training job; launch telemetry and cost arithmetic | [launch/](app/src/training/launch/), [infra/](infra/) |
 | Environments | a Gymnasium-shaped coding environment for LLM agents: subprocess, runc and gVisor sandboxes behind one interface, a warm pool, a hash-checked verifier with reward-hacking defenses, infra-vs-task failure classification with retries, replayable episode state, and a probe suite | [env/](app/src/training/env/) |
-| Visualization | a run's metrics, two runs side by side, a model's autograd graph, attention heatmaps, BPE sequence length against merges | [viz/](app/src/training/viz/) |
+| Visualization | a run's metrics, two runs side by side, a model's autograd graph, attention heatmaps, BPE sequence length against merges, kernels on the device's roofline | [viz/](app/src/training/viz/) |
 | Analytics | BPE length stats (mean, min, max, percentiles) for each Multi30k EN split | [analytics/](app/src/training/analytics/) |
 | Tests | a pytest suite; `attention` is checked against `torch.nn.functional.scaled_dot_product_attention` | [tests/](app/tests/) |
 | Tutorials | theory and revision notes from tensors to attention masks, published as a website | [tutorials/](tutorials/) |
@@ -747,6 +750,39 @@ profiler slows down every step it records, so you pick which epochs pay for it. 
 the regular history file keeps `fit`'s format, so profiled runs compare directly with
 normal ones.
 
+### Accumulate gradients, autocast, and measure MFU
+
+```python
+from training.train.perf import flops_per_token
+
+epoch_spec = EpochSpec(
+    device=device,
+    metrics_type=Metrics,
+    calculate_metrics=calculate_metrics,
+    accumulate_metrics=accumulate_metrics,
+    reduce_metrics=reduce_metrics,
+    accumulation_steps=8,
+    autocast_dtype=torch.bfloat16,
+    flops_per_target=flops_per_token(shape=shape, seq_len=2048),
+    peak_flops=165e12,
+)
+```
+
+With `accumulation_steps=k`, `train_step` zeroes gradients on every k-th batch,
+divides each batch's loss by k before `backward`, and steps the optimizer after the
+k-th, so k micro-batches act as one batch of k times the size without its activation
+memory. The loader's length should be a multiple of k; a trailing partial group is
+never stepped. `autocast_dtype` runs the forward and the loss under `torch.autocast`
+in both steps; weights, gradients, and optimizer state keep their own dtype.
+
+`flops_per_target` turns on throughput in the history: each record gains
+`targets_per_s` (targets are tokens for a language model), and with `peak_flops`
+also `mfu`, the share of the device's dense peak the model's FLOPs reach.
+[perf.py](app/src/training/train/perf.py) computes FLOPs per token as `6N + attention` from a `ModelShape`, and predicts static, activation, and logits memory
+term by term, so both can be written down before a run and checked after it. The
+epoch figure includes warmup; `StepTimer`, used as a train probe, measures the
+steady state after the first steps.
+
 ### Save and restore a checkpoint
 
 ```python
@@ -852,6 +888,14 @@ uv run python app/src/training/experiments/sandbox_benchmark.py oracle --runtime
 # Train the Qwen3-style decoder on 2 local ranks through the launch package
 # (BACKEND=k8s|ray|sagemaker with a digest-pinned spec; DRY_RUN=1 prints the manifest)
 make launch BACKEND=local SPEC=infra/jobs/qwen3_tiny_local.json
+
+# Pretrain the Qwen3-0.6B architecture with the single-GPU performance knobs; writes
+# <run>.perf.json with predicted and measured memory, tokens/s, and MFU
+uv run python -m training.model.qwen3 --config 0.6b --tokens <tokens.bin> --seq-len 2048 \
+    --batch-size 1 --accumulation 32 --steps 300 --precision bf16 --peak-tflops 165
+
+# Place five kernels of a training step on the device's roofline
+uv run python app/src/training/viz/roofline.py --peak-tflops 165 --bandwidth-gbs 1008
 
 # Plot one run's per-epoch metrics
 uv run python app/src/training/viz/plot_metrics.py app/history/<run-id>.json
@@ -1039,6 +1083,8 @@ dawnshard/
 │   │       │   ├── train_loop.py     # fit/profiled_fit/run_epoch/step
 │   │       │   ├── environment.py    # per-epoch CPU/RAM/GPU snapshot
 │   │       │   ├── serialization.py  # TrainState, EpochSpec, EpochRecord → history-JSON dicts
+│   │       │   ├── perf.py           # FLOPs/token, MFU, memory prediction, intensity, StepTimer
+│   │       │   ├── losses.py         # ChunkedCrossEntropy: LM loss without full logits
 │   │       │   └── utils.py          # save_state, save_history
 │   │       ├── metrics/              # Metrics subclasses + calculate/accumulate/reduce functions
 │   │       ├── transformer/          # attention built from scratch
@@ -1090,7 +1136,7 @@ dawnshard/
 │   │       │   ├── multi30ken_predictor_ablation.py # sweep, follow-ups, ablation
 │   │       │   ├── multi30k_translator_ablation.py  # component, depth, LR, language ablation
 │   │       │   └── sandbox_benchmark.py # MBPP episodes per sandbox runtime: oracle, agent, replay, probes
-│   │       ├── viz/                  # metrics, run comparison, model graph, attention, BPE length
+│   │       ├── viz/                  # metrics, run comparison, model graph, attention, BPE length, roofline
 │   │       ├── analytics/            # printed stats: Multi30k EN BPE length percentiles
 │   │       ├── utils/                # git commit, log_elapsed timing
 │   │       ├── setup.py              # device selection + wandb init

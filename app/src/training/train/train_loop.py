@@ -21,6 +21,34 @@ Batch = tuple[Tensor, Tensor]
 StepFn = Callable[["TrainState", "EpochSpec", Batch, int, int, Optional[int]], "Metrics"]
 
 
+def _autocast(epoch_spec: EpochSpec) -> torch.autocast:
+    """Autocast to `epoch_spec.autocast_dtype` on the spec's device, or a disabled one."""
+    return torch.autocast(
+        device_type=epoch_spec.device.type,
+        dtype=epoch_spec.autocast_dtype,
+        enabled=epoch_spec.autocast_dtype is not None,
+    )
+
+
+def throughput(
+    epoch_spec: EpochSpec, train_metrics: Metrics, seconds: float
+) -> dict[str, Optional[float]]:
+    """Return `targets_per_s` and `mfu` for an epoch record, or Nones when not asked for.
+
+    Only computed when `epoch_spec.flops_per_target` is set, so runs that never asked
+    for throughput keep their history format.
+    """
+    if epoch_spec.flops_per_target is None:
+        return {"targets_per_s": None, "mfu": None}
+    targets_per_s = train_metrics.count / seconds
+    mfu = (
+        targets_per_s * epoch_spec.flops_per_target / epoch_spec.peak_flops
+        if epoch_spec.peak_flops
+        else None
+    )
+    return {"targets_per_s": targets_per_s, "mfu": mfu}
+
+
 def train_step(
     train_state: TrainState,
     epoch_spec: EpochSpec,
@@ -29,11 +57,17 @@ def train_step(
     batch_index: int,
     seed: Optional[int],
 ) -> Metrics:
-    """One optimization step. Returns batch metrics with mean batch loss and batch size.
+    """One forward and backward; steps the optimizer at the end of each accumulation group.
 
-    If `epoch_spec.train_probe` is set, it is called after the optimizer step with
-    this batch's input, target, detached predictions, `epoch`, `batch_index`, and
-    `seed`.
+    Returns batch metrics with the mean batch loss and the batch size. With
+    `epoch_spec.accumulation_steps = k`, gradients are zeroed on batches 0, k, 2k, ...,
+    each batch's loss is divided by k before backward so the summed gradient is the
+    mean over the group, and the optimizer steps after batches k-1, 2k-1, ....
+    Forward and loss run under autocast when `epoch_spec.autocast_dtype` is set.
+
+    If `epoch_spec.train_probe` is set, it is called after the backward (and any
+    optimizer step) with this batch's input, target, detached predictions, `epoch`,
+    `batch_index`, and `seed`.
 
     Args:
         epoch: 1-based epoch number, passed through to the probe.
@@ -42,11 +76,15 @@ def train_step(
             training pass. The step draws no randomness of its own.
     """
     input_tensor, target_tensor = (tensor.to(device=epoch_spec.device) for tensor in batch)
-    train_state.optimizer.zero_grad(set_to_none=True)
-    predicted = train_state.model(input_tensor)  # noqa: NAR001
-    loss = train_state.criterion(predicted, target_tensor)  # noqa: NAR001
-    loss.backward()
-    train_state.optimizer.step()
+    accumulation = epoch_spec.accumulation_steps
+    if batch_index % accumulation == 0:
+        train_state.optimizer.zero_grad(set_to_none=True)
+    with _autocast(epoch_spec=epoch_spec):
+        predicted = train_state.model(input_tensor)  # noqa: NAR001
+        loss = train_state.criterion(predicted, target_tensor)  # noqa: NAR001
+    (loss / accumulation).backward()
+    if (batch_index + 1) % accumulation == 0:
+        train_state.optimizer.step()
     predicted = predicted.detach()
     metrics = epoch_spec.calculate_metrics(predicted, target_tensor)  # noqa: NAR001
     metrics.loss = loss.item()
@@ -85,8 +123,9 @@ def eval_step(
             randomness of its own.
     """
     input_tensor, target_tensor = (tensor.to(device=epoch_spec.device) for tensor in batch)
-    predicted = train_state.model(input_tensor)  # noqa: NAR001
-    loss = train_state.criterion(predicted, target_tensor)  # noqa: NAR001
+    with _autocast(epoch_spec=epoch_spec):
+        predicted = train_state.model(input_tensor)  # noqa: NAR001
+        loss = train_state.criterion(predicted, target_tensor)  # noqa: NAR001
     metrics = epoch_spec.calculate_metrics(predicted, target_tensor)  # noqa: NAR001
     metrics.loss = loss.item()
     metrics.count = target_tensor.size(dim=0)
@@ -244,6 +283,11 @@ def fit(
             system_metrics=collect_system_metrics(),
             val_loss=val_loss,
             val_metrics=val_metrics,
+            **throughput(
+                epoch_spec=epoch_spec,
+                train_metrics=train_metrics,
+                seconds=epoch_duration_seconds,
+            ),
         )
         record_dict = serialize_epoch_record(record=epoch_record)
         if wandb_run is not None:
@@ -447,6 +491,11 @@ def profiled_fit(
             system_metrics=collect_system_metrics(),
             val_loss=val_loss,
             val_metrics=val_metrics,
+            **throughput(
+                epoch_spec=epoch_spec,
+                train_metrics=train_metrics,
+                seconds=epoch_duration_seconds,
+            ),
         )
         record_dict = serialize_epoch_record(record=epoch_record)
         if wandb_run is not None:

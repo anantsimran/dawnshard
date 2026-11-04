@@ -215,7 +215,7 @@ accident.
 | `transformer/` | attention, the encoder block, masks, probes, axis names |
 | `common/` | the BPE tokenizer and the indexed max-heap it trains with |
 | `launch/` | `JobSpec`, the `Backend` interface, and the local, Kubernetes JobSet, KubeRay, and SageMaker adapters |
-| `parallel/` | process-group setup, naive and bucketed DDP by hand, ZeRO-2 by hand, and one function that applies FSDP2 |
+| `parallel/` | process-group setup, naive and bucketed DDP, ZeRO-2, tensor and pipeline parallelism by hand, FSDP2, and one mesh for every combination |
 | `env/` | sandboxed coding episodes: environment, sandbox runtimes, verifier, failure classifier, agent loop, probes |
 | `dataload/` | dataset caches, the AG News, Multi30k, and MBPP pipelines, token shards and the streaming loader |
 | `model/` | the MNIST classifiers, AG News classifier, Multi30k predictor and translator, and the Qwen3 decoder |
@@ -406,7 +406,7 @@ ______________________________________________________________________
 | Data | MNIST through torchvision; AG News and Multi30k sampled, tokenized, and cached; offline tokenization into uint32 shards and a streaming loader with a deterministic global order and exact resume across world sizes; how a `DataLoader` is built in the [dataload README](app/src/training/dataload/README.md) | [dataload/](app/src/training/dataload/), [mnist.py](app/src/training/model/mnist.py) |
 | Models | three MNIST classifiers, an AG News transformer classifier, a Multi30k masked-token predictor, a Multi30k encoder-decoder translator that decodes a saved bundle and scores it with BLEU, and a Qwen3-style decoder (RMSNorm, RoPE, GQA with QK-norm, SwiGLU, tied head) built from the official config fields | [model/](app/src/training/model/) |
 | Experiments | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation and its scale study, each a grid search ranked by best val loss; the sandboxed MBPP benchmark per runtime | [experiments/](app/src/training/experiments/) |
-| Data parallelism | DDP twice by hand (naive, and bucketed with all-reduces overlapped with backward), ZeRO-2 by hand, FSDP2 and HSDP through `apply_fsdp`; `fit` runs unchanged under `torchrun`, writing history from rank 0 only | [parallel/](app/src/training/parallel/) |
+| Parallelism | DDP twice by hand (naive, and bucketed with all-reduces overlapped with backward), ZeRO-2 by hand, FSDP2 and HSDP through `apply_fsdp`; tensor parallelism by hand (column/row linears, vocabulary-parallel embedding and cross-entropy, sequence-parallel primitives) and through DTensor; pipeline schedules as data (GPipe, 1F1B) with a simulator, an executor, and a FLOP-balanced partitioner; `fit` runs unchanged under `torchrun`, writing history from rank 0 only | [parallel/](app/src/training/parallel/) |
 | Compute backends | one immutable `JobSpec` (image pinned by digest) submitted unchanged to a local `torchrun`, a Kubernetes JobSet (Kueue-ready), a KubeRay RayJob running Ray Train, or a SageMaker training job; launch telemetry and cost arithmetic | [launch/](app/src/training/launch/), [infra/](infra/) |
 | Environments | a Gymnasium-shaped coding environment for LLM agents: subprocess, runc and gVisor sandboxes behind one interface, a warm pool, a hash-checked verifier with reward-hacking defenses, infra-vs-task failure classification with retries, replayable episode state, and a probe suite | [env/](app/src/training/env/) |
 | Visualization | a run's metrics, two runs side by side, a model's autograd graph, attention heatmaps, BPE sequence length against merges, kernels on the device's roofline | [viz/](app/src/training/viz/) |
@@ -912,6 +912,10 @@ uv run torchrun --standalone --nproc-per-node=2 -m training.model.qwen3 --config
 # at step 137 on 4 and 2 ranks, and data stall with and without pre-tokenized shards
 uv run python app/src/training/experiments/data_loading.py all
 
+# Tensor-parallel loss parity on 2 CPU ranks, pipeline bubble vs (p-1)/(m+p-1),
+# FLOP-balanced stages for Qwen3-1.7B, and predicted TP communication per link
+uv run python app/src/training/experiments/tp_pp.py all
+
 # Place five kernels of a training step on the device's roofline
 uv run python app/src/training/viz/roofline.py --peak-tflops 165 --bandwidth-gbs 1008
 
@@ -1142,12 +1146,15 @@ dawnshard/
 │   │       │   ├── ag_news_classifier.py   # text classifier and attention probe
 │   │       │   ├── multi30ken_predictor.py # masked-token predictor and its single run
 │   │       │   ├── multi30k_translator.py  # encoder-decoder translator, its single run, bundle, decode + BLEU
-│   │       │   └── qwen3.py                # Qwen3-style decoder from a config; torchrun training entry point
-│   │       ├── parallel/             # data parallelism; train/ never imports it
+│   │       │   └── qwen3.py                # Qwen3 decoder, its TP plans, and the torchrun training entry point
+│   │       ├── parallel/             # data, tensor, and pipeline parallelism; train/ never imports it
 │   │       │   ├── process_group.py  # join the torchrun group, rank-tagged logs, weight checksum
 │   │       │   ├── ddp.py            # NaiveDDP, BucketedDDP (async buckets under backward), no_sync
 │   │       │   ├── zero.py           # Zero2AdamW: per-parameter owners, fp32 masters, sharded Adam
-│   │       │   └── fsdp.py           # apply_fsdp: fully_shard per block then root; HSDP mesh
+│   │       │   ├── fsdp.py           # apply_fsdp: fully_shard per block then root; HSDP mesh
+│   │       │   ├── tensor.py         # column/row parallel linears, vocab-parallel embedding and loss
+│   │       │   ├── pipeline.py       # GPipe/1F1B schedules as data, simulator, partitioner, executor
+│   │       │   └── mesh.py           # ParallelismSpec → DeviceMesh, TP innermost, PP outermost
 │   │       ├── launch/               # one JobSpec on local, Kubernetes, Ray, and SageMaker
 │   │       │   ├── spec.py           # JobSpec: digest-pinned image, module, width, data and checkpoint URIs
 │   │       │   ├── backend.py        # Backend interface, JobState, torchrun command, cost arithmetic
@@ -1161,7 +1168,8 @@ dawnshard/
 │   │       │   ├── multi30ken_predictor_ablation.py # sweep, follow-ups, ablation
 │   │       │   ├── multi30k_translator_ablation.py  # component, depth, LR, language ablation
 │   │       │   ├── sandbox_benchmark.py # MBPP episodes per sandbox runtime: oracle, agent, replay, probes
-│   │       │   └── data_loading.py   # loader audit, shuffle quality, bitwise resume, data stall
+│   │       │   ├── data_loading.py   # loader audit, shuffle quality, bitwise resume, data stall
+│   │       │   └── tp_pp.py          # TP parity, pipeline bubble, stage balance, TP comm prediction
 │   │       ├── viz/                  # metrics, run comparison, model graph, attention, BPE length, roofline
 │   │       ├── analytics/            # printed stats: Multi30k EN BPE length percentiles
 │   │       ├── utils/                # git commit, log_elapsed timing

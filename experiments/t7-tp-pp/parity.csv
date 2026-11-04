@@ -1,0 +1,3 @@
+plan,steps,step0_abs_loss_diff,max_abs_loss_diff,final_loss_tp,final_loss_single
+hand,50,4.77e-07,2.65e-04,6.236471,6.236206
+dtensor,50,0.00e+00,2.66e-04,6.236472,6.236206

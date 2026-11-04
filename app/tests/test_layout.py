@@ -40,6 +40,7 @@ ALLOWED_IMPORTS: dict[str, set[str]] = {
         "env",
         "metrics",
         "model",
+        "parallel",
         "setup",
         "train",
         "transformer",

@@ -1,0 +1,5 @@
+tp,interconnect,bytes_per_gpu_per_microstep_GB,predicted_comm_ms
+2,NVLink ~200 GB/s,1.88,9.4
+2,PCIe no P2P ~10 GB/s,1.88,187.9
+4,NVLink ~200 GB/s,2.82,14.1
+4,PCIe no P2P ~10 GB/s,2.82,281.9

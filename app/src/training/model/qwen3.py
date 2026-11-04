@@ -41,6 +41,8 @@ from beartype import beartype
 from jaxtyping import Float, Int, jaxtyped
 from loguru import logger
 from torch import nn
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel, parallelize_module
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.checkpoint import checkpoint
@@ -55,6 +57,13 @@ from training.metrics.loss_only_metrics import (
 from training.parallel.ddp import BucketedDDP, NaiveDDP, broadcast_parameters
 from training.parallel.fsdp import ParallelismSpec, apply_fsdp
 from training.parallel.process_group import init_process_group, parameter_checksum
+from training.parallel.tensor import (
+    ColumnParallelLinear,
+    CopyToTP,
+    RowParallelLinear,
+    VocabParallelCrossEntropy,
+    VocabParallelEmbedding,
+)
 from training.parallel.zero import Zero2AdamW
 from training.setup import DEVICE
 from training.train.losses import ChunkedCrossEntropy
@@ -492,7 +501,84 @@ class Qwen3(nn.Module):
         hidden = self.hidden_states(input_ids=input_ids)
         if self.output == "hidden":
             return hidden.reshape(-1, self.config.hidden_size)  # noqa: NAR001
-        return (hidden @ self.lm_head_weight.T).reshape(-1, self.config.vocab_size)  # noqa: NAR001
+        logits = hidden @ self.lm_head_weight.T  # a vocabulary shard under tensor parallelism
+        return logits.reshape(-1, logits.shape[-1])  # noqa: NAR001
+
+
+def parallelize_tensor_parallel(model: Qwen3, group: Optional[dist.ProcessGroup]) -> nn.Module:
+    """Shard a fully initialized `model` over a TP group by hand; return the loss to train with.
+
+    The plan, by Megatron's pattern: in every block, `q_proj`, `k_proj`, `v_proj`,
+    `gate_proj`, `up_proj` become column-parallel (each rank keeps whole heads and a
+    slice of the FFN), `o_proj` and `down_proj` row-parallel, so each block does one
+    all-reduce after attention and one after the MLP. The embedding becomes
+    vocabulary-parallel and, tied, is the LM head too; the final norm's output enters
+    the TP region so its gradient is summed, and the loss is the vocabulary-parallel
+    cross-entropy, so full logits never exist on one rank. The norms, QK-norms, and
+    RoPE stay replicated: they act per head or per position.
+
+    Raises:
+        ValueError: If the TP size does not divide heads, KV heads, FFN width, or vocab.
+
+    Side effects:
+        Replaces `model`'s layers in place and halves (thirds, ...) its head counts.
+    """
+    tp = dist.get_world_size(group=group)
+    config = model.config
+    for name, size in (
+        ("heads", config.num_attention_heads),
+        ("kv_heads", config.num_key_value_heads),
+        ("ffn", config.intermediate_size),
+        ("vocab", config.vocab_size),
+    ):
+        if size % tp:
+            raise ValueError(f"tp={tp} does not divide {name}={size}")  # noqa: NAR001
+    for block in model.layers:
+        attn, mlp = cast(Qwen3Block, block).self_attn, cast(Qwen3Block, block).mlp  # noqa: NAR001
+        layers = {
+            (attn, "q_proj"): ColumnParallelLinear,
+            (attn, "k_proj"): ColumnParallelLinear,
+            (attn, "v_proj"): ColumnParallelLinear,
+            (attn, "o_proj"): RowParallelLinear,
+            (mlp, "gate_proj"): ColumnParallelLinear,
+            (mlp, "up_proj"): ColumnParallelLinear,
+            (mlp, "down_proj"): RowParallelLinear,
+        }
+        for (owner, name), parallel in layers.items():
+            setattr(owner, name, parallel(dense=getattr(owner, name), group=group))  # noqa: NAR001
+        attn.num_heads, attn.num_kv_heads = attn.num_heads // tp, attn.num_kv_heads // tp
+    embedding = VocabParallelEmbedding(dense=model.embed_tokens, group=group)
+    setattr(model, "embed_tokens", embedding)  # noqa: NAR001
+    setattr(model, "norm", nn.Sequential(model.norm, CopyToTP(group=group)))  # noqa: NAR001
+    return VocabParallelCrossEntropy(embedding=embedding)
+
+
+def parallelize_dtensor(model: Qwen3, tp_mesh: DeviceMesh) -> None:
+    """The same block plan through PyTorch's DTensor `parallelize_module`.
+
+    Projections into heads and the FFN are `ColwiseParallel`, projections out are
+    `RowwiseParallel`; outputs come back as local tensors, so the head counts are
+    divided as in the hand plan. The embedding and head stay replicated here: the
+    comparison is the block plan, which is where TP's communication lives.
+
+    Side effects:
+        Converts `model`'s block weights to DTensors in place.
+    """
+    tp = tp_mesh.size()
+    plan = {
+        "self_attn.q_proj": ColwiseParallel(),
+        "self_attn.k_proj": ColwiseParallel(),
+        "self_attn.v_proj": ColwiseParallel(),
+        "self_attn.o_proj": RowwiseParallel(),
+        "mlp.gate_proj": ColwiseParallel(),
+        "mlp.up_proj": ColwiseParallel(),
+        "mlp.down_proj": RowwiseParallel(),
+    }
+    for block in model.layers:
+        parallelize_module(module=block, device_mesh=tp_mesh, parallelize_plan=plan)
+        attn = cast(Qwen3Block, block).self_attn  # noqa: NAR001
+        attn.num_heads //= tp
+        attn.num_kv_heads //= tp
 
 
 SDPA_BACKENDS = {

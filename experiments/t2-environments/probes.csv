@@ -1,0 +1,6 @@
+runtime,probe,expected,observed,contained
+subprocess,network_egress,connection refused or unreachable,exit 1: TimeoutError: timed out,True
+subprocess,host_file_read,canary not visible,exit 0: ESCAPED host-secret-c0731a96-619a-4f80-9bfc-3ab81aaa4b33,False
+subprocess,proc_snooping,only the sandbox's own processes in /proc,exit 0: ESCAPED 89,False
+subprocess,memory_bomb,MemoryError or OOM kill within the limit,exit 1: MemoryError,True
+subprocess,fork_bomb,pids limit stops it; sandbox still answers,skipped: no pid limit on the host,False

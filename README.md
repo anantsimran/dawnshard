@@ -213,7 +213,8 @@ accident.
 | `metrics/` | the `Metrics` subclasses and their three functions |
 | `transformer/` | attention, the encoder block, masks, probes, axis names |
 | `common/` | the BPE tokenizer and the indexed max-heap it trains with |
-| `dataload/` | dataset caches and the AG News and Multi30k pipelines |
+| `env/` | sandboxed coding episodes: environment, sandbox runtimes, verifier, failure classifier, agent loop, probes |
+| `dataload/` | dataset caches and the AG News, Multi30k, and MBPP pipelines |
 | `model/` | the MNIST classifiers, AG News classifier, and Multi30k predictor |
 | `experiments/` | config sweeps and ablations over a model's entry point |
 | `viz/` | every plot |
@@ -397,7 +398,8 @@ ______________________________________________________________________
 | Tokenizer | byte-level BPE, written from scratch, with an indexed max-heap so each merge updates pair counts in O(log n) | [common/](app/src/training/common/) |
 | Data | MNIST through torchvision; AG News and Multi30k sampled, tokenized, and cached; how a `DataLoader` is built in the [dataload README](app/src/training/dataload/README.md) | [dataload/](app/src/training/dataload/), [mnist.py](app/src/training/model/mnist.py) |
 | Models | three MNIST classifiers, an AG News transformer classifier, a Multi30k masked-token predictor, and a Multi30k encoder-decoder translator that decodes a saved bundle and scores it with BLEU | [model/](app/src/training/model/) |
-| Experiments | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation and its scale study, each a grid search ranked by best val loss | [experiments/](app/src/training/experiments/) |
+| Experiments | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation and its scale study, each a grid search ranked by best val loss; the sandboxed MBPP benchmark per runtime | [experiments/](app/src/training/experiments/) |
+| Environments | a Gymnasium-shaped coding environment for LLM agents: subprocess, runc and gVisor sandboxes behind one interface, a warm pool, a hash-checked verifier with reward-hacking defenses, infra-vs-task failure classification with retries, replayable episode state, and a probe suite | [env/](app/src/training/env/) |
 | Visualization | a run's metrics, two runs side by side, a model's autograd graph, attention heatmaps, BPE sequence length against merges | [viz/](app/src/training/viz/) |
 | Analytics | BPE length stats (mean, min, max, percentiles) for each Multi30k EN split | [analytics/](app/src/training/analytics/) |
 | Tests | a pytest suite; `attention` is checked against `torch.nn.functional.scaled_dot_product_attention` | [tests/](app/tests/) |
@@ -841,6 +843,10 @@ uv run python app/src/training/experiments/multi30k_translator_ablation.py best
 # and cache memory are appended to experiments/t1-decoding/results.csv
 uv run python app/src/training/model/multi30k_translator.py decode --strategy beam --beam-size 4
 
+# Run 200 MBPP episodes through the sandboxed environment with reference solutions
+# (agent mode needs an OpenAI-compatible server; see experiments/t2-environments/)
+uv run python app/src/training/experiments/sandbox_benchmark.py oracle --runtime subprocess
+
 # Plot one run's per-epoch metrics
 uv run python app/src/training/viz/plot_metrics.py app/history/<run-id>.json
 
@@ -1042,11 +1048,20 @@ dawnshard/
 │   │       │   ├── bpe.py            # byte-level BPE with GPT-4 pre-tokenization
 │   │       │   ├── constants.py      # protected token ids: PAD, MASK, CLS, SEP, BOS, EOS
 │   │       │   └── priority_queue.py # indexed max-heap with O(log n) priority updates
+│   │       ├── env/                  # sandboxed coding episodes for LLM agents
+│   │       │   ├── environment.py    # Environment (reset/step), EpisodeState, replay
+│   │       │   ├── sandbox.py        # Sandbox interface; subprocess, runc/runsc Docker; WarmPool
+│   │       │   ├── verify.py         # Verifier: hashed tests, fresh sandbox, tamper defenses
+│   │       │   ├── failures.py       # infra vs task classifier; retries under one episode id
+│   │       │   ├── tools.py          # run_python / submit schemas and call parsing
+│   │       │   ├── agent.py          # agent loop over an OpenAI-compatible server
+│   │       │   └── probes.py         # adversarial probe suite
 │   │       ├── dataload/             # dataset caches and text pipelines
 │   │       │   ├── README.md         # DataLoader internals: collate, shuffling, seeding, chunks
 │   │       │   ├── datasets.py       # InMemoryDataset: an in-memory split of prebuilt items
 │   │       │   ├── ag_news.py        # AG News: sample, tokenize, cache, one DataLoader per split
 │   │       │   ├── multi30k.py       # Multi30k: translation pairs and English masked-LM batches
+│   │       │   ├── mbpp.py           # MBPP coding tasks, sampled by seed
 │   │       │   └── constants.py      # DATASETS_CACHE_DIR
 │   │       ├── model/                # MNIST, AG News, and Multi30k model entry points
 │   │       │   ├── mnist.py                # three digit classifiers
@@ -1056,7 +1071,8 @@ dawnshard/
 │   │       ├── experiments/          # config studies over a model's entry point
 │   │       │   ├── common.py         # grid_search, LR schedules, norm names, seed repeats
 │   │       │   ├── multi30ken_predictor_ablation.py # sweep, follow-ups, ablation
-│   │       │   └── multi30k_translator_ablation.py  # component, depth, LR, language ablation
+│   │       │   ├── multi30k_translator_ablation.py  # component, depth, LR, language ablation
+│   │       │   └── sandbox_benchmark.py # MBPP episodes per sandbox runtime: oracle, agent, replay, probes
 │   │       ├── viz/                  # metrics, run comparison, model graph, attention, BPE length
 │   │       ├── analytics/            # printed stats: Multi30k EN BPE length percentiles
 │   │       ├── utils/                # git commit, log_elapsed timing

@@ -6,21 +6,24 @@ from typing import Optional
 
 import torch
 from loguru import logger
+from training.train.checkpoint import capture
 from training.train.model import EpochSpec, TrainState
 from training.train.serialization import serialize_epoch_spec, serialize_train_state
 from training.utils.git import get_git_commit
 
 
-def save_state(state: TrainState, checkpoint_path: Path) -> None:
-    """Checkpoint model + optimizer (+ scheduler, + loader position) so training can resume."""
+def save_state(state: TrainState, checkpoint_path: Path, step: int = 0) -> None:
+    """Checkpoint one process's training state to one file so training can resume.
+
+    Holds the model and optimizer state dicts plus `checkpoint.capture`: the scheduler,
+    the loader position, the RNGs, and `step`. For sharded models, many ranks, or
+    asynchronous saves, use `checkpoint.Checkpointer`, which stores the same contents.
+    """
     payload: dict = {
         "model": state.model.state_dict(),
         "optimizer": state.optimizer.state_dict(),
+        **capture(state=state, step=step),
     }
-    if state.scheduler is not None:
-        payload["scheduler"] = state.scheduler.state_dict()
-    if state.loader is not None:
-        payload["loader"] = state.loader.state_dict()
     torch.save(obj=payload, f=checkpoint_path)
 
 

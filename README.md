@@ -178,7 +178,9 @@ gradient norms, activations for a fixed input: same signature, same slot on
 - Need a trace? [`profiled_fit`](app/src/training/train/train_loop.py) profiles the
   epochs you select, using the same state, policy, and steps.
 - Need to resume? [`save_state`](app/src/training/train/utils.py) and
-  [`load`](app/src/training/train/train_loop.py) run where the caller puts them.
+  [`load`](app/src/training/train/train_loop.py), or a
+  [`Checkpointer`](app/src/training/train/checkpoint.py) for sharded runs, run where
+  the caller puts them.
 - What happened in a run? [`save_history`](app/src/training/train/utils.py) writes
   the records that `fit` builds at the end of the run.
 - Who controls randomness? The example entry points seed before model construction,
@@ -400,7 +402,7 @@ ______________________________________________________________________
 
 | Part | What it is | Where |
 |---|---|---|
-| Training loop | `fit`, `profiled_fit`, `run_epoch`, `train_step`, `eval_step`; gradient accumulation and autocast as policy; checkpoints, probes, and a history file per run; FLOPs, MFU, data-stall, and memory measurements and predictions; a chunked cross-entropy that never builds full logits | [train/](app/src/training/train/) |
+| Training loop | `fit`, `profiled_fit`, `run_epoch`, `train_step`, `eval_step`; gradient accumulation and autocast as policy; single-file and sharded, atomic, async checkpoints with every RNG and the loader position; a straggler detector; probes and a history file per run; FLOPs, MFU, data-stall, and memory measurements and predictions; a chunked cross-entropy that never builds full logits | [train/](app/src/training/train/) |
 | Metrics | loss-only; classification with accuracy and macro-averaged precision and recall; masked-token accuracy and perplexity for per-position targets; each as three functions the loop injects | [metrics/](app/src/training/metrics/) |
 | Attention | scaled dot-product attention, multi-head self- and cross-attention with optional QK norm, fixed sinusoidal position encodings, pre-norm encoder and decoder blocks, padding and causal masks, a KV cache, and one decode loop with greedy and beam search; design notes and axis names in the [transformer README](app/src/training/transformer/README.md) | [transformer/](app/src/training/transformer/) |
 | Tokenizer | byte-level BPE, written from scratch, with an indexed max-heap so each merge updates pair counts in O(log n) | [common/](app/src/training/common/) |
@@ -796,22 +798,39 @@ steady state after the first steps.
 
 ```python
 from training.constants import CHECKPOINTS_PATH
+from training.train.checkpoint import Checkpointer
 from training.train.train_loop import load
 from training.train.utils import save_state
 
+# One process, one file
 checkpoint_path = CHECKPOINTS_PATH / "model.pt"
 checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-save_state(state=train_state, checkpoint_path=checkpoint_path)
-load(state=train_state, epoch_spec=epoch_spec, checkpoint_path=checkpoint_path)
+save_state(state=train_state, checkpoint_path=checkpoint_path, step=step)
+step = load(state=train_state, epoch_spec=epoch_spec, checkpoint_path=checkpoint_path)
+
+# Any number of ranks, sharded, committed atomically, optionally async
+checkpointer = Checkpointer(root=CHECKPOINTS_PATH / "run", async_save=True)
+step = checkpointer.load_latest(state=train_state) or 0
+checkpointer.save(state=train_state, step=step)
 ```
 
-`save_state` writes the model, optimizer, and scheduler `state_dict`s, and the loader's
-position when `TrainState.loader` is set (a
-[`StatefulLoader`](app/src/training/dataload/streaming.py) is two integers); `load`
-restores them into an existing `TrainState`, so build the model, optimizer, and loader
-first. A resumed run then continues with the next batch instead of restarting the epoch.
-`save_state` doesn't create the folder, hence the `mkdir`. `fit` calls neither, so a
-checkpoint happens exactly where you put the call.
+A checkpoint holds everything the next step reads: the model, optimizer, and scheduler
+`state_dict`s, the loader's position when `TrainState.loader` is set, every RNG (torch,
+CUDA, Python, NumPy), and the step. [`checkpoint.capture`](app/src/training/train/checkpoint.py)
+and `restore` define that list once, and both paths use them, so there is still one
+definition of what a checkpoint is. `load` restores into an existing `TrainState`, so
+build the model, optimizer, and loader first. `fit` calls neither, so a checkpoint
+happens exactly where you put the call.
+
+`Checkpointer` is the path for distributed runs. Every rank writes its own shards
+through `torch.distributed.checkpoint`, so a sharded model is never gathered on one
+rank. Each rank's RNG is stored under its own key. Rank 0 writes a `COMMITTED` marker
+only after every rank has finished, so a crash mid-write leaves the previous step as
+the latest. `load_latest` reshards to the current world size: a run saved on 2 ranks
+resumes on 1. With `async_save=True`, the state is copied to CPU before `save`
+returns and written in the background, so training stalls only for the copy.
+`young_daly_interval` gives the save interval that balances save cost against the work
+a failure loses.
 
 ______________________________________________________________________
 
@@ -926,6 +945,10 @@ uv run python -m training.model.qwen3_serve bench --config tiny
 
 # Judge routing, admission, canary, and autoscaling policies on one seeded trace
 uv run python app/src/training/experiments/serving_platform.py
+
+# Bitwise resume, reshard 2 -> 1 ranks, save cost, seeded chaos under torchrun
+# --max-restarts, goodput vs checkpoint interval, and straggler detection
+uv run python app/src/training/experiments/fault_tolerance.py all
 
 # Place five kernels of a training step on the device's roofline
 uv run python app/src/training/viz/roofline.py --peak-tflops 165 --bandwidth-gbs 1008
@@ -1118,6 +1141,8 @@ dawnshard/
 │   │       │   ├── serialization.py  # TrainState, EpochSpec, EpochRecord → history-JSON dicts
 │   │       │   ├── perf.py           # FLOPs/token, MFU, memory prediction, intensity, StepTimer
 │   │       │   ├── losses.py         # ChunkedCrossEntropy: LM loss without full logits
+│   │       │   ├── checkpoint.py     # what a checkpoint holds; Checkpointer (DCP, atomic, async); Young/Daly
+│   │       │   ├── straggler.py      # StragglerDetector: the slow rank others wait for
 │   │       │   └── utils.py          # save_state, save_history
 │   │       ├── metrics/              # Metrics subclasses + calculate/accumulate/reduce functions
 │   │       ├── transformer/          # attention built from scratch
@@ -1193,7 +1218,8 @@ dawnshard/
 │   │       │   ├── sandbox_benchmark.py # MBPP episodes per sandbox runtime: oracle, agent, replay, probes
 │   │       │   ├── data_loading.py   # loader audit, shuffle quality, bitwise resume, data stall
 │   │       │   ├── tp_pp.py          # TP parity, pipeline bubble, stage balance, TP comm prediction
-│   │       │   └── serving_platform.py # routing, admission, canary, autoscaler on a simulated fleet
+│   │       │   ├── serving_platform.py # routing, admission, canary, autoscaler on a simulated fleet
+│   │       │   └── fault_tolerance.py # bitwise resume, reshard, save cost, chaos goodput, straggler
 │   │       ├── viz/                  # metrics, run comparison, model graph, attention, BPE length, roofline
 │   │       ├── analytics/            # printed stats: Multi30k EN BPE length percentiles
 │   │       ├── utils/                # git commit, log_elapsed timing
@@ -1214,7 +1240,8 @@ dawnshard/
 │   ├── check_named_args.py       # keyword-argument linter
 │   ├── check_docstrings.py       # docstring-presence linter
 │   ├── teardown.sh               # delete every cloud resource the compute-backend work creates
-│   └── tokenize_shards.sh        # xargs -P tokenize jobs into shards, then the manifest
+│   ├── tokenize_shards.sh        # xargs -P tokenize jobs into shards, then the manifest
+│   └── chaos.py                  # kill training workers at seeded times
 ├── .claude/hooks/                # pre-PR gate: named args, tests, README touched when source changed
 ├── .githooks/pre-commit          # runs the docstring check (make install-hooks)
 ├── .github/workflows/pages.yml   # builds and deploys the website on push to main

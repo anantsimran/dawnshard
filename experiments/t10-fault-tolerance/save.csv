@@ -1,0 +1,7 @@
+model,method,parameters,blocking_s,total_s,rank0_rss_growth_mb
+tiny,rank0,221568,0.155,0.155,1.3
+tiny,dcp,221568,0.151,0.151,1.3
+tiny,async,221568,0.051,0.226,0.7
+small,rank0,13767680,1.069,1.069,34.1
+small,dcp,13767680,0.348,0.348,2.0
+small,async,13767680,0.368,1.843,45.0

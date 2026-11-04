@@ -14,6 +14,7 @@ from loguru import logger
 from torch import Tensor
 from torch.utils.data import DataLoader
 from training.constants import HISTORY_PATH, TRACES_PATH
+from training.train.checkpoint import restore
 from training.train.environment import collect_system_metrics
 from training.train.model import EpochRecord, EpochSpec, Metrics, TrainState
 from training.train.serialization import serialize_epoch_record
@@ -197,15 +198,16 @@ def run_epoch(
     return epoch_spec.reduce_metrics(accumulator)  # noqa: NAR001
 
 
-def load(state: TrainState, epoch_spec: EpochSpec, checkpoint_path: Path) -> None:
-    """Restore model + optimizer (+ scheduler, + loader position) from a checkpoint."""
-    checkpoint = torch.load(f=checkpoint_path, map_location=epoch_spec.device)
+def load(state: TrainState, epoch_spec: EpochSpec, checkpoint_path: Path) -> int:
+    """Restore what `save_state` wrote: model, optimizer, scheduler, loader, RNGs; return the step.
+
+    Side effects:
+        Overwrites `state`'s objects in place and the process's RNG states.
+    """
+    checkpoint = torch.load(f=checkpoint_path, map_location=epoch_spec.device, weights_only=False)
     state.model.load_state_dict(state_dict=checkpoint["model"])
     state.optimizer.load_state_dict(state_dict=checkpoint["optimizer"])
-    if state.scheduler is not None and "scheduler" in checkpoint:
-        state.scheduler.load_state_dict(state_dict=checkpoint["scheduler"])
-    if state.loader is not None and "loader" in checkpoint:
-        state.loader.load_state_dict(state_dict=checkpoint["loader"])
+    return restore(state=state, payload=checkpoint)
 
 
 def fit(

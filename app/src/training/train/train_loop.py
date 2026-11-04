@@ -165,6 +165,7 @@ def run_epoch(
     epoch: int,
     train: bool,
     seed: Optional[int],
+    timings: Optional[dict[str, float]] = None,
 ) -> Metrics:
     """Drive one pass over loader with step_fn; return the reduced epoch metrics.
 
@@ -174,24 +175,37 @@ def run_epoch(
     Args:
         seed: Seed of this pass, threaded to the step and on to its probe, or None
             when the pass has none. `run_epoch` does not reseed anything with it.
+        timings: When given, `run_epoch` adds the seconds spent waiting for each batch
+            to `timings["wait_s"]` and the seconds in each step, after a device
+            synchronize, to `timings["step_s"]`.
     """
     state.model.train(mode=train)
     accumulator = epoch_spec.metrics_type()
+    last = time.perf_counter()
     for batch_index, batch in enumerate(loader):  # noqa: NAR001
+        fetched = time.perf_counter()
         batch_metrics = step_fn(  # noqa: NAR001
             state, epoch_spec, batch, epoch, batch_index, seed
         )
         epoch_spec.accumulate_metrics(accumulator, batch_metrics)  # noqa: NAR001
+        if timings is not None:
+            if epoch_spec.device.type == "cuda":
+                torch.cuda.synchronize(device=epoch_spec.device)
+            last, wait = time.perf_counter(), fetched - last
+            timings["wait_s"] += wait
+            timings["step_s"] += last - fetched
     return epoch_spec.reduce_metrics(accumulator)  # noqa: NAR001
 
 
 def load(state: TrainState, epoch_spec: EpochSpec, checkpoint_path: Path) -> None:
-    """Restore model + optimizer (+ scheduler) from a checkpoint."""
+    """Restore model + optimizer (+ scheduler, + loader position) from a checkpoint."""
     checkpoint = torch.load(f=checkpoint_path, map_location=epoch_spec.device)
     state.model.load_state_dict(state_dict=checkpoint["model"])
     state.optimizer.load_state_dict(state_dict=checkpoint["optimizer"])
     if state.scheduler is not None and "scheduler" in checkpoint:
         state.scheduler.load_state_dict(state_dict=checkpoint["scheduler"])
+    if state.loader is not None and "loader" in checkpoint:
+        state.loader.load_state_dict(state_dict=checkpoint["loader"])
 
 
 def fit(
@@ -257,6 +271,7 @@ def fit(
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
         epoch_start_time = time.perf_counter()
+        timings = {"wait_s": 0.0, "step_s": 0.0} if epoch_spec.measure_data_stall else None
         train_metrics = run_epoch(
             state=state,
             epoch_spec=epoch_spec,
@@ -265,6 +280,7 @@ def fit(
             epoch=epoch_number,
             train=True,
             seed=None,
+            timings=timings,
         )
         if state.scheduler is not None:
             state.scheduler.step()
@@ -299,6 +315,11 @@ def fit(
             system_metrics=collect_system_metrics(),
             val_loss=val_loss,
             val_metrics=val_metrics,
+            data_stall_fraction=(
+                timings["wait_s"] / (timings["wait_s"] + timings["step_s"])
+                if timings and timings["step_s"]
+                else None
+            ),
             **throughput(
                 epoch_spec=epoch_spec,
                 train_metrics=train_metrics,

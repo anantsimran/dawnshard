@@ -31,7 +31,7 @@ import time
 from dataclasses import asdict, dataclass, replace
 from functools import partial
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, Optional, cast
 from uuid import uuid4
 
 import torch
@@ -69,6 +69,7 @@ from training.train.perf import (
 )
 from training.train.train_loop import fit
 from training.transformer.constants import D_MODEL, B, L, V
+from training.transformer.mask import document_ids, document_keep_mask, document_positions
 
 PROCESS_START = time.time()
 
@@ -192,11 +193,11 @@ class Qwen3Attention(nn.Module):
         ▼                    ▼                    │
      q_norm               k_norm                  │         RMSNorm over d_k, per head
         ▼                    ▼                    │
-     apply_rope           apply_rope              │         cos/sin rows 0..L-1
+     apply_rope           apply_rope              │         cos/sin row per position
         │  (B, h, L, d_k)    │  (B, kv, L, d_k)   │  (B, kv, L, d_k)
         └────────────────────┼────────────────────┘
                              ▼
-          F.scaled_dot_product_attention(is_causal=True, enable_gqa=True)
+          F.scaled_dot_product_attention(enable_gqa=True)       is_causal, or mask
                              │  (B, h, L, d_k)
                              ▼
                   transpose(1, 2) + reshape
@@ -234,12 +235,21 @@ class Qwen3Attention(nn.Module):
         self.q_norm = nn.RMSNorm(normalized_shape=self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = nn.RMSNorm(normalized_shape=self.head_dim, eps=config.rms_norm_eps)
 
-    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Return the attention output for `x`, causally masked.
 
         Args:
             x: `(B, L, d_model)`.
-            cos: RoPE rows for positions `0 .. L-1`, `(L, head_dim)`; `sin` likewise.
+            cos: RoPE rows for each position: `(L, head_dim)`, or `(B, 1, L, head_dim)`
+                when positions restart per packed document; `sin` likewise.
+            mask: `(B, 1, L, L)` keep mask, True = visible, such as
+                `document_keep_mask`; None is plain causal attention.
         """
         batch, length, _ = x.shape
         q = self.q_norm(self.q_proj(x).view(batch, length, self.num_heads, self.head_dim))  # noqa: NAR001
@@ -248,7 +258,12 @@ class Qwen3Attention(nn.Module):
         q = apply_rope(x=q.transpose(dim0=1, dim1=2), cos=cos, sin=sin)
         k = apply_rope(x=k.transpose(dim0=1, dim1=2), cos=cos, sin=sin)
         out = F.scaled_dot_product_attention(
-            query=q, key=k, value=v.transpose(dim0=1, dim1=2), is_causal=True, enable_gqa=True
+            query=q,
+            key=k,
+            value=v.transpose(dim0=1, dim1=2),
+            attn_mask=mask,
+            is_causal=mask is None,
+            enable_gqa=True,
         )
         return self.o_proj(out.transpose(dim0=1, dim1=2).reshape(batch, length, -1))  # noqa: NAR001
 
@@ -323,9 +338,15 @@ class Qwen3Block(nn.Module):
         self.post_attention_layernorm = nn.RMSNorm(normalized_shape=d, eps=eps)
         self.mlp = Qwen3MLP(config=config)
 
-    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        """Return the layer output for `x`; `cos` and `sin` as `Qwen3Attention.forward`."""
-        x = x + self.self_attn(x=self.input_layernorm(x), cos=cos, sin=sin)  # noqa: NAR001
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Return the layer output for `x`; `cos`, `sin`, `mask` as `Qwen3Attention.forward`."""
+        x = x + self.self_attn(x=self.input_layernorm(x), cos=cos, sin=sin, mask=mask)  # noqa: NAR001
         normed = self.post_attention_layernorm(x)  # noqa: NAR001
         if self.checkpoint_mlp and self.training:
             mlp_out = checkpoint(self.mlp, normed, use_reentrant=False)  # noqa: NAR001
@@ -364,6 +385,10 @@ class Qwen3(nn.Module):
     materializes the full `(B*L, vocab)` logits, such as `ChunkedCrossEntropy`, which
     reads `lm_head_weight` itself.
 
+    With `document_eos_id`, a row is several documents packed back to back: each
+    position's RoPE angle restarts at its document's first token, and attention gets
+    `document_keep_mask` (causal and block-diagonal) instead of `is_causal`.
+
     `checkpointing` trades compute for activation memory in training: "full" saves
     only each layer's input and recomputes the layer in backward (about one extra
     forward); "selective" recomputes only the MLP (see `Qwen3Block`).
@@ -382,17 +407,22 @@ class Qwen3(nn.Module):
         config: Qwen3Config,
         checkpointing: Checkpointing = "none",
         output: Literal["logits", "hidden"] = "logits",
+        document_eos_id: Optional[int] = None,
     ) -> None:
         """Build the embedding, the layers, the final norm, the head, and the RoPE tables.
 
         Args:
             checkpointing: "none", "full" (each layer), or "selective" (each MLP).
             output: What `forward` returns: flat logits, or flat hidden states.
+            document_eos_id: Treat each row as documents packed with this EOS id:
+                attention stays inside a document and positions restart at each.
+                None treats the row as one sequence.
         """
         super().__init__()
         self.config = config
         self.checkpointing = checkpointing
         self.output = output
+        self.document_eos_id = document_eos_id
         self.embed_tokens = nn.Embedding(
             num_embeddings=config.vocab_size, embedding_dim=config.hidden_size
         )
@@ -431,15 +461,24 @@ class Qwen3(nn.Module):
         self, input_ids: Int[torch.Tensor, f"{B} {L}"]
     ) -> Float[torch.Tensor, f"{B} {L} {D_MODEL}"]:
         """Return the final-normed hidden states, before the LM head."""
-        length = input_ids.shape[1]
-        cos = self.rope_cos[:length].to(dtype=self.embed_tokens.weight.dtype)
-        sin = self.rope_sin[:length].to(dtype=self.embed_tokens.weight.dtype)
+        dtype = self.embed_tokens.weight.dtype
+        mask = None
+        if self.document_eos_id is None:
+            length = input_ids.shape[1]
+            cos = self.rope_cos[:length].to(dtype=dtype)
+            sin = self.rope_sin[:length].to(dtype=dtype)
+        else:
+            doc_ids = document_ids(token_ids=input_ids, eos_id=self.document_eos_id)
+            positions = document_positions(doc_ids=doc_ids)
+            cos = self.rope_cos[positions].unsqueeze(dim=1).to(dtype=dtype)
+            sin = self.rope_sin[positions].unsqueeze(dim=1).to(dtype=dtype)
+            mask = document_keep_mask(doc_ids=doc_ids)
         x = self.embed_tokens(input_ids)  # noqa: NAR001
         for layer in self.layers:
             if self.checkpointing == "full" and self.training:
-                x = checkpoint(layer, x, cos, sin, use_reentrant=False)  # noqa: NAR001
+                x = checkpoint(layer, x, cos, sin, mask, use_reentrant=False)  # noqa: NAR001
             else:
-                x = layer(x=x, cos=cos, sin=sin)
+                x = layer(x=x, cos=cos, sin=sin, mask=mask)
         return self.norm(x)  # noqa: NAR001
 
     @jaxtyped(typechecker=beartype)
@@ -499,6 +538,7 @@ def parse_args() -> argparse.Namespace:
     add("--chunked-ce", action="store_true", help="Loss from hidden states, in chunks.")  # noqa: NAR001
     add("--peak-tflops", type=float, help="Dense peak of the device, for MFU.")  # noqa: NAR001
     add("--memory-snapshot", type=Path, help="CUDA only: write a memory snapshot here.")  # noqa: NAR001
+    add("--document-mask", type=int, metavar="EOS_ID", help="Packed docs: mask at this EOS.")  # noqa: NAR001
     add("--strategy", choices=["none", "ddp-naive", "ddp-bucketed", "ddp-torch", "zero2", "fsdp"])  # noqa: NAR001
     add("--replicate", type=int, default=1, help="FSDP replicate groups; >1 is HSDP.")  # noqa: NAR001
     add("--no-reshard", action="store_true", help="FSDP: keep blocks gathered after forward.")  # noqa: NAR001
@@ -553,6 +593,7 @@ def build_state(
         config=config,
         checkpointing=args.checkpointing,
         output="hidden" if args.chunked_ce else "logits",
+        document_eos_id=args.document_mask,
     ).to(device=device)
     criterion: nn.Module = (
         ChunkedCrossEntropy(head=qwen) if args.chunked_ce else nn.CrossEntropyLoss()

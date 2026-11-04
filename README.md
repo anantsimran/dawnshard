@@ -93,10 +93,10 @@ loop.
 
 ### State: `TrainState`
 
-Defined in [model.py](app/src/training/train/model.py). A dataclass with four
-fields: `model`, `optimizer`, `criterion`, and `scheduler`. It holds the caller-owned
-objects the loop changes: model parameters, optimizer state, and an optional
-scheduler. A checkpoint saves their `state_dict`s through
+Defined in [model.py](app/src/training/train/model.py). A dataclass with five
+fields: `model`, `optimizer`, `criterion`, `scheduler`, and `loader`. It holds the
+caller-owned objects the loop changes: model parameters, optimizer state, an optional
+scheduler, and an optional loader whose position belongs in a checkpoint. A checkpoint saves their `state_dict`s through
 [`save_state`](app/src/training/train/utils.py) and restores them through
 [`load`](app/src/training/train/train_loop.py). The criterion is supplied again by
 the caller; the checkpoint does not save it.
@@ -217,7 +217,7 @@ accident.
 | `launch/` | `JobSpec`, the `Backend` interface, and the local, Kubernetes JobSet, KubeRay, and SageMaker adapters |
 | `parallel/` | process-group setup, naive and bucketed DDP by hand, ZeRO-2 by hand, and one function that applies FSDP2 |
 | `env/` | sandboxed coding episodes: environment, sandbox runtimes, verifier, failure classifier, agent loop, probes |
-| `dataload/` | dataset caches and the AG News, Multi30k, and MBPP pipelines |
+| `dataload/` | dataset caches, the AG News, Multi30k, and MBPP pipelines, token shards and the streaming loader |
 | `model/` | the MNIST classifiers, AG News classifier, Multi30k predictor and translator, and the Qwen3 decoder |
 | `experiments/` | config sweeps and ablations over a model's entry point |
 | `viz/` | every plot |
@@ -303,7 +303,8 @@ Three functions build it:
    and a `SystemMetrics` snapshot from psutil and torch with CPU percent, RAM used,
    and peak GPU memory on CUDA or current allocation on MPS. When the `EpochSpec`
    sets `flops_per_target`, the record also carries `targets_per_s`, and with
-   `peak_flops`, `mfu`; otherwise neither appears.
+   `peak_flops`, `mfu`; with `measure_data_stall`, `data_stall_fraction`, the share of
+   training time spent waiting for the next batch. Otherwise none of them appears.
 1. `serialize_epoch_record` flattens that into one dict, hoisting the system fields to
    the top level and dropping anything unset.
 1. When `fit` returns, `save_history` writes the records (on rank 0 only, in a
@@ -398,11 +399,11 @@ ______________________________________________________________________
 
 | Part | What it is | Where |
 |---|---|---|
-| Training loop | `fit`, `profiled_fit`, `run_epoch`, `train_step`, `eval_step`; gradient accumulation and autocast as policy; checkpoints, probes, and a history file per run; FLOPs, MFU, and memory predictions; a chunked cross-entropy that never builds full logits | [train/](app/src/training/train/) |
+| Training loop | `fit`, `profiled_fit`, `run_epoch`, `train_step`, `eval_step`; gradient accumulation and autocast as policy; checkpoints, probes, and a history file per run; FLOPs, MFU, data-stall, and memory measurements and predictions; a chunked cross-entropy that never builds full logits | [train/](app/src/training/train/) |
 | Metrics | loss-only; classification with accuracy and macro-averaged precision and recall; masked-token accuracy and perplexity for per-position targets; each as three functions the loop injects | [metrics/](app/src/training/metrics/) |
 | Attention | scaled dot-product attention, multi-head self- and cross-attention with optional QK norm, fixed sinusoidal position encodings, pre-norm encoder and decoder blocks, padding and causal masks, a KV cache, and one decode loop with greedy and beam search; design notes and axis names in the [transformer README](app/src/training/transformer/README.md) | [transformer/](app/src/training/transformer/) |
 | Tokenizer | byte-level BPE, written from scratch, with an indexed max-heap so each merge updates pair counts in O(log n) | [common/](app/src/training/common/) |
-| Data | MNIST through torchvision; AG News and Multi30k sampled, tokenized, and cached; how a `DataLoader` is built in the [dataload README](app/src/training/dataload/README.md) | [dataload/](app/src/training/dataload/), [mnist.py](app/src/training/model/mnist.py) |
+| Data | MNIST through torchvision; AG News and Multi30k sampled, tokenized, and cached; offline tokenization into uint32 shards and a streaming loader with a deterministic global order and exact resume across world sizes; how a `DataLoader` is built in the [dataload README](app/src/training/dataload/README.md) | [dataload/](app/src/training/dataload/), [mnist.py](app/src/training/model/mnist.py) |
 | Models | three MNIST classifiers, an AG News transformer classifier, a Multi30k masked-token predictor, a Multi30k encoder-decoder translator that decodes a saved bundle and scores it with BLEU, and a Qwen3-style decoder (RMSNorm, RoPE, GQA with QK-norm, SwiGLU, tied head) built from the official config fields | [model/](app/src/training/model/) |
 | Experiments | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation and its scale study, each a grid search ranked by best val loss; the sandboxed MBPP benchmark per runtime | [experiments/](app/src/training/experiments/) |
 | Data parallelism | DDP twice by hand (naive, and bucketed with all-reduces overlapped with backward), ZeRO-2 by hand, FSDP2 and HSDP through `apply_fsdp`; `fit` runs unchanged under `torchrun`, writing history from rank 0 only | [parallel/](app/src/training/parallel/) |
@@ -801,8 +802,11 @@ save_state(state=train_state, checkpoint_path=checkpoint_path)
 load(state=train_state, epoch_spec=epoch_spec, checkpoint_path=checkpoint_path)
 ```
 
-`save_state` writes the model, optimizer, and scheduler `state_dict`s, and `load`
-restores them into an existing `TrainState`, so build the model and optimizer first.
+`save_state` writes the model, optimizer, and scheduler `state_dict`s, and the loader's
+position when `TrainState.loader` is set (a
+[`StatefulLoader`](app/src/training/dataload/streaming.py) is two integers); `load`
+restores them into an existing `TrainState`, so build the model, optimizer, and loader
+first. A resumed run then continues with the next batch instead of restarting the epoch.
 `save_state` doesn't create the folder, hence the `mkdir`. `fit` calls neither, so a
 checkpoint happens exactly where you put the call.
 
@@ -903,6 +907,10 @@ uv run python -m training.model.qwen3 --config 0.6b --tokens <tokens.bin> --seq-
 # ddp-torch, zero2, or fsdp (--replicate 2 for HSDP); only rank 0 writes history
 uv run torchrun --standalone --nproc-per-node=2 -m training.model.qwen3 --config tiny \
     --synthetic --steps 30 --strategy ddp-bucketed
+
+# Audit the streaming loader (4 ranks x 4 workers), shuffle quality, bitwise resume
+# at step 137 on 4 and 2 ranks, and data stall with and without pre-tokenized shards
+uv run python app/src/training/experiments/data_loading.py all
 
 # Place five kernels of a training step on the device's roofline
 uv run python app/src/training/viz/roofline.py --peak-tflops 165 --bandwidth-gbs 1008
@@ -1126,6 +1134,8 @@ dawnshard/
 │   │       │   ├── multi30k.py       # Multi30k: translation pairs and English masked-LM batches
 │   │       │   ├── mbpp.py           # MBPP coding tasks, sampled by seed
 │   │       │   ├── tokens.py         # TokenWindows over a flat uint32 token file; lm_collate
+│   │       │   ├── shards.py         # offline tokenization into uint32 shards + index + manifest
+│   │       │   ├── streaming.py      # global order, rank x worker slices, StatefulLoader, HTTP shards
 │   │       │   └── constants.py      # DATASETS_CACHE_DIR
 │   │       ├── model/                # MNIST, AG News, Multi30k, and Qwen3 model entry points
 │   │       │   ├── mnist.py                # three digit classifiers
@@ -1150,7 +1160,8 @@ dawnshard/
 │   │       │   ├── common.py         # grid_search, LR schedules, norm names, seed repeats
 │   │       │   ├── multi30ken_predictor_ablation.py # sweep, follow-ups, ablation
 │   │       │   ├── multi30k_translator_ablation.py  # component, depth, LR, language ablation
-│   │       │   └── sandbox_benchmark.py # MBPP episodes per sandbox runtime: oracle, agent, replay, probes
+│   │       │   ├── sandbox_benchmark.py # MBPP episodes per sandbox runtime: oracle, agent, replay, probes
+│   │       │   └── data_loading.py   # loader audit, shuffle quality, bitwise resume, data stall
 │   │       ├── viz/                  # metrics, run comparison, model graph, attention, BPE length, roofline
 │   │       ├── analytics/            # printed stats: Multi30k EN BPE length percentiles
 │   │       ├── utils/                # git commit, log_elapsed timing
@@ -1170,7 +1181,8 @@ dawnshard/
 ├── scripts/
 │   ├── check_named_args.py       # keyword-argument linter
 │   ├── check_docstrings.py       # docstring-presence linter
-│   └── teardown.sh               # delete every cloud resource the compute-backend work creates
+│   ├── teardown.sh               # delete every cloud resource the compute-backend work creates
+│   └── tokenize_shards.sh        # xargs -P tokenize jobs into shards, then the manifest
 ├── .claude/hooks/                # pre-PR gate: named args, tests, README touched when source changed
 ├── .githooks/pre-commit          # runs the docstring check (make install-hooks)
 ├── .github/workflows/pages.yml   # builds and deploys the website on push to main

@@ -80,3 +80,18 @@ def test_pad_masked_mean_all_padding_row_is_zeros_not_nan():
     assert not pooled.isnan().any()
     torch.testing.assert_close(actual=pooled[0], expected=attn[0, 0])
     torch.testing.assert_close(actual=pooled[1], expected=torch.zeros(4))  # noqa: NAR001
+
+
+def test_document_mask_equals_a_hand_built_block_diagonal_reference():
+    from training.transformer.mask import document_ids, document_keep_mask, document_positions
+
+    ids = torch.tensor([[5, 6, 0, 7, 0, 8]])  # three documents: [5 6 EOS] [7 EOS] [8]
+    doc = document_ids(token_ids=ids, eos_id=0)
+    assert doc.tolist() == [[0, 0, 0, 1, 1, 2]]
+    reference = torch.zeros(6, 6, dtype=torch.bool)
+    for block in ((0, 3), (3, 5), (5, 6)):
+        for i in range(*block):
+            for j in range(block[0], i + 1):
+                reference[i, j] = True
+    assert torch.equal(document_keep_mask(doc_ids=doc)[0, 0], reference)
+    assert document_positions(doc_ids=doc).tolist() == [[0, 1, 2, 0, 1, 0]]

@@ -1,0 +1,6 @@
+method,buffer,same_shard_rate
+no shuffle,0,0.9969072164948454
+shuffle buffer,10,0.9646907216494846
+shuffle buffer,100,0.7024484536082474
+shuffle buffer,1000,0.14806701030927835
+global permutation,7761,0.037371134020618556

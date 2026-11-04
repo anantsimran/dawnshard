@@ -12,13 +12,15 @@ from training.utils.git import get_git_commit
 
 
 def save_state(state: TrainState, checkpoint_path: Path) -> None:
-    """Checkpoint model + optimizer (+ scheduler) so training can resume."""
+    """Checkpoint model + optimizer (+ scheduler, + loader position) so training can resume."""
     payload: dict = {
         "model": state.model.state_dict(),
         "optimizer": state.optimizer.state_dict(),
     }
     if state.scheduler is not None:
         payload["scheduler"] = state.scheduler.state_dict()
+    if state.loader is not None:
+        payload["loader"] = state.loader.state_dict()
     torch.save(obj=payload, f=checkpoint_path)
 
 

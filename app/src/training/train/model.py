@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import torch
 from torch import nn
@@ -54,6 +54,10 @@ class EpochSpec[M: Metrics]:
     # Run forward and loss under torch.autocast with this dtype (e.g. torch.bfloat16);
     # weights, gradients, and the optimizer stay in their own dtype.
     autocast_dtype: Optional[torch.dtype] = None
+    # Time spent waiting for the next batch, as a share of the epoch's training time.
+    # When set, the loop synchronizes the device after each step so the split is real,
+    # and each epoch record gains data_stall_fraction.
+    measure_data_stall: bool = False
     # Training FLOPs per target (per token for a language model). When set, each epoch
     # record gains targets_per_s; with peak_flops (the device's dense peak) also mfu.
     flops_per_target: Optional[float] = None
@@ -66,6 +70,10 @@ class TrainState:
     optimizer: Optimizer
     criterion: nn.Module
     scheduler: Optional[LRScheduler] = None
+    # A loader with state_dict/load_state_dict, such as dataload.streaming's
+    # StatefulLoader. Checkpoints save its position, so a resumed run continues with
+    # the next batch rather than restarting the epoch.
+    loader: Optional[Any] = None
 
     @classmethod
     def create(
@@ -104,3 +112,4 @@ class EpochRecord:
     val_metrics: Optional[Metrics] = None
     targets_per_s: Optional[float] = None
     mfu: Optional[float] = None
+    data_stall_fraction: Optional[float] = None

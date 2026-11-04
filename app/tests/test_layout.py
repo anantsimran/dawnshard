@@ -34,6 +34,7 @@ ALLOWED_IMPORTS: dict[str, set[str]] = {
         "viz",
     },
     "experiments": {
+        "common",
         "constants",
         "dataload",
         "env",

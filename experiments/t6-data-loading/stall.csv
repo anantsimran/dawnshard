@@ -1,0 +1,3 @@
+pipeline,steps,data_stall_fraction,tokens_per_s
+v0 BPE in __getitem__,60,0.4673,575
+v1 pre-tokenized shards,60,0.0049,1096

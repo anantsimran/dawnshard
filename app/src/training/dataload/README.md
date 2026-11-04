@@ -299,6 +299,69 @@ A chunk is one sample, not a batch. The hierarchy is:
 
 ______________________________________________________________________
 
+## Pretraining scale: shards, streaming, and exact resume
+
+For a corpus too large to tokenize at load time or to hold in memory, the pipeline
+splits in two: an offline job turns text into token shards once, and training
+streams windows out of them. [shards.py](shards.py) and
+[streaming.py](streaming.py) implement it; neither names a dataset.
+
+### Tokenize once, offline
+
+`write_shards` concatenates already-tokenized documents, each followed by an EOS id,
+into flat uint32 `.bin` files of a fixed token count, with a `.idx` of document start
+offsets per shard; `write_manifest` lists them in stream order. The training loop
+never sees text again. uint32, because uint16 tops out at id 65,535 and a larger
+vocabulary would wrap silently into wrong tokens.
+[tokenize_shards.sh](../../../../scripts/tokenize_shards.sh) runs one tokenize job per
+input file under `xargs -P`, then writes the manifest.
+
+### Pack, then mask per document
+
+Windows are cut from the token stream without regard to document boundaries, so a
+window can hold the end of one document and the start of the next, and no position
+is padding. The EOS between them is enough to recover the boundary:
+`transformer.mask.document_keep_mask` keeps attention inside each document, and
+`document_positions` restarts positions at each document's first token.
+
+### The order is a function, so resume is exact
+
+`StreamingTokens` serves sample `i`, token window `i` of the stream, in the order
+`global_order(num_samples, seed, epoch)`: a permutation that depends on nothing else.
+Global batch `k` is the `k`-th slice of `B` indices. Rank `r` of `R` takes the
+`r`-th contiguous `B / R` of it, and DataLoader worker `w` of `W` builds the batches
+for steps `w, w + W, ...`, which the DataLoader hands back in step order. Every index
+is served exactly once per epoch, by exactly one rank and worker.
+
+`StatefulLoader` wraps the DataLoader and keeps the position as two integers, the
+epoch and the samples consumed globally, with `state_dict` and `load_state_dict`. Put
+it in `TrainState.loader` and every checkpoint saves it. On resume the next step is
+`samples_consumed // B`. The rank split is the only thing that depends on the world
+size, so a run checkpointed on 4 ranks resumes on 2 with the same global batches, as
+long as `B` is unchanged.
+
+The common way to break this is an `IterableDataset` that does not shard: every rank
+and every worker iterates the whole stream, so each sample is served `R x W` times.
+
+### Shuffle buffers
+
+`shuffle_buffer(items, size, seed)` emits a random element of a bounded buffer as each
+new one arrives: every item exactly once, with no index needed. An item moves at most
+about `size` places, so when consecutive samples come from one shard, a small buffer
+leaves them clustered. Its state is the buffer's contents, which is why the resumable
+order above is a global permutation instead.
+
+### Remote shards
+
+`TokenSource` reads a local directory through memmaps, or an `http(s)://` prefix (a
+public or presigned bucket URL) with byte-range GETs. With a cache directory, it
+downloads each whole shard once, in parallel with `prefetch`, and memmaps the copy.
+Text models need little bandwidth: tokens/s x 4 bytes. When text training waits on
+data, the cause is CPU work in the loader or a bug, which `EpochSpec.measure_data_stall`
+shows in the history as `data_stall_fraction`.
+
+______________________________________________________________________
+
 ## Writing a new loader
 
 1. **Write the Dataset.** One sample per `__getitem__`, in the structure the model's
@@ -318,6 +381,9 @@ ______________________________________________________________________
 
 ## Sources
 
+- MosaicML Streaming docs,
+  [shuffling and resumption](https://docs.mosaicml.com/projects/streaming/en/stable/):
+  deterministic sample order across world sizes and mid-epoch resumption.
 - PyTorch docs, [torch.utils.data](https://pytorch.org/docs/stable/data.html):
   dataset types, samplers, `collate_fn`, `shuffle`, `generator`, automatic batching,
   multi-process loading, and `DistributedSampler`.

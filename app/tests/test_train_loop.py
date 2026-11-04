@@ -403,3 +403,31 @@ def test_accumulation_runs_non_stepping_micro_batches_inside_no_sync():
     for index in range(6):
         train_step(train_state=state, epoch_spec=config, batch=(torch.randn(2, 2), torch.randn(2, 1)), epoch=1, batch_index=index, seed=None)
     assert state.model.synced == [False, False, True, False, False, True]
+
+
+def test_data_stall_fraction_is_recorded_when_asked(tmp_path):
+    state, config = make_state_and_config()
+    loader = [(torch.randn(4, 2), torch.randn(4, 1)) for _ in range(3)]
+    config.measure_data_stall = True
+    history = fit(state=state, epoch_spec=config, train_loader=loader, val_loader=loader, num_epochs=1,
+                  val_epoch_list=[], train_seed=0, val_seed=VAL_SEED, test_seed=TEST_SEED, history_path=tmp_path / "h.json")
+    assert 0.0 <= history[0].data_stall_fraction < 1.0
+
+
+def test_checkpoint_saves_and_restores_the_loader_position(tmp_path):
+    class Position:
+        def __init__(self, consumed):
+            self.consumed = consumed
+
+        def state_dict(self):
+            return {"samples_consumed": self.consumed}
+
+        def load_state_dict(self, state_dict):
+            self.consumed = state_dict["samples_consumed"]
+
+    state, config = make_state_and_config()
+    state.loader = Position(consumed=137)
+    save_state(state=state, checkpoint_path=tmp_path / "c.pt")
+    state.loader = Position(consumed=0)
+    load(state=state, epoch_spec=config, checkpoint_path=tmp_path / "c.pt")
+    assert state.loader.consumed == 137

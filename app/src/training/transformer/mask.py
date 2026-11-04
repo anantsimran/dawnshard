@@ -1,8 +1,12 @@
 """Boolean attention masks for `transformer.functions.attention`.
 
-Both masks use attention's convention: True = the (query, key) pair is visible. They
+Every mask uses attention's convention: True = the (query, key) pair is visible. They
 index only the key axis, or the (query, key) pair, and leave the other axes as size 1
 so they broadcast over the scores (B, h, L, L). Combine them with `&`.
+
+`document_ids`, `document_keep_mask`, and `document_positions` serve packed rows,
+where several documents separated by EOS share one sequence: they keep attention
+inside each document and restart positions at each document's first token.
 """
 
 import torch
@@ -65,3 +69,41 @@ def pad_masked_mean(
     """
     keep = mask.unsqueeze(dim=-1)
     return attn.masked_fill(mask=~keep, value=0.0).sum(dim=1) / keep.sum(dim=1).clamp(min=1)
+
+
+@jaxtyped(typechecker=beartype)
+def document_ids(
+    token_ids: Int[torch.Tensor, f"{B} {L}"], eos_id: int
+) -> Int[torch.Tensor, f"{B} {L}"]:
+    """Number the documents packed into each row: 0, then +1 after every `eos_id`.
+
+    The EOS belongs to the document it ends, so a row `[a, b, EOS, c]` is `[0, 0, 0, 1]`.
+    """
+    is_eos = (token_ids == eos_id).long()
+    return is_eos.cumsum(dim=1) - is_eos
+
+
+@jaxtyped(typechecker=beartype)
+def document_keep_mask(
+    doc_ids: Int[torch.Tensor, f"{B} {L}"],
+) -> Bool[torch.Tensor, f"{B} 1 {L} {L}"]:
+    """Causal and block-diagonal: each query sees earlier keys of its own document only.
+
+    Packing documents back to back saves the padding, but plain causal attention lets
+    a document read the end of the one before it. This mask removes those pairs. The
+    diagonal is always kept, so no query row is fully masked.
+    """
+    same = doc_ids.unsqueeze(dim=2) == doc_ids.unsqueeze(dim=1)
+    return (same & causal_keep_mask(seq_len=doc_ids.shape[1], device=doc_ids.device)[0]).unsqueeze(
+        dim=1
+    )
+
+
+@jaxtyped(typechecker=beartype)
+def document_positions(doc_ids: Int[torch.Tensor, f"{B} {L}"]) -> Int[torch.Tensor, f"{B} {L}"]:
+    """Position of each token within its own document, restarting at 0 for each."""
+    index = torch.arange(end=doc_ids.shape[1], device=doc_ids.device).expand_as(other=doc_ids)
+    starts = torch.ones_like(input=doc_ids, dtype=torch.bool)
+    starts[:, 1:] = doc_ids[:, 1:] != doc_ids[:, :-1]
+    first = torch.where(condition=starts, input=index, other=torch.zeros_like(input=index))
+    return index - first.cummax(dim=1).values

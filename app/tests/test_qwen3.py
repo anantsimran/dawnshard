@@ -100,3 +100,15 @@ def test_hidden_output_feeds_a_head_that_reproduces_the_logits():
     hidden = model(ids)
     assert hidden.shape == (10, QWEN3_TINY.hidden_size)
     torch.testing.assert_close(actual=hidden @ model.lm_head_weight.T, expected=logits)
+
+
+def test_a_packed_document_ignores_the_one_before_it():
+    torch.manual_seed(seed=0)
+    eos = 3
+    model = Qwen3(config=QWEN3_TINY, document_eos_id=eos).eval()
+    doc_a, doc_b = torch.tensor([10, 11, 12, eos]), torch.tensor([20, 21, 22, 23])
+    packed = torch.cat([doc_a, doc_b]).unsqueeze(0)
+    with torch.no_grad():
+        alone = model(doc_b.unsqueeze(0)).view(4, -1)
+        in_pack = model(packed).view(8, -1)[4:]
+    torch.testing.assert_close(actual=in_pack, expected=alone, atol=1e-5, rtol=1e-5)

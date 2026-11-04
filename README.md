@@ -213,9 +213,10 @@ accident.
 | `metrics/` | the `Metrics` subclasses and their three functions |
 | `transformer/` | attention, the encoder block, masks, probes, axis names |
 | `common/` | the BPE tokenizer and the indexed max-heap it trains with |
+| `launch/` | `JobSpec`, the `Backend` interface, and the local, Kubernetes JobSet, KubeRay, and SageMaker adapters |
 | `env/` | sandboxed coding episodes: environment, sandbox runtimes, verifier, failure classifier, agent loop, probes |
 | `dataload/` | dataset caches and the AG News, Multi30k, and MBPP pipelines |
-| `model/` | the MNIST classifiers, AG News classifier, and Multi30k predictor |
+| `model/` | the MNIST classifiers, AG News classifier, Multi30k predictor and translator, and the Qwen3 decoder |
 | `experiments/` | config sweeps and ablations over a model's entry point |
 | `viz/` | every plot |
 | `analytics/` | printed dataset statistics |
@@ -397,8 +398,9 @@ ______________________________________________________________________
 | Attention | scaled dot-product attention, multi-head self- and cross-attention with optional QK norm, fixed sinusoidal position encodings, pre-norm encoder and decoder blocks, padding and causal masks, a KV cache, and one decode loop with greedy and beam search; design notes and axis names in the [transformer README](app/src/training/transformer/README.md) | [transformer/](app/src/training/transformer/) |
 | Tokenizer | byte-level BPE, written from scratch, with an indexed max-heap so each merge updates pair counts in O(log n) | [common/](app/src/training/common/) |
 | Data | MNIST through torchvision; AG News and Multi30k sampled, tokenized, and cached; how a `DataLoader` is built in the [dataload README](app/src/training/dataload/README.md) | [dataload/](app/src/training/dataload/), [mnist.py](app/src/training/model/mnist.py) |
-| Models | three MNIST classifiers, an AG News transformer classifier, a Multi30k masked-token predictor, and a Multi30k encoder-decoder translator that decodes a saved bundle and scores it with BLEU | [model/](app/src/training/model/) |
+| Models | three MNIST classifiers, an AG News transformer classifier, a Multi30k masked-token predictor, a Multi30k encoder-decoder translator that decodes a saved bundle and scores it with BLEU, and a Qwen3-style decoder (RMSNorm, RoPE, GQA with QK-norm, SwiGLU, tied head) built from the official config fields | [model/](app/src/training/model/) |
 | Experiments | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation and its scale study, each a grid search ranked by best val loss; the sandboxed MBPP benchmark per runtime | [experiments/](app/src/training/experiments/) |
+| Compute backends | one immutable `JobSpec` (image pinned by digest) submitted unchanged to a local `torchrun`, a Kubernetes JobSet (Kueue-ready), a KubeRay RayJob running Ray Train, or a SageMaker training job; launch telemetry and cost arithmetic | [launch/](app/src/training/launch/), [infra/](infra/) |
 | Environments | a Gymnasium-shaped coding environment for LLM agents: subprocess, runc and gVisor sandboxes behind one interface, a warm pool, a hash-checked verifier with reward-hacking defenses, infra-vs-task failure classification with retries, replayable episode state, and a probe suite | [env/](app/src/training/env/) |
 | Visualization | a run's metrics, two runs side by side, a model's autograd graph, attention heatmaps, BPE sequence length against merges | [viz/](app/src/training/viz/) |
 | Analytics | BPE length stats (mean, min, max, percentiles) for each Multi30k EN split | [analytics/](app/src/training/analytics/) |
@@ -847,6 +849,10 @@ uv run python app/src/training/model/multi30k_translator.py decode --strategy be
 # (agent mode needs an OpenAI-compatible server; see experiments/t2-environments/)
 uv run python app/src/training/experiments/sandbox_benchmark.py oracle --runtime subprocess
 
+# Train the Qwen3-style decoder on 2 local ranks through the launch package
+# (BACKEND=k8s|ray|sagemaker with a digest-pinned spec; DRY_RUN=1 prints the manifest)
+make launch BACKEND=local SPEC=infra/jobs/qwen3_tiny_local.json
+
 # Plot one run's per-epoch metrics
 uv run python app/src/training/viz/plot_metrics.py app/history/<run-id>.json
 
@@ -961,6 +967,7 @@ you never have to remember the underlying flags:
 | `make precheck` | `pyright` + `ruff check --fix` + `ruff format` + `mdformat`. Run it before every PR |
 | `make check-named-args` | Enforce the keyword-argument rule (see [CLAUDE.md](CLAUDE.md)) |
 | `make check-docstrings` | Enforce the docstring rule (see [CLAUDE.md](CLAUDE.md)) |
+| `make launch BACKEND=… [SPEC=…] [DRY_RUN=1]` | Submit a `JobSpec` to the local, k8s, ray, or sagemaker backend and follow its logs |
 | `make install-hooks` | Install the versioned docstring pre-commit check (once after cloning) |
 | `make docker-build*` / `make docker-run*` | Build and run the Docker images (above) |
 | `make nb-to-py NB=…` / `make py-to-nb PY=…` | Convert between notebooks and scripts |
@@ -1062,12 +1069,22 @@ dawnshard/
 │   │       │   ├── ag_news.py        # AG News: sample, tokenize, cache, one DataLoader per split
 │   │       │   ├── multi30k.py       # Multi30k: translation pairs and English masked-LM batches
 │   │       │   ├── mbpp.py           # MBPP coding tasks, sampled by seed
+│   │       │   ├── tokens.py         # TokenWindows over a flat uint32 token file; lm_collate
 │   │       │   └── constants.py      # DATASETS_CACHE_DIR
-│   │       ├── model/                # MNIST, AG News, and Multi30k model entry points
+│   │       ├── model/                # MNIST, AG News, Multi30k, and Qwen3 model entry points
 │   │       │   ├── mnist.py                # three digit classifiers
 │   │       │   ├── ag_news_classifier.py   # text classifier and attention probe
 │   │       │   ├── multi30ken_predictor.py # masked-token predictor and its single run
-│   │       │   └── multi30k_translator.py  # encoder-decoder translator, its single run, bundle, decode + BLEU
+│   │       │   ├── multi30k_translator.py  # encoder-decoder translator, its single run, bundle, decode + BLEU
+│   │       │   └── qwen3.py                # Qwen3-style decoder from a config; torchrun training entry point
+│   │       ├── launch/               # one JobSpec on local, Kubernetes, Ray, and SageMaker
+│   │       │   ├── spec.py           # JobSpec: digest-pinned image, module, width, data and checkpoint URIs
+│   │       │   ├── backend.py        # Backend interface, JobState, torchrun command, cost arithmetic
+│   │       │   ├── local.py          # torchrun --standalone subprocess
+│   │       │   ├── k8s.py            # JobSet rendering, kubectl, status mapping, cold-start events
+│   │       │   ├── ray_job.py        # KubeRay RayJob rendering; ray_train.py is its entrypoint
+│   │       │   ├── sagemaker_job.py  # CreateTrainingJob request; sagemaker_entry.py runs torchrun there
+│   │       │   └── cli.py            # make launch: submit, stream logs, exit with the job's state
 │   │       ├── experiments/          # config studies over a model's entry point
 │   │       │   ├── common.py         # grid_search, LR schedules, norm names, seed repeats
 │   │       │   ├── multi30ken_predictor_ablation.py # sweep, follow-ups, ablation
@@ -1088,15 +1105,17 @@ dawnshard/
 ├── reports/                      # measured tradeoffs, report generators, CSV data, PNG/SVG figures
 ├── notebooks/hello_world.ipynb   # starter notebook: the sys.path cell to borrow, then imports
 ├── pages/                        # MkDocs hooks and theme overrides for the website
+├── infra/                        # job specs (jobs/), kind and Kueue manifests (k8s/)
 ├── scripts/
 │   ├── check_named_args.py       # keyword-argument linter
-│   └── check_docstrings.py       # docstring-presence linter
+│   ├── check_docstrings.py       # docstring-presence linter
+│   └── teardown.sh               # delete every cloud resource the compute-backend work creates
 ├── .claude/hooks/                # pre-PR gate: named args, tests, README touched when source changed
 ├── .githooks/pre-commit          # runs the docstring check (make install-hooks)
 ├── .github/workflows/pages.yml   # builds and deploys the website on push to main
 ├── mkdocs.yml                    # website config and navigation
 ├── Dockerfile                    # uv-based prod/dev image
-├── Makefile                      # test / precheck / lint / docker / notebook targets
+├── Makefile                      # test / precheck / lint / launch / docker / notebook targets
 ├── pyproject.toml                # deps, ruff, pyright, pytest config
 └── .env                          # PYTHONPATH=app/src (loaded via UV_ENV_FILE)
 ```

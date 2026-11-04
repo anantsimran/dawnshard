@@ -1,0 +1,8 @@
+{
+  "name": "qwen3-tiny-local",
+  "image": "local",
+  "module": "training.model.qwen3",
+  "args": ["--config", "tiny", "--synthetic", "--steps", "20", "--batch-size", "4", "--seq-len", "64"],
+  "nodes": 1,
+  "procs_per_node": 2
+}

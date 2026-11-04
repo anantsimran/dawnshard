@@ -1,0 +1,57 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: qwen3-cpu
+  labels:
+    app.kubernetes.io/managed-by: dawnshard
+spec:
+  suspend: false
+  network:
+    enableDNSHostnames: true
+  failurePolicy:
+    maxRestarts: 1
+  replicatedJobs:
+  - name: workers
+    replicas: 1
+    template:
+      spec:
+        parallelism: 2
+        completions: 2
+        completionMode: Indexed
+        backoffLimit: 0
+        template:
+          spec:
+            restartPolicy: Never
+            containers:
+            - name: trainer
+              image: ghcr.io/x/dawnshard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+              command:
+              - sh
+              - -c
+              - until getent hosts qwen3-cpu-workers-0-0.qwen3-cpu; do sleep 1; done;
+                exec torchrun --nproc-per-node=1 --nnodes=2 --rdzv-backend=c10d --rdzv-endpoint=qwen3-cpu-workers-0-0.qwen3-cpu:29500
+                --rdzv-id=qwen3-cpu --max-restarts=1 -m training.model.qwen3 --steps
+                200
+              env:
+              - name: DAWNSHARD_BACKEND
+                value: k8s
+              - name: DAWNSHARD_IMAGE
+                value: ghcr.io/x/dawnshard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+              - name: DAWNSHARD_RUN_ID
+                value: qwen3-cpu
+              ports:
+              - containerPort: 29500
+              resources:
+                limits:
+                  cpu: '2'
+                  memory: 8Gi
+                requests:
+                  cpu: '2'
+                  memory: 8Gi
+              volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory

@@ -1,0 +1,63 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: qwen3-gpu
+  labels:
+    app.kubernetes.io/managed-by: dawnshard
+    kueue.x-k8s.io/queue-name: team-a
+spec:
+  suspend: true
+  network:
+    enableDNSHostnames: true
+  failurePolicy:
+    maxRestarts: 1
+  replicatedJobs:
+  - name: workers
+    replicas: 1
+    template:
+      spec:
+        parallelism: 2
+        completions: 2
+        completionMode: Indexed
+        backoffLimit: 0
+        template:
+          spec:
+            restartPolicy: Never
+            containers:
+            - name: trainer
+              image: ghcr.io/x/dawnshard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+              command:
+              - sh
+              - -c
+              - until getent hosts qwen3-gpu-workers-0-0.qwen3-gpu; do sleep 1; done;
+                exec torchrun --nproc-per-node=1 --nnodes=2 --rdzv-backend=c10d --rdzv-endpoint=qwen3-gpu-workers-0-0.qwen3-gpu:29500
+                --rdzv-id=qwen3-gpu --max-restarts=1 -m training.model.qwen3
+              env:
+              - name: DAWNSHARD_BACKEND
+                value: k8s
+              - name: DAWNSHARD_IMAGE
+                value: ghcr.io/x/dawnshard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+              - name: DAWNSHARD_RUN_ID
+                value: qwen3-gpu
+              ports:
+              - containerPort: 29500
+              resources:
+                limits:
+                  cpu: '4'
+                  memory: 16Gi
+                  nvidia.com/gpu: 1
+                requests:
+                  cpu: '4'
+                  memory: 16Gi
+                  nvidia.com/gpu: 1
+              volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+            tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule

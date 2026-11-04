@@ -1,0 +1,14 @@
+{
+  "name": "qwen3-small-ddp",
+  "image": "REGISTRY/dawnshard@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "module": "training.model.qwen3",
+  "args": ["--config", "small", "--tokens", "/data/tinystories.bin", "--steps", "200"],
+  "nodes": 2,
+  "gpus_per_node": 1,
+  "cpus_per_node": 4,
+  "memory_gb": 16,
+  "data_uri": "s3://BUCKET/tinystories/",
+  "checkpoint_uri": "s3://BUCKET/checkpoints/qwen3-small-ddp/",
+  "max_restarts": 1,
+  "queue": "team-a"
+}

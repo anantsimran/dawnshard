@@ -1,4 +1,4 @@
-.PHONY: test precheck check-named-args check-docstrings install-hooks docker-build docker-build-dev docker-run docker-run-dev docker-build-dev-test nb-to-py py-to-nb
+.PHONY: launch test precheck check-named-args check-docstrings install-hooks docker-build docker-build-dev docker-run docker-run-dev docker-build-dev-test nb-to-py py-to-nb
 
 IMAGE_NAME := dawnshard
 
@@ -24,6 +24,14 @@ check-named-args:
 # Check all source files for missing docstrings (run before opening a PR)
 check-docstrings:
 	@find app/src -name "*.py" | xargs uv run python scripts/check_docstrings.py
+
+# Submit a JobSpec to a compute backend and follow it:
+#   make launch BACKEND=local SPEC=infra/jobs/qwen3_tiny_local.json
+# Add DRY_RUN=1 to print the rendered manifest or request instead.
+launch:
+	@test -n "$(BACKEND)" || (echo "Usage: make launch BACKEND=<local|k8s|ray|sagemaker> [SPEC=...] [DRY_RUN=1]" && exit 1)
+	PYTHONPATH=app/src uv run python -m training.launch.cli --backend $(BACKEND) \
+		--spec $(or $(SPEC),infra/jobs/qwen3_tiny_local.json) $(if $(DRY_RUN),--dry-run,)
 
 # Point git at the versioned hooks directory.
 install-hooks:

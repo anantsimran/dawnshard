@@ -1,0 +1,8 @@
+# Local cluster for the CPU stages: one control plane, two workers.
+# kind create cluster --name dawnshard --config infra/k8s/kind.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker

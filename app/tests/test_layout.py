@@ -15,6 +15,7 @@ ALLOWED_IMPORTS: dict[str, set[str]] = {
     "utils": set(),  # noqa: NAR001
     "train": {"constants", "utils"},
     "env": {"constants", "utils"},
+    "launch": {"constants", "utils"},
     "metrics": {"constants", "train"},
     "dataload": {"common", "constants", "utils"},
     "viz": {"common", "constants", "dataload", "transformer"},

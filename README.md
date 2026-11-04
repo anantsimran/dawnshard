@@ -23,10 +23,7 @@ In Brandon Sanderson's Cosmere, a **Dawnshard** is one of the ancient Commands: 
 shattered into the Shards that now shape every world. Dawnshards are not
 weapons or artifacts; they are *access*.
 
-Deep learning is the same idea, expressed in math. A neural network is a mortal
-tool for accessing something that looks god-like and magical: the ability to
-compress, generalize, and understand patterns at scales no human could process
-unaided. The library's name is a reminder to build the infrastructure that lets humans reach for
+The library's name is a reminder to build the infrastructure that lets humans reach for
 that kind of power responsibly.
 
 ______________________________________________________________________
@@ -147,6 +144,56 @@ and return metrics or epoch records.
   `fit`. What changes between them is what goes in: the model, the metrics, a probe,
   and the data. `profiled_fit` changed the mechanism instead, reusing `train_step` and
   `eval_step` untouched.
+
+______________________________________________________________________
+
+## How it compares
+
+Every training framework stores the same three things somewhere. The difference is
+which object owns each one, and therefore what you edit when one of them changes.
+
+### Where each framework keeps state, policy, and mechanism
+
+| Framework | State | Policy | Mechanism | To change what a step does |
+|---|---|---|---|---|
+| Keras | the `keras.Model`: `compile` stores the optimizer, loss, and metrics on it | `compile` and `fit` arguments | `Model.fit`, which calls `Model.train_step` | override `train_step` in a `Model` subclass |
+| PyTorch Lightning | the `LightningModule`, an `nn.Module` that also returns its optimizers from `configure_optimizers` | `Trainer` flags | the `Trainer` loop, calling the module's `training_step` | edit `training_step` on the model class |
+| Hugging Face `Trainer` | the `Trainer` instance, which holds the model, optimizer, and scheduler | `TrainingArguments` | the `Trainer` loop | pass `compute_loss_func` for a new loss; subclass `Trainer` for any other change to the loop |
+| Flax | an explicit `TrainState`; `apply_gradients` returns a new one | yours to write | yours to write | write your own step |
+| Dawnshard | `TrainState`, holding caller-owned PyTorch objects | `EpochSpec` | `fit`, `run_epoch`, `train_step`, `eval_step` | pass a different `criterion`, metric function, or probe; any other change is a new step function |
+
+Keras, Lightning, and Hugging Face each make one class the home for at least two of
+the three: the model class holds the step, or the trainer class holds the state and
+the loop. Flax keeps state explicit and leaves the loop to you. Dawnshard keeps
+Flax's explicit state and ships the loop as plain functions, so each concern is its
+own argument at the call site.
+
+### What the split buys over a trainer class
+
+- **A change touches the argument that owns it.** The four entry points in
+  [model/](app/src/training/model/), for a CNN, a transformer classifier, a
+  masked-token predictor, and a translator, all pass the same `nn.CrossEntropyLoss()`. What
+  separates their runs is the `Metrics` family and the probe in `EpochSpec`. None of
+  them subclasses anything from `train/`.
+- **Every extension point is a field you can read.** Hugging Face's
+  `TrainerCallback` defines 16 events, and its callbacks are read-only apart from the
+  `TrainerControl` flags they return. `EpochSpec` holds five callables, three metric
+  functions and two probes, and `grep epoch_spec. train_loop.py` lists every line
+  that calls one.
+- **The model stays a plain `nn.Module`.** Lightning's `Trainer` fits a
+  `LightningModule`, and Keras keeps the optimizer on the model. Every model in
+  [model/](app/src/training/model/) subclasses `nn.Module` and nothing else, so
+  [a model test](app/tests/test_ag_news_classifier.py) calls the classifier's forward
+  pass directly, with no loop around it.
+- **A sweep is a for loop over `fit`.** `grid_search` in
+  [experiments/common.py](app/src/training/experiments/common.py) takes three builder
+  functions (loaders, state, and spec) and calls `fit` once per config. The 66
+  comparison runs in the [ablation report](experiments/reports/multi30k_ablations.md) went
+  through it.
+
+The [trainer design article](knowledge_sharing/trainer_design.md) follows one change
+through each framework, traces every consequence to the code, and lists the features
+each framework ships.
 
 ______________________________________________________________________
 
@@ -373,10 +420,14 @@ uv run python app/src/training/viz/compare_runs.py app/history/<run-a>.json app/
 
 Pass `wandb_run=` to `fit` and it logs every epoch's dict, the same one that ends up
 in the file, with `wandb_run.log` as the epoch finishes. Both outputs use
-`serialize_epoch_record`, so their epoch fields match. It is off by default.
-`init_wandb` in [setup.py](app/src/training/setup.py) reads `WANDB_API_KEY`; the
-example entry points gate it behind flags, and the loop only sees the optional
-`wandb_run` argument.
+`serialize_epoch_record`, so their epoch fields match. The loop only sees the optional
+`wandb_run` argument and skips logging when it is `None`.
+
+W&B is off by default. `init_wandb` in [setup.py](app/src/training/setup.py) reads
+`WANDB_API_KEY`, and each example entry point puts the call behind a flag, such as
+`SHOULD_LOG_WANDB = False` in `main()` of [mnist.py](app/src/training/model/mnist.py).
+To enable it, set `WANDB_API_KEY` and flip the flag. To stay fully offline, leave the
+flag `False`, or run `wandb disabled` or `export WANDB_MODE=disabled`.
 
 ### When the numbers aren't enough
 
@@ -402,8 +453,8 @@ ______________________________________________________________________
 | Analytics | BPE length stats (mean, min, max, percentiles) for each Multi30k EN split | [analytics/](app/src/training/analytics/) |
 | Tests | a pytest suite; `attention` is checked against `torch.nn.functional.scaled_dot_product_attention` | [tests/](app/tests/) |
 | Tutorials | theory and revision notes from tensors to attention masks, published as a website | [tutorials/](tutorials/) |
-| Knowledge sharing | engineering articles that trace design choices through the implementation | [Reproducibility](knowledge_sharing/reproducibility.md) |
-| Reports | measured tradeoffs, with figures, exported data, and reproduction commands | [Multi30k ablations](reports/multi30k_ablations.md), [tokenisation](reports/multi30k_tokenisation.md) |
+| Knowledge sharing | engineering articles that trace design choices through the implementation | [Trainer design](knowledge_sharing/trainer_design.md), [Reproducibility](knowledge_sharing/reproducibility.md) |
+| Reports | measured tradeoffs, with figures, exported data, and reproduction commands | [Multi30k ablations](experiments/reports/multi30k_ablations.md), [tokenisation](experiments/reports/multi30k_tokenisation.md) |
 
 Logs go through loguru, Weights & Biases is optional, and everything runs with `uv`
 locally or in Docker.
@@ -476,94 +527,38 @@ history = fit(
 )
 ```
 
-All three seeds are required, and none of them defaults: a run should say which
-random streams it used. The train seed is drawn fresh each run so results are not
-read off one lucky draw. The eval seeds are fixed constants so masking can stay
-comparable across passes. Seeds control part of a run; exact replay also depends on
-the data, tokenizer, model configuration, and execution environment.
-
-The three seeds do three different jobs, and the split is the point:
+All three seeds are required, and none of them defaults, so every run states which
+random streams it used. Each one has a single job:
 
 - **`train_seed` owns the global RNG.** `fit` calls `torch.manual_seed` with it once,
-  before the first epoch, so shuffling, dropout, and training collates start from
-  the same RNG state for the same setup. One call covers every device: it seeds CPU,
-  CUDA, MPS, and XPU. Weight init happens before `fit` ever sees the model, so each
-  `main` seeds with the same
-  value just before constructing it. Those two calls are the only `torch.manual_seed`
-  in `app/src`. Together they control model initialization and the RNG stream inside
-  `fit`; they do not cover work the data loader does before those calls.
-- **The train seed is drawn fresh for every run.** Each `main` sets
-  `train_seed = random.getrandbits(32)` rather than pinning a literal, so no single
-  lucky draw gets trained on forever and a result that only holds for one seed shows
-  itself. `fit` writes the seed to `meta.seeds`, so its seeded draws can be replayed
-  with the same inputs and configuration.
+  before the first epoch, which seeds CPU, CUDA, MPS, and XPU for shuffling, dropout,
+  and training collates. Weight init happens before `fit` sees the model, so each
+  `main` seeds with the same value just before building it. Those two calls are the
+  only `torch.manual_seed` in `app/src`. Each `main` draws the seed fresh with
+  `random.getrandbits(32)`, so a result that only holds for one lucky draw shows
+  itself across runs.
 - **`val_seed` and `test_seed` are fixed repo-wide**, as `VAL_SEED` and `TEST_SEED` in
-  [constants.py](app/src/training/constants.py), and only `train_seed` varies per run.
-  Eval randomness that changes between runs makes `val_loss` incomparable: with masked
-  language modelling, a drop from 2.31 to 2.29 could be a better model or an easier
-  mask. Fixing the eval seeds takes that term out. The caller passes the constants
-  rather than the signature defaulting to them, so a run states every seed it used.
-  `fit` does not run a test pass; it only records `test_seed` for the test loader.
-- **Only `val_seed` travels.** `fit` hands `train_seed` to nothing but
-  `torch.manual_seed`: a training pass passes `seed=None` to its step and probe, and
-  any randomness they draw comes from the global RNG that seed set. A validation pass
-  gets `val_seed`, threaded by `run_epoch` to the step and on to the probe without
-  reseeding anything, so an eval probe can use it for deterministic sampling. The
-  train seed controls the loop's RNG stream; the val seed holds validation masking
-  steady. A loader's own randomness stays the loader's job; see
+  [constants.py](app/src/training/constants.py). With masked language modelling, a
+  `val_loss` drop from 2.31 to 2.29 could be a better model or an easier mask; fixed
+  eval seeds remove the second explanation. The caller passes the constants rather
+  than the signature defaulting to them. `fit` runs no test pass and only records
+  `test_seed`.
+- **Only `val_seed` travels.** A training pass hands its step and probe `seed=None`,
+  so their randomness comes from the global RNG. A validation pass threads `val_seed`
+  through `run_epoch` to the step and on to the probe without reseeding anything, so
+  an eval probe can sample deterministically. A loader's own randomness stays the
+  loader's job; see
   [Random collates](app/src/training/dataload/README.md#random-collates-mask-validation-and-test-once).
 
-All three land in the history file's `meta.seeds`, so a run records its seed choices.
+All three land in the history file's `meta.seeds`.
 
-The seed roles are explicit, but the global generator does something worth knowing
-before you read a curve. A seed does
-not name a value, it selects a stream; every draw moves a position along it. Seeding
-twice with the same number does not continue the stream, it returns to position zero:
-
-```
-  main()
-    │  torch.manual_seed(train_seed)
-    ▼
-  ┌─────────────────────┐
-  │ S(train_seed)  n=0  │ ◄─────────────────────────────────┐
-  └──────────┬──────────┘                                   │
-             │  Model()                weight init draws    │
-             ▼                                              │
-  ┌─────────────────────┐                                   │
-  │ S(train_seed)  n=k  │  k is set by the architecture     │
-  └──────────┬──────────┘                                   │
-             │  any other setup draws before fit             │
-             ▼                                              │
-  ┌─────────────────────┐                                   │
-  │ S(train_seed)  n=m  │                                   │
-  └──────────┬──────────┘                                   │
-             │  fit() calls torch.manual_seed(train_seed) ──┘
-             │  the stream rewinds; it does not carry on from n=m
-             ▼
-  ┌─────────────────────┐
-  │ S(train_seed)  n=0  │  every epoch's shuffle, dropout, and collate
-  └─────────────────────┘  draws from here on
-```
-
-`S(x)` is the stream seeded with `x`, and `n` is how many draws have been taken from
-it. Three consequences fall out of that back edge:
-
-- **`fit` starts from the same RNG state for the same `train_seed`.** The rewind
-  means draws made during setup do not shift the start of training. With the same
-  model, loaders, and data, it replays the same draw sequence. Changing the model
-  or loader can change how many draws training consumes, so the same seed alone
-  does not make two architectures a controlled comparison.
-- **Training replays the draws init just used.** Both start at `n=0` of the same
-  stream, so the numbers that set the weights are the numbers that later mask the
-  activations. It is harmless in practice, but init and training are not independent
-  streams, and anything that assumes they are is wrong here.
-- **Two `fit` calls in one process are not independent.** The second rewinds to `n=0`
-  as well. Use a different `train_seed` for an independent run.
-
-Workers are covered: a `DataLoader` draws its base seed from this generator, and each
-worker derives its own from that, so the rewind reaches them too. See
-[the dataload README](app/src/training/dataload/README.md#seeding) for what that means
-inside `__getitem__`.
+The second `torch.manual_seed` call rewinds the generator to the start of the
+`train_seed` stream instead of continuing it. Draws made during setup therefore do not
+shift the first epoch, and the `DataLoader` base seed, which workers derive their own
+seeds from, comes from the rewound stream. The
+[reproducibility article](knowledge_sharing/reproducibility.md) follows that stream
+through model construction, loaders, workers, and validation masks, and lists what
+the rewind implies for comparing runs.
 
 ### Repeat a past run
 
@@ -576,17 +571,14 @@ jq '.meta.seeds' app/history/<run-uuid>.json
 train_seed = 2847715383  # from that run's meta.seeds, in place of a fresh draw
 ```
 
-For the same model and loaders, `fit` starts from the same RNG state, covering
-shuffle, dropout, and training-time collate draws. Weight initialization starts
-from that seed too when `torch.manual_seed` runs before the model is built.
-
-The recorded seeds are not a complete Multi30k replay recipe. Its loader randomly
-reorders training rows before the entry point chooses the recorded `train_seed`, even
-when it keeps all 29,000 rows. The downloaded splits and selected BPE merges are
-local cache files, and their identities are not saved in the history. Keep those
-inputs and the model configuration alongside the seed to reproduce a past setup.
-Validation masks are stable per sentence when the split, tokenizer, and `val_seed`
-are the same.
+For the same model and loaders, `fit` starts from the same RNG state, and weight
+initialization does too when `torch.manual_seed` runs before the model is built. The
+seeds cannot reach data prepared before they were drawn: the Multi30k loader reorders
+its training rows before the entry point picks `train_seed`, and the downloaded splits
+and BPE merges are cache files the history does not identify. Keep those inputs and
+the model configuration next to the seed;
+[What a replay covers](knowledge_sharing/reproducibility.md#what-a-replay-covers)
+lists the rest.
 
 ### Add a metric
 
@@ -778,7 +770,7 @@ ids = bpe.encode(text="Stocks rally as tech earnings beat forecasts", merges=mer
 ```
 
 On the AG News train split, 2,000 merges bring the average sample down from 236 bytes
-to 79 tokens. The [Multi30k tokenisation report](reports/multi30k_tokenisation.md)
+to 79 tokens. The [Multi30k tokenisation report](experiments/reports/multi30k_tokenisation.md)
 measures how vocabulary size changes caption lengths in English and German.
 
 ______________________________________________________________________
@@ -850,10 +842,10 @@ uv run python app/src/training/viz/bpe_seq_len.py
 uv run python app/src/training/analytics/multi30ken_bpe_len.py
 
 # Export the tokenisation report's CSV and plots from saved notebook output
-uv run python reports/generate_multi30k_tokenisation.py
+uv run python experiments/reports/generate_multi30k_tokenisation.py
 
 # Export the ablation report's summary and plots from checked-in study CSVs
-uv run python reports/generate_multi30k_ablations.py
+uv run python experiments/reports/generate_multi30k_ablations.py
 
 # Execute the starter notebook and print its outputs, leaving the file unchanged
 uv run jupyter nbconvert --execute --to markdown --stdout notebooks/hello_world.ipynb
@@ -864,13 +856,6 @@ make test
 
 **Device selection is automatic** ([setup.py](app/src/training/setup.py)): CUDA → MPS →
 CPU, in that order. Force CPU with `DISABLE_GPU=1`.
-
-### Weights & Biases is optional
-
-W&B logging is **off by default**. `main()` in [mnist.py](app/src/training/model/mnist.py)
-gates it behind `SHOULD_LOG_WANDB = False`, and `fit(...)` simply skips logging when
-no run is passed. To enable it, set `WANDB_API_KEY` and flip the flag. To stay fully
-offline, leave the flag `False` (or run `wandb disabled` / `export WANDB_MODE=disabled`).
 
 ### The three MNIST models
 
@@ -980,11 +965,14 @@ One file per topic, each a sequence of `##` sections:
 - [tutorials/transformer.md](tutorials/transformer.md) — attention masks and
   cross-attention, pre-norm vs post-norm, and compute and memory planning.
 
+The [trainer design article](knowledge_sharing/trainer_design.md) compares where
+Keras, Lightning, Hugging Face, Flax, and Dawnshard keep state, policy, and
+mechanism, and what each framework offers.
 The [reproducibility article](knowledge_sharing/reproducibility.md) follows the
 library's random streams through initialization, loaders, workers, and masks.
-The [Multi30k tokenisation report](reports/multi30k_tokenisation.md) compares BPE
+The [Multi30k tokenisation report](experiments/reports/multi30k_tokenisation.md) compares BPE
 vocabulary sizes with downloadable figures and statistics.
-The [Multi30k ablation report](reports/multi30k_ablations.md) follows dropout,
+The [Multi30k ablation report](experiments/reports/multi30k_ablations.md) follows dropout,
 depth, and learning-rate schedules across 66 comparison runs, with links to the
 full study records and their data.
 
@@ -1060,9 +1048,10 @@ dawnshard/
 │   ├── history/                  # per-run history JSON; traces/ and attention_probes/ (gitignored)
 │   └── datasets/                 # downloaded dataset cache (gitignored)
 ├── tutorials/                    # theory and revision, one file per topic: pytorch.md, training.md, transformer.md, math.md, vision.md; index.md
-├── experiments/<model>/<date>/   # one study per folder: write-up, CSV exports, plots
+├── experiments/
+│   ├── <model>/<date>/           # one study per folder: write-up, CSV exports, plots
+│   └── reports/                  # measured tradeoffs, report generators, CSV data, PNG/SVG figures
 ├── knowledge_sharing/            # standalone engineering articles and SVG diagrams
-├── reports/                      # measured tradeoffs, report generators, CSV data, PNG/SVG figures
 ├── notebooks/hello_world.ipynb   # starter notebook: the sys.path cell to borrow, then imports
 ├── pages/                        # MkDocs hooks and theme overrides for the website
 ├── scripts/

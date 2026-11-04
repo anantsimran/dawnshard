@@ -1,19 +1,18 @@
 # Multi30k EN→DE translation: a scale study
 
-`Multi30kTranslator` is a pre-norm encoder-decoder trained by teacher forcing on
-Multi30k's English–German pairs. This page records 27 training runs made between
-2026-10-13 and 2026-10-15 (9 arms, 3 seeds each, 25 epochs) that ask what changes when
-the model gets bigger. It follows the
-[128-wide ablation of 2026-10-13](../2026-10-13/README.md), whose control is the
-reference row below. Every number comes from [runs.csv](runs.csv) and
-[epochs.csv](epochs.csv), exported from the runs' history files.
+The [width-128 translator ablation](../2026-10-13/README.md) found no clear schedule
+effect. This follow-up
+compares 9 arms over 25 epochs with 3 seeds each, widening the
+`Multi30kTranslator` and changing schedules, depth, and dropout. Width 256 improves
+mean best validation loss by 0.056 over the earlier 128 control. At width 256, warmup
+plus cosine improves it by another 0.034 over the new control. At width 512, a
+constant learning rate performs worse; warmup helps, but its best loss still trails
+the width-256 warmup arm.
 
-The short version: **at 256 wide, a warmup starts to matter, and more capacity does
-not.** Doubling the width from 128 to 256 improved best val loss by 0.056. Both warmup
-schedules then beat the 256 control by more than any seed's spread, the best by 0.034.
-Going further, to 512 wide or to 12+12 blocks, made the model worse at a constant
-learning rate. A warmup rescued the 512 model, but it still trails the 256 model with
-the same warmup on loss.
+The 27 runs are in [runs.csv](runs.csv) and [epochs.csv](epochs.csv). The
+[ablation report](../../reports/multi30k_ablations.md) compares these findings
+with the other Multi30k studies; this page records the per-arm evidence and reproduction
+details.
 
 **Accuracy disagrees with loss on width.** By best val accuracy, 512 wide with a warmup
 is the best model on the page, at 67.0% against 65.6% for 256 with the same warmup, and

@@ -13,9 +13,11 @@
         <h1 class="ds-hero__title" id="ds-hero-title">Dawnshard</h1>
         <p class="ds-hero__lead">A top-down–designed ML infrastructure library.</p>
         <p class="ds-hero__description">
-          One training API accepts models and loaders that meet its batch contract.
-          Explicit state, supplied policy, and named functions keep the loop reusable;
-          tests guard the package boundaries, and each run leaves evidence to inspect.
+          State, policy, and mechanism are three separate objects.
+          <code>TrainState</code> holds the model and optimizer,
+          <code>EpochSpec</code> decides how batches are scored and observed, and
+          <code>fit</code> runs the epochs. A CNN and a transformer go through the
+          same <code>fit</code>, and the loop's package imports neither.
         </p>
         <div class="ds-hero__actions">
           <a class="ds-btn ds-btn--primary" href="#separate-state-policy-and-mechanism">
@@ -68,24 +70,38 @@ history = fit(
   <section class="ds-section" id="design" aria-labelledby="ds-design-title">
     <div class="md-grid ds-section__inner">
       <p class="ds-eyebrow ds-eyebrow--accent">Design choices</p>
-      <h2 class="ds-section__title" id="ds-design-title">The principles live in the code</h2>
+      <h2 class="ds-section__title" id="ds-design-title">Separate responsibilities in the code</h2>
       <p class="ds-section__lead">
-        Each choice has a defined home in the library and a place to check its effect.
+        The loop receives its state, scoring, and data as arguments. Package tests
+        keep the dependency boundaries in place.
       </p>
       <div class="ds-grid">
         <article class="ds-card">
           <span class="ds-card__index">01 / Architecture</span>
           <h3>Separate state, policy, and mechanism</h3>
           <p>
-            <code>TrainState</code> holds mutable resources. <code>EpochSpec</code> supplies
-            scoring and probes. <code>fit</code> executes the run for any matching model and data.
+            Replace a model through <code>TrainState</code> or change metrics through
+            <code>EpochSpec</code>. <code>fit</code> uses both without
+            importing a model or dataset.
           </p>
           <a class="ds-card__link" href="#separate-state-policy-and-mechanism">
             Trace the separation {% include ".icons/material/arrow-right.svg" %}
           </a>
         </article>
         <article class="ds-card">
-          <span class="ds-card__index">02 / Extension</span>
+          <span class="ds-card__index">02 / Comparison</span>
+          <h3>Give no class two jobs</h3>
+          <p>
+            Keras, Lightning, and Hugging Face each let one class hold several
+            concerns. Here a new loss, metric, or probe is an argument, and every
+            model stays a plain <code>nn.Module</code>.
+          </p>
+          <a class="ds-card__link" href="#how-it-compares">
+            Compare the trainers {% include ".icons/material/arrow-right.svg" %}
+          </a>
+        </article>
+        <article class="ds-card">
+          <span class="ds-card__index">03 / Extension</span>
           <h3>Give each concern one home</h3>
           <p>
             Metrics score outputs, probes inspect a batch, and checkpointing stays
@@ -96,7 +112,7 @@ history = fit(
           </a>
         </article>
         <article class="ds-card">
-          <span class="ds-card__index">03 / Boundaries</span>
+          <span class="ds-card__index">04 / Boundaries</span>
           <h3>Make dependencies directional</h3>
           <p>
             Each package owns one concern. A test rejects forbidden imports and
@@ -107,7 +123,7 @@ history = fit(
           </a>
         </article>
         <article class="ds-card">
-          <span class="ds-card__index">04 / Observability</span>
+          <span class="ds-card__index">05 / Observability</span>
           <h3>Leave evidence behind</h3>
           <p>
             Epoch records and run history retain metrics, seeds, the Git revision,
@@ -166,8 +182,8 @@ history = fit(
       <p class="ds-eyebrow ds-eyebrow--accent">Reports</p>
       <h2 class="ds-section__title" id="ds-reports-title">Measure the choices behind the model</h2>
       <div class="ds-report-preview ds-report-preview--featured">
-        <a class="ds-report-preview__figure" href="{{ 'reports/multi30k_ablations/' | url }}" aria-label="Read the Multi30k ablation report">
-          <img src="{{ 'reports/assets/multi30k_ablations/width_and_schedule.png' | url }}" alt="Warmup plus cosine barely changes the narrow translator's loss but improves wider models." loading="lazy" width="1585" height="828">
+        <a class="ds-report-preview__figure" href="{{ 'experiments/reports/multi30k_ablations/' | url }}" aria-label="Read the Multi30k ablation report">
+          <img src="{{ 'experiments/reports/assets/multi30k_ablations/width_and_schedule.png' | url }}" alt="Warmup plus cosine barely changes the narrow translator's loss but improves wider models." loading="lazy" width="1585" height="828">
         </a>
         <div class="ds-report-preview__copy">
           <p class="ds-card__index">Multi30k / Ablation studies / October 2026</p>
@@ -183,17 +199,17 @@ history = fit(
             <li><strong>22</strong> arms</li>
             <li><strong>3</strong> seeds per arm</li>
           </ul>
-          <a class="ds-card__link" href="{{ 'reports/multi30k_ablations/' | url }}">
+          <a class="ds-card__link" href="{{ 'experiments/reports/multi30k_ablations/' | url }}">
             Read the ablation report {% include ".icons/material/arrow-right.svg" %}
           </a>
-          <a class="ds-card__link" href="{{ 'reports/multi30k_ablations/#data-and-reproduction' | url }}">
+          <a class="ds-card__link" href="{{ 'experiments/reports/multi30k_ablations/#data-and-reproduction' | url }}">
             Explore the study records and data {% include ".icons/material/arrow-right.svg" %}
           </a>
         </div>
       </div>
       <div class="ds-report-preview">
-        <a class="ds-report-preview__figure" href="{{ 'reports/multi30k_tokenisation/' | url }}" aria-label="Read the Multi30k tokenisation report">
-          <img src="{{ 'reports/assets/multi30k_tokenisation/mean_length.png' | url }}" alt="English and German caption lengths decrease as the BPE vocabulary grows, with diminishing returns." loading="lazy" width="1571" height="786">
+        <a class="ds-report-preview__figure" href="{{ 'experiments/reports/multi30k_tokenisation/' | url }}" aria-label="Read the Multi30k tokenisation report">
+          <img src="{{ 'experiments/reports/assets/multi30k_tokenisation/mean_length.png' | url }}" alt="English and German caption lengths decrease as the BPE vocabulary grows, with diminishing returns." loading="lazy" width="1571" height="786">
         </a>
         <div class="ds-report-preview__copy">
           <p class="ds-card__index">Multi30k / English and German</p>
@@ -203,7 +219,7 @@ history = fit(
             language. See how BPE changes sequence lengths, why a word-to-token
             ratio varies, and what averages hide about longer inputs.
           </p>
-          <a class="ds-card__link" href="{{ 'reports/multi30k_tokenisation/' | url }}">
+          <a class="ds-card__link" href="{{ 'experiments/reports/multi30k_tokenisation/' | url }}">
             Read the report {% include ".icons/material/arrow-right.svg" %}
           </a>
           <a class="ds-card__link" href="{{ 'app/src/training/common/' | url }}">

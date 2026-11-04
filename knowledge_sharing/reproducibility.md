@@ -41,6 +41,16 @@ values; training should not inherit whatever position that work left behind.
 Resetting at `fit` means a new random initializer in the model cannot quietly
 change the first epoch's shuffle.
 
+The reset also has consequences for comparing runs. Initialization and training
+both start at the beginning of the same stream, so the values that set the
+weights are the values that later choose dropout masks; the two are not
+independent draws. A second `fit` in the same process with the same seed
+returns to that start as well, so an independent run needs a different
+`train_seed`. And the seed fixes only where the stream begins. A model or
+loader that consumes a different number of draws per epoch diverges from the
+first such difference, so the same seed alone does not make two architectures
+a controlled comparison.
+
 ![The entry point chooses train_seed and seeds torch before model construction. Fit resets torch with train_seed before training. DataLoader and training operations use default torch generators; Multi30k validation and test masks use separately supplied seeds and private generators.](assets/dawnshard-replay.svg)
 
 *Orange traces the default torch state after `fit` resets it. Blue marks the

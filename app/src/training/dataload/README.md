@@ -1,15 +1,24 @@
 # Dataload
 
-Dataset loading for the library. A loader module exposes one function that returns a
-ready-made `torch.utils.data.DataLoader` per split, and caches downloads under
-`DATASETS_CACHE_DIR` from [constants.py](constants.py). For the rest of the library,
-see the [root README](../../../../README.md).
+This package owns getting data to the loop. A loader module returns one ready-to-use
+`torch.utils.data.DataLoader` per split and keeps downloaded data under
+`DATASETS_CACHE_DIR` from [constants.py](constants.py). The loop relies on one
+contract: each batch is an `(input, target)` tuple. Sampling, padding, masking, and
+caching all happen on this side of it.
 
-This page covers how a PyTorch `DataLoader` is put together, so a new loader can be
-written without guessing, and what each split is for. For the basics (why
-mini-batches, transforms, normalization), see the
+| Owns | Imports from the library | Never sees |
+|---|---|---|
+| downloads, caches, datasets, collate functions, one loader per split | `common`, `constants`, `utils` | the model, the metrics, the training loop |
+
+[test_layout.py](../../../tests/test_layout.py) fails on any other import, so a
+loader cannot start depending on the model it feeds. See the
+[root README](../../../../README.md) for where the package fits in the architecture.
+
+This page is the shared guide to building a loader: the sampler, dataset, and collate
+pipeline, followed by split and randomness decisions. Dataset-specific choices belong
+in the loader module's docstring. For the basics (why mini-batches, transforms, and
+normalization), see the
 [data loading tutorial](../../../../tutorials/pytorch.md#dataloader--batching-and-the-dataset-abstraction).
-Choices specific to one dataset live in that module's docstring.
 
 ______________________________________________________________________
 
@@ -60,10 +69,10 @@ ______________________________________________________________________
 
 ## What you define
 
-### A Dataset: the only required class
+### A Dataset: write one when existing datasets do not fit
 
-You never subclass `DataLoader`; you configure it. The one class to write is the
-dataset, in one of two styles:
+Configure `DataLoader` around a dataset. Reuse an existing dataset when it already
+returns the samples you need; otherwise write one in either style:
 
 - **Map-style (`Dataset`)** implements `__len__` and `__getitem__(idx)`. Use it when
   samples can be indexed, such as files on disk or rows in a tensor. This is the
@@ -177,9 +186,10 @@ Not reusing the train sampler for validation and test is deliberate. Class-balan
 sampling or oversampling changes which examples you see, so reusing it would bias the
 metrics. Validation and test should measure the true distribution, once per example.
 
-**Shuffling validation would not change its metrics.** Order only matters for
-training, where it sets the order of gradient updates. Validation makes no updates,
-and its loss is a mean over every example, which does not depend on order.
+**Shuffling validation normally leaves an aggregate metric unchanged** when every
+example is scored, evaluation is deterministic, and the reduction weights examples
+correctly. It can change the result when batches are truncated, random transforms are
+used, or a final short batch receives the same weight as a full one.
 `shuffle=False` is for two practical reasons:
 
 - **Reproducible batches.** Batch 7 is the same batch every pass, so per-batch logs

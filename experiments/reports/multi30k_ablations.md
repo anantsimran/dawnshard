@@ -183,7 +183,7 @@ statistical significance test.
 Averaging the final ten epochs gives a clearer separation, because it reduces the
 influence of a single low point. That metric was chosen after viewing the
 results. The useful next experiment fixes the metric in advance and adds seeds.
-The earlier [September study](../experiments/multi30ken_predictor/2026-09-29/README.md)
+The earlier [September study](../multi30ken_predictor/2026-09-29/README.md)
 also used a different tokenizer, so its reversal on decay cannot be attributed
 to training length alone.
 
@@ -241,14 +241,14 @@ pilot supplies the first learning curve and is excluded from those counts.
 
 | Study | Comparison runs | Budget | Run-level data | Per-epoch data |
 |---|---|---|---|---|
-| [Translator components](../experiments/multi30k_translator/2026-10-13/README.md) | 30 · 10 arms | 30 epochs | [31 runs including the pilot](../experiments/multi30k_translator/2026-10-13/runs.csv) | [1,000 epochs](../experiments/multi30k_translator/2026-10-13/epochs.csv) |
-| [Translator scale](../experiments/multi30k_translator/2026-10-15/README.md) | 27 · 9 arms | 25 epochs | [27 runs](../experiments/multi30k_translator/2026-10-15/runs.csv) | [675 epochs](../experiments/multi30k_translator/2026-10-15/epochs.csv) |
-| [Masked-token convergence](../experiments/multi30ken_predictor/2026-10-15/README.md) | 9 · 3 arms | 100 epochs | [9 runs](../experiments/multi30ken_predictor/2026-10-15/runs.csv) | [900 epochs](../experiments/multi30ken_predictor/2026-10-15/epochs.csv) |
+| [Translator components](../multi30k_translator/2026-10-13/README.md) | 30 · 10 arms | 30 epochs | [31 runs including the pilot](../multi30k_translator/2026-10-13/runs.csv) | [1,000 epochs](../multi30k_translator/2026-10-13/epochs.csv) |
+| [Translator scale](../multi30k_translator/2026-10-15/README.md) | 27 · 9 arms | 25 epochs | [27 runs](../multi30k_translator/2026-10-15/runs.csv) | [675 epochs](../multi30k_translator/2026-10-15/epochs.csv) |
+| [Masked-token convergence](../multi30ken_predictor/2026-10-15/README.md) | 9 · 3 arms | 100 epochs | [9 runs](../multi30ken_predictor/2026-10-15/runs.csv) | [900 epochs](../multi30ken_predictor/2026-10-15/epochs.csv) |
 
 The [summary CSV](assets/multi30k_ablations/summary.csv) contains all 22 arms,
 including comparisons omitted from the figures. The Czech-to-German arm changes
 the relationship between source and target captions as well as the source
-language; see the [source-language discussion](../experiments/multi30k_translator/2026-10-13/README.md#source-language)
+language; see the [source-language discussion](../multi30k_translator/2026-10-13/README.md#source-language)
 before interpreting its loss gap.
 
 Download the figures as SVG:
@@ -263,7 +263,7 @@ Rebuild the summary and all six figures from checked-in data, without retraining
 or downloading anything:
 
 ```bash
-uv run python reports/generate_multi30k_ablations.py
+uv run python experiments/reports/generate_multi30k_ablations.py
 ```
 
 The [generator](generate_multi30k_ablations.py) checks comparison runs against

@@ -1,6 +1,7 @@
 """Build the ablation report's figures and summary from checked-in study CSVs.
 
-Run with ``uv run python reports/generate_multi30k_ablations.py``. No training,
+Run with
+``uv run python experiments/reports/generate_multi30k_ablations.py``. No training,
 downloads, or gitignored history files are needed. The 100-epoch translator pilot
 is excluded from the three-seed comparisons.
 """
@@ -19,8 +20,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.axes import Axes  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 
-ROOT = Path(__file__).resolve().parents[1]  # noqa: NAR001
-ASSETS = ROOT / "reports/assets/multi30k_ablations"
+ROOT = Path(__file__).resolve().parents[2]  # noqa: NAR001
+ASSETS = ROOT / "experiments/reports/assets/multi30k_ablations"
 INDIGO = "#4f46e5"
 AMBER = "#b45309"
 MUTED = "#64748b"

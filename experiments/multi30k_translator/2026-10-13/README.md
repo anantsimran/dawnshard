@@ -1,15 +1,17 @@
 # Multi30k EN→DE translation: a component, schedule, and language ablation
 
-`Multi30kTranslator` is a pre-norm encoder-decoder trained by teacher forcing on
-Multi30k's English–German pairs. This page records a 30-run ablation made on
-2026-10-13 (10 arms, 3 seeds each, 30 epochs) and the 100-epoch control run before it
-that set the length. Every number below comes from [runs.csv](runs.csv) and
-[epochs.csv](epochs.csv), exported from the runs' history files.
+A 100-epoch pilot with the English–German translator reached its lowest validation
+loss at epoch 9, then overfit. The 2026-10-13 component study compares 10 arms over
+30 epochs, with 3 seeds each. At width 128, removing dropout raises mean best loss by
+0.171, reducing decoder depth raises it by 0.092, and three learning-rate schedules
+fall within the control's seed range.
 
-The short version: **regularization and decoder depth matter, and the learning-rate
-schedule does not, at this size.** Every run reached its best val loss by epoch 13.
-Removing dropout cost 0.171, cutting the decoder to 2 blocks cost 0.092, and all three
-schedules landed inside the control's own seed spread.
+The model uses teacher forcing on Multi30k English–German pairs. Its 30 comparison
+runs are in [runs.csv](runs.csv) and [epochs.csv](epochs.csv). Read the
+[ablation report](../../reports/multi30k_ablations.md) for comparisons across
+studies; this page records the arm definitions, limitations, and reproduction
+details. The [scale follow-up](../2026-10-15/README.md) tests whether the schedule
+finding holds at larger widths.
 
 ______________________________________________________________________
 

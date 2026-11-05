@@ -8,14 +8,17 @@ Two ways to run each candidate:
 
 - restart: every step loads the reference's weights and Adam state into the
   candidate (sharded as the candidate holds them), takes one step on each, and
-  records three statistics per step: the weight-relative error (the per-tensor
-  criterion of single-iteration differential testing), the update-relative error,
-  and the per-step update error itself, for `drift_test`.
+  records per tensor the weight-relative error after the step (the criterion of
+  single-iteration differential testing) and the update-relative error, plus the
+  whole update error for `drift_test`.
 - free: both train freely from the same init; the per-step absolute loss difference
   (the loss-parity test).
 
-Candidates without bugs (naive and bucketed DDP, small buckets, ZeRO-2, hand TP) set
-the noise, and bugs planted in bucketed DDP are what the checks should find:
+Candidates without bugs (naive and bucketed DDP, small buckets, ZeRO-2, and the hand
+TP plan with its QK-norm gradients summed, `tp_fixed`) set the noise. The checks
+should find the hand TP plan as T7 ships it (`tp`: each rank's QK-norm gradient
+covers only its own heads and is never all-reduced), and these bugs planted in
+bucketed DDP:
 
 - `grad_bf16`: the averaged gradient is rounded to bf16 before the optimizer.
 - `microbatch_bf16`: micro-batch gradients accumulate in bf16.
@@ -47,7 +50,7 @@ from torch.multiprocessing.spawn import spawn
 from training.constants import REPO_ROOT
 from training.model.qwen3 import QWEN3_TINY, Qwen3, parallelize_tensor_parallel
 from training.parallel.ddp import BucketedDDP, NaiveDDP
-from training.parallel.parity import drift_test, flatten_shards, global_dot
+from training.parallel.parity import drift_test, flatten_shards, tensor_dots
 from training.parallel.zero import Zero2AdamW
 
 RESULTS_DIR = REPO_ROOT / "experiments" / "subthreshold-bugs"
@@ -56,7 +59,7 @@ CHECKPOINTS = (10, 25, 50, 100, 200)
 LR, WEIGHT_DECAY = 1e-3, 0.1
 ROWS, SEQ_LEN, MICRO_BATCHES, WORLD = 8, 32, 2, 2
 ALPHA, NUM_FLIPS = 0.01, 4000
-CONTROLS = ("naive_ddp", "bucketed_ddp", "bucketed_ddp_small", "zero2", "tp")
+CONTROLS = ("naive_ddp", "bucketed_ddp", "bucketed_ddp_small", "zero2", "tp_fixed")
 BUGS = ("grad_bf16", "microbatch_bf16", "bf16_master", "decay_on_norms", "adam_step_offset")
 CALIBRATION_SEED, EVAL_SEEDS = 0, (1, 2)
 
@@ -116,12 +119,28 @@ def shard_tensor_parallel(template: Qwen3, tensors: Sequence[torch.Tensor]) -> l
     return [p.detach() for p in model.parameters()]
 
 
+def _summed_over_ranks(grad: torch.Tensor) -> torch.Tensor:
+    """Return `grad` all-reduced over the default group, for a tensor hook."""
+    out = grad.clone()
+    dist.all_reduce(tensor=out)
+    return out
+
+
 def build_candidate(kind: str, bug: str, dense: Qwen3, rank: int) -> Candidate:
-    """Shard or wrap a copy of `dense` as `kind` does, with `bug` in its optimizer recipe."""
+    """Shard or wrap a copy of `dense` as `kind` does, with `bug` in its optimizer recipe.
+
+    `tp_fixed` adds what the hand plan leaves out: the QK-norm gains are replicated
+    but applied to each rank's own heads, so each rank's gradient is a partial sum,
+    and a hook on each gain sums it over the TP group before it accumulates.
+    """
     model = copy.deepcopy(dense)  # noqa: NAR001
     decay_norms = kind == "zero2" or bug == "decay_on_norms"
-    if kind == "tp":
+    if kind in ("tp", "tp_fixed"):
         criterion = parallelize_tensor_parallel(model=model, group=None)
+        for name, param in model.named_parameters():
+            is_qk_gain = name.endswith(("q_norm.weight", "k_norm.weight"))  # noqa: NAR001
+            if kind == "tp_fixed" and is_qk_gain:
+                param.register_hook(hook=_summed_over_ranks)
         params = list(model.parameters())  # noqa: NAR001
         shapes = [p.shape for p in dense.parameters()]
         return Candidate(
@@ -261,10 +280,15 @@ def reference_step(model: nn.Module, optimizer: torch.optim.AdamW, tokens: torch
 def restart_run(
     candidate: Candidate, reference: nn.Module, optimizer: torch.optim.AdamW, bug: str, seed: int
 ) -> tuple[list[dict], list[dict]]:
-    """Step-restart comparison over `STEPS` batches; per-step rows and drift tests."""
+    """Step-restart comparison over `STEPS` batches; per-step rows and drift tests.
+
+    Each row holds the whole-model weight- and update-relative errors, and the same
+    two per tensor (`*_tensors`, in the dense parameter order).
+    """
     flat = partial(  # noqa: NAR001
         flatten_shards, replicated=candidate.replicated, world_size=WORLD
     )
+    dots = partial(tensor_dots, sizes=[p.numel() for p in candidate.params])  # noqa: NAR001
     dense = list(reference.parameters())  # noqa: NAR001
     errors, rows = [], []
     for step, tokens in enumerate(markov_batches(steps=STEPS, seed=seed)):  # noqa: NAR001
@@ -278,21 +302,16 @@ def restart_run(
         update = after_reference - before_reference
         error = (after_candidate - before_candidate) - update
         weight_diff = after_candidate - after_reference
-        update_energy = global_dot(a=update, b=update)
-        weight_energy = global_dot(a=after_reference, b=after_reference)
-        weight_rel = math.sqrt(  # noqa: NAR001
-            global_dot(a=weight_diff, b=weight_diff) / weight_energy
-        )
-        update_rel = math.sqrt(global_dot(a=error, b=error) / update_energy)  # noqa: NAR001
         errors.append(error)  # noqa: NAR001
-        rows.append(  # noqa: NAR001
-            {
-                "step": step,
-                "weight_rel": weight_rel,
-                "update_rel": update_rel,
-                "update_bias": global_dot(a=error, b=update) / update_energy,
-            }
-        )
+        ratios = {}
+        for name, diff, base in (
+            ("weight", weight_diff, after_reference),
+            ("update", error, update),
+        ):
+            num, den = dots(a=diff, b=diff), dots(a=base, b=base).clamp(min=1e-30)
+            ratios[f"{name}_rel"] = math.sqrt(num.sum() / den.sum())  # noqa: NAR001
+            ratios[f"{name}_rel_tensors"] = (num / den).sqrt().tolist()
+        rows.append({"step": step} | ratios)  # noqa: NAR001
     tests = []
     for k in CHECKPOINTS:
         ratio, p_value = drift_test(errors=errors[:k], num_flips=NUM_FLIPS, seed=seed)
@@ -358,51 +377,61 @@ def write_csv(name: str, rows: list[dict]) -> None:
         writer.writerows(rowdicts=rows)
 
 
-def first_above(values: list[float], threshold: float) -> int | None:
-    """Index of the first value strictly above `threshold`, or None."""
-    return next((i for i, v in enumerate(values) if v > threshold), None)  # noqa: NAR001
+def first_flag(rows: list[dict], key: str, limit: float | list[float]) -> int | None:
+    """First step at which `row[key]` exceeds `limit`, elementwise for per-tensor lists."""
+    for row in rows:
+        is_list = isinstance(limit, list)  # noqa: NAR001
+        values, bounds = (row[key], limit) if is_list else ([row[key]], [limit])
+        if any(v > bound for v, bound in zip(values, bounds, strict=True)):  # noqa: NAR001
+            return row["step"]
+    return None
 
 
-def summarize(runs: list[dict]) -> tuple[list[dict], dict[str, float]]:
+def summarize(runs: list[dict]) -> tuple[list[dict], dict[str, float | list[float]]]:
     """Per evaluation run, the first step each check flags, with limits from seed 0.
 
-    A per-step check flags a step whose statistic exceeds the largest value any
-    bug-free candidate reached on the calibration seed: one tolerance for the whole
-    suite, as a test would set it. The drift test needs no limit; it flags at the
-    first checkpoint with p-value at most `ALPHA`.
+    A per-step check flags a step whose statistic exceeds the largest value the
+    bug-free candidates reached on the calibration seed: one limit for the loss and
+    for the whole-model update error, and one limit per tensor for the per-tensor
+    errors, the tightest tolerances that pass every bug-free candidate. The drift
+    test needs no limit; it flags at the first checkpoint with p-value at most `ALPHA`.
 
     Returns:
-        `(rows, limits)`: one summary row per evaluation run, and the limit per statistic.
+        `(rows, limits)`: one summary row per evaluation run, and the limit per check.
     """
-    sources = {"weight_rel": "restart", "update_rel": "restart", "abs_loss_diff": "free"}
-    calibration = [r for r in runs if r["bug"] == "none" and r["seed"] == CALIBRATION_SEED]
-    limits = {
-        key: max(row[key] for run in calibration for row in run[source])  # noqa: NAR001
-        for key, source in sources.items()
+    checks = {
+        "loss_parity": ("free", "abs_loss_diff"),
+        "update_whole": ("restart", "update_rel"),
+        "weight_per_tensor": ("restart", "weight_rel_tensors"),
+        "update_per_tensor": ("restart", "update_rel_tensors"),
     }
+    calibration = [
+        r
+        for r in runs
+        if r["kind"] in CONTROLS and r["bug"] == "none" and r["seed"] == CALIBRATION_SEED
+    ]
+    limits: dict[str, float | list[float]] = {}
+    for check, (source, key) in checks.items():
+        values = [row[key] for run in calibration for row in run[source]]
+        is_list = isinstance(values[0], list)  # noqa: NAR001
+        columns = zip(*values) if is_list else [values]  # noqa: NAR001
+        maxima = [max(column) for column in columns]  # noqa: NAR001
+        limits[check] = maxima if is_list else maxima[0]
     rows = []
     for run in (r for r in runs if r["seed"] != CALIBRATION_SEED):
-        first = {
-            key: first_above(values=[row[key] for row in run[source]], threshold=limits[key])
-            for key, source in sources.items()
-        }
-        tail = run["free"][-20:]
-        gaps = [r["loss_candidate"] - r["loss_reference"] for r in tail]
-        gap = sum(gaps) / len(gaps)  # noqa: NAR001
+        gaps = [r["loss_candidate"] - r["loss_reference"] for r in run["free"][-20:]]
+        hits = [t["steps"] for t in run["drift"] if t["p_value"] <= ALPHA]
         rows.append(  # noqa: NAR001
-            {
-                "kind": run["kind"],
-                "bug": run["bug"],
-                "seed": run["seed"],
-                "first_step_weight_rel": first["weight_rel"],
-                "first_step_update_rel": first["update_rel"],
-                "first_step_loss_parity": first["abs_loss_diff"],
-                "drift_flagged_by_step": next(  # noqa: NAR001
-                    (t["steps"] for t in run["drift"] if t["p_value"] <= ALPHA), None
-                ),
-                "drift_ratio_at_end": round(run["drift"][-1]["drift_ratio"], 2),  # noqa: NAR001
+            {"kind": run["kind"], "bug": run["bug"], "seed": run["seed"]}
+            | {
+                f"first_step_{check}": first_flag(rows=run[source], key=key, limit=limits[check])
+                for check, (source, key) in checks.items()
+            }
+            | {
+                "drift_flagged_by_step": hits[0] if hits else None,
+                "drift_ratio_at_end": round(run["drift"][-1]["drift_ratio"], 3),  # noqa: NAR001
                 "drift_p_at_end": run["drift"][-1]["p_value"],
-                "final_loss_gap": gap,
+                "final_loss_gap": sum(gaps) / len(gaps),  # noqa: NAR001
             }
         )
     return rows, limits
@@ -424,10 +453,11 @@ def run_both(kind: str, bug: str, seed: int) -> dict:
 
 
 def main() -> None:
-    """Run every control and planted bug in both modes, two at a time, and write the CSVs."""
+    """Run every control, the shipped TP plan, and every planted bug; write the CSVs."""
     configs = [
         (kind, "none", seed) for kind in CONTROLS for seed in (CALIBRATION_SEED, *EVAL_SEEDS)
     ]
+    configs += [("tp", "none", seed) for seed in EVAL_SEEDS]
     configs += [("bucketed_ddp", bug, seed) for bug in BUGS for seed in EVAL_SEEDS]
     with ThreadPoolExecutor(max_workers=2) as pool:
         jobs = pool.map(lambda c: run_both(kind=c[0], bug=c[1], seed=c[2]), configs)  # noqa: NAR001
@@ -435,15 +465,38 @@ def main() -> None:
     steps, drift = [], []
     for run in runs:
         label = {"kind": run["kind"], "bug": run["bug"], "seed": run["seed"]}
-        pairs = zip(run["restart"], run["free"], strict=True)  # noqa: NAR001
-        steps += [label | r | f for r, f in pairs]
+        for restart, free in zip(run["restart"], run["free"], strict=True):  # noqa: NAR001
+            scalars = {
+                k: v
+                for k, v in restart.items()
+                if not k.endswith("_tensors")  # noqa: NAR001
+            }
+            steps.append(label | scalars | free)  # noqa: NAR001
         drift += [label | t for t in run["drift"]]
     summary, limits = summarize(runs=runs)
+    names = [name for name, _ in Qwen3(config=QWEN3_TINY).named_parameters()]
+    weight_limits, update_limits = limits["weight_per_tensor"], limits["update_per_tensor"]
+    assert isinstance(weight_limits, list) and isinstance(update_limits, list)  # noqa: NAR001
+    per_tensor = zip(names, weight_limits, update_limits, strict=True)  # noqa: NAR001
     write_csv(name="steps", rows=steps)
     write_csv(name="drift", rows=drift)
     write_csv(name="detection", rows=summary)
-    write_csv(name="thresholds", rows=[limits])
-    print(limits, *summary, sep="\n")  # noqa: NAR001
+    write_csv(
+        name="limits",
+        rows=[
+            {
+                "tensor": "(whole model)",
+                "abs_loss_diff": limits["loss_parity"],
+                "weight_rel": None,
+                "update_rel": limits["update_whole"],
+            }
+        ]
+        + [
+            {"tensor": n, "abs_loss_diff": None, "weight_rel": w, "update_rel": u}
+            for n, w, u in per_tensor
+        ],
+    )
+    print(*summary, sep="\n")  # noqa: NAR001
 
 
 if __name__ == "__main__":

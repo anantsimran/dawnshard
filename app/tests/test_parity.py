@@ -1,6 +1,6 @@
 import torch
 from dist_helpers import run_distributed
-from training.parallel.parity import drift_test, flatten_shards, global_dot
+from training.parallel.parity import drift_test, flatten_shards, tensor_dots
 
 
 def test_flatten_counts_replicated_tensors_once_across_ranks():
@@ -43,7 +43,9 @@ def _check_sharded_matches_dense(rank, world):
         for d in dense
     ]
     full = [torch.cat([d[0], d[1]]) for d in dense]
-    assert abs(global_dot(a=errors[0], b=errors[1]) - float(full[0] @ full[1])) < 1e-5
+    per_tensor = tensor_dots(a=errors[0], b=errors[1], sizes=[6 // world, 3])
+    expected_dots = [float(dense[0][0] @ dense[1][0]), float(dense[0][1] @ dense[1][1])]
+    assert torch.allclose(per_tensor, torch.tensor(expected_dots, dtype=torch.float64), atol=1e-5)
     sharded = drift_test(errors=errors, num_flips=500, seed=3)
     expected = drift_test(errors=full, num_flips=500, seed=3)
     assert abs(sharded[0] - expected[0]) < 1e-6 and sharded[1] == expected[1]

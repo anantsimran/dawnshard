@@ -54,12 +54,18 @@ def flatten_shards(
     )
 
 
-def global_dot(a: torch.Tensor, b: torch.Tensor) -> float:
-    """Return `<a, b>` summed over ranks, for vectors built by `flatten_shards`."""
-    local = torch.dot(a, b).double()  # noqa: NAR001
+def tensor_dots(a: torch.Tensor, b: torch.Tensor, sizes: list[int]) -> torch.Tensor:
+    """Return `<a_t, b_t>` per tensor `t`, summed over ranks, in float64.
+
+    `a` and `b` come from `flatten_shards`, and `sizes` is this rank's element count
+    per tensor, so the split recovers each tensor's slice. One `all_reduce` covers
+    all tensors; the sum of the result is the global dot product.
+    """
+    pairs = zip(a.split(split_size=sizes), b.split(split_size=sizes), strict=True)  # noqa: NAR001
+    local = torch.stack(tensors=[torch.dot(x, y) for x, y in pairs]).double()  # noqa: NAR001
     if dist.is_initialized():
         dist.all_reduce(tensor=local)
-    return local.item()
+    return local
 
 
 def drift_test(errors: list[torch.Tensor], num_flips: int, seed: int) -> tuple[float, float]:

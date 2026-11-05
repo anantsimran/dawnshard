@@ -405,8 +405,8 @@ ______________________________________________________________________
 | Tokenizer | byte-level BPE, written from scratch, with an indexed max-heap so each merge updates pair counts in O(log n) | [common/](app/src/training/common/) |
 | Data | MNIST through torchvision; AG News and Multi30k sampled, tokenized, and cached; offline tokenization into uint32 shards and a streaming loader with a deterministic global order and exact resume across world sizes; how a `DataLoader` is built in the [dataload README](app/src/training/dataload/README.md) | [dataload/](app/src/training/dataload/), [mnist.py](app/src/training/model/mnist.py) |
 | Models | three MNIST classifiers, an AG News transformer classifier, a Multi30k masked-token predictor, a Multi30k encoder-decoder translator that decodes a saved bundle and scores it with BLEU, and a Qwen3-style decoder (RMSNorm, RoPE, GQA with QK-norm, SwiGLU, tied head) built from the official config fields | [model/](app/src/training/model/) |
-| Experiments | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation and its scale study, each a grid search ranked by best val loss; the sandboxed MBPP benchmark per runtime | [experiments/](app/src/training/experiments/) |
-| Parallelism | DDP twice by hand (naive, and bucketed with all-reduces overlapped with backward), ZeRO-2 by hand, FSDP2 and HSDP through `apply_fsdp`; tensor parallelism by hand (column/row linears, vocabulary-parallel embedding and cross-entropy, sequence-parallel primitives) and through DTensor; pipeline schedules as data (GPipe, 1F1B) with a simulator, an executor, and a FLOP-balanced partitioner; `fit` runs unchanged under `torchrun`, writing history from rank 0 only | [parallel/](app/src/training/parallel/) |
+| Experiments | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation and its scale study, each a grid search ranked by best val loss; the sandboxed MBPP benchmark per runtime; the sub-threshold-bug study, which plants five bugs in bucketed DDP and checks which parity checks find them | [experiments/](app/src/training/experiments/) |
+| Parallelism | DDP twice by hand (naive, and bucketed with all-reduces overlapped with backward), ZeRO-2 by hand, FSDP2 and HSDP through `apply_fsdp`; tensor parallelism by hand (column/row linears, vocabulary-parallel embedding and cross-entropy, sequence-parallel primitives) and through DTensor; pipeline schedules as data (GPipe, 1F1B) with a simulator, an executor, and a FLOP-balanced partitioner; step-restart parity against a one-process reference, with a sign-flip drift test across steps; `fit` runs unchanged under `torchrun`, writing history from rank 0 only | [parallel/](app/src/training/parallel/) |
 | Compute backends | one immutable `JobSpec` (image pinned by digest) submitted unchanged to a local `torchrun`, a Kubernetes JobSet (Kueue-ready), a KubeRay RayJob running Ray Train, or a SageMaker training job; launch telemetry and cost arithmetic | [launch/](app/src/training/launch/), [infra/](infra/) |
 | Environments | a Gymnasium-shaped coding environment for LLM agents: subprocess, runc and gVisor sandboxes behind one interface, a warm pool, a hash-checked verifier with reward-hacking defenses, infra-vs-task failure classification with retries, replayable episode state, and a probe suite | [env/](app/src/training/env/) |
 | Visualization | a run's metrics, two runs side by side, a model's autograd graph, attention heatmaps, BPE sequence length against merges, kernels on the device's roofline | [viz/](app/src/training/viz/) |
@@ -916,6 +916,10 @@ uv run python app/src/training/experiments/data_loading.py all
 # FLOP-balanced stages for Qwen3-1.7B, and predicted TP communication per link
 uv run python app/src/training/experiments/tp_pp.py all
 
+# Step-restart parity on 2 CPU ranks: per-step weight and update errors, the drift
+# test across steps, and loss parity, for five bug-free candidates and five planted bugs
+uv run python app/src/training/experiments/subthreshold.py
+
 # Place five kernels of a training step on the device's roofline
 uv run python app/src/training/viz/roofline.py --peak-tflops 165 --bandwidth-gbs 1008
 
@@ -1154,6 +1158,7 @@ dawnshard/
 │   │       │   ├── fsdp.py           # apply_fsdp: fully_shard per block then root; HSDP mesh
 │   │       │   ├── tensor.py         # column/row parallel linears, vocab-parallel embedding and loss
 │   │       │   ├── pipeline.py       # GPipe/1F1B schedules as data, simulator, partitioner, executor
+│   │       │   ├── parity.py         # step-restart parity: shard-aware dot products, drift test
 │   │       │   └── mesh.py           # ParallelismSpec → DeviceMesh, TP innermost, PP outermost
 │   │       ├── launch/               # one JobSpec on local, Kubernetes, Ray, and SageMaker
 │   │       │   ├── spec.py           # JobSpec: digest-pinned image, module, width, data and checkpoint URIs
@@ -1169,7 +1174,8 @@ dawnshard/
 │   │       │   ├── multi30k_translator_ablation.py  # component, depth, LR, language ablation
 │   │       │   ├── sandbox_benchmark.py # MBPP episodes per sandbox runtime: oracle, agent, replay, probes
 │   │       │   ├── data_loading.py   # loader audit, shuffle quality, bitwise resume, data stall
-│   │       │   └── tp_pp.py          # TP parity, pipeline bubble, stage balance, TP comm prediction
+│   │       │   ├── tp_pp.py          # TP parity, pipeline bubble, stage balance, TP comm prediction
+│   │       │   └── subthreshold.py   # planted sub-threshold bugs vs per-step, drift, and loss checks
 │   │       ├── viz/                  # metrics, run comparison, model graph, attention, BPE length, roofline
 │   │       ├── analytics/            # printed stats: Multi30k EN BPE length percentiles
 │   │       ├── utils/                # git commit, log_elapsed timing
@@ -1181,6 +1187,7 @@ dawnshard/
 ├── tutorials/                    # theory and revision, one file per topic: pytorch.md, training.md, transformer.md, math.md, vision.md; index.md
 ├── experiments/<model>/<date>/   # one study per folder: write-up, CSV exports, plots
 ├── experiments/t<n>-<topic>/     # one infrastructure ticket per folder: DESIGN.md (choices, tradeoffs), results
+├── experiments/subthreshold-bugs/ # research study: DESIGN.md (claims, proofs), RESULTS.md, CSVs
 ├── knowledge_sharing/            # standalone engineering articles and SVG diagrams
 ├── reports/                      # measured tradeoffs, report generators, CSV data, PNG/SVG figures
 ├── notebooks/hello_world.ipynb   # starter notebook: the sys.path cell to borrow, then imports

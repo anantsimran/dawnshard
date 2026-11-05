@@ -17,6 +17,10 @@ Tiny Qwen3, full init then shard, the same 50 batches, AdamW lr 1e-3, fp32:
 - **The drift to 2.6e-4 over 50 steps is Adam, not the layers.** Adam divides each
   gradient by its running RMS, so a 1e-7 difference on a near-zero gradient becomes a
   visible step. The single-step gradient tests (`test_tensor.py`) agree to 1e-5.
+- **Correction: part of the drift is a bug.** Both plans leave the QK-norm gains'
+  gradients unsummed across ranks (each rank sees only its own heads), so those four
+  tensors' gradients are 62% to 82% off. The single-step tests do not compare them.
+  Found by the drift test in [subthreshold-bugs](../subthreshold-bugs/RESULTS.md).
 
 ## Pipeline bubble, p = 4, backward = 2 x forward ([bubble.csv](bubble.csv))
 

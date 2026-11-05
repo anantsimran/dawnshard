@@ -56,20 +56,24 @@ of the K recorded errors: do they point the same way? It needs no tolerance.
 
 ## The claims, and why they hold
 
-### Claim 1: a weight-relative tolerance cannot see a bf16 storage bug
+### Claim 1: a weight-relative tolerance of bf16 size cannot see a bf16 storage bug
 
 Let `u = 2^-8`, the unit roundoff of bf16. Round-to-nearest changes any value by at
 most `u` times its magnitude, so a candidate whose weights are the bf16 rounding of the
 reference's satisfies `||W_cand - W_ref|| <= u ||W_ref||`. The weight-relative error of
 a per-tensor check is therefore at most 3.9e-3 on every tensor and every step,
-whatever the bug does to training.
+whatever the bug does to training, and any tolerance at least that large, which is
+what a tolerance derived for a bf16 recipe is, passes it.
 
 The update is different. When weights are stored in bf16 and an update `Δ_i` is
 smaller than half the spacing of bf16 numbers at `W_i`, round-to-nearest returns `W_i`
 and the update is lost. For a weight of 0.02 the spacing is 2^-13, about 1.2e-4, so
 every Adam update below 6.1e-5 vanishes: the update-relative error is 1 on those
 coordinates while the weight-relative error is about 3e-3. A per-step check should
-compare updates, not weights, and the study records both.
+compare updates, not weights, and the study records both. A tolerance calibrated
+below `u` sees the bug where the weights are large and change slowly (here the norm
+gains, whose bug-free weight error is under 1.1e-5), so the claim is about tolerances
+of bf16 size, not about every tolerance.
 
 ### Claim 2: the drift test has false-alarm probability at most α
 
@@ -131,12 +135,24 @@ implementations already disagree at bf16 scale each step.
 | `decay_on_norms` | applies weight decay to the norm gains the recipe excludes | gains shrink every step | a common config bug |
 | `adam_step_offset` | runs Adam's step counter one ahead | bias correction too small | DeepSpeed #8910 |
 
+One more candidate is a bug found, not planted: the hand TP plan as T7 ships it
+(`tp`). Its QK-norm gains are replicated, but each rank applies them to its own heads
+only, so each rank's gradient is a partial sum over half the heads, and nothing
+all-reduces it. Those four tensors' gradients are 62% to 82% off; every other tensor
+matches the dense model to 6e-7 in fp32. T7's DTensor plan has the same gap (the same
+four errors to four digits), so T7's check that the two plans agree could not catch
+it, and its 50-step loss parity passed it. TorchTitan's transformers backend declares
+these gains as replicated DTensors on the TP mesh, so DTensor reduces their gradient
+(`hf_sharding.py`: "Q/K norms (Qwen3) — weight replicated, activations stay
+heads-sharded"). `tp_fixed` adds a tensor hook that all-reduces each gain's gradient,
+and serves as the TP control.
+
 The bug-free candidates are `NaiveDDP`, `BucketedDDP` with one bucket and with 0.01
-MB buckets, `Zero2AdamW`, and the hand TP plan. On the calibration seed they set the
-per-step limits: the largest weight-relative error, update-relative error, and loss
-difference any of them reached. That is the tightest tolerance a per-step check could
-use without failing a correct implementation, so a bug it misses would also be missed
-by any looser one.
+MB buckets, `Zero2AdamW`, and `tp_fixed`. On the calibration seed they set the
+per-step limits: the largest loss difference and whole-model update-relative error
+any of them reached, and per tensor the largest weight- and update-relative error.
+That is the tightest tolerance a per-step check could use without failing those runs;
+the evaluation seeds then show whether it holds for correct runs it was not fitted to.
 
 ## Choices, and what each buys
 
@@ -154,10 +170,12 @@ by any looser one.
 - **The Gram matrix, not the errors, for the null.** Every flipped ratio is
   `sᵀ G s / trace(G)`, so 4,000 sign patterns cost 4,000 small matrix-vector
   products.
-- **One tolerance across all bug-free candidates.** A test suite sets one tolerance,
-  and the TP candidate, whose shards round differently from the dense layers, sets
-  it. Per-candidate limits are tighter; RESULTS.md says where that would change the
-  verdict.
+- **One limit per tensor across all bug-free candidates.** A test suite sets one
+  tolerance per check, and the TP candidate, whose shards round differently from the
+  dense layers, sets most of them. Calibrating on the candidates assumes they are
+  correct: the first run of this study calibrated on the shipped TP plan, which is
+  how a buggy implementation raises the tolerance it is checked against. The drift
+  test has no such input.
 
 ## Routes not taken
 

@@ -41,6 +41,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import partial
+from queue import Empty
 
 import torch
 import torch.distributed as dist
@@ -357,15 +358,28 @@ def _worker(rank: int, port: int, mode: str, kind: str, bug: str, seed: int, que
 
 
 def run_config(mode: str, kind: str, bug: str, seed: int):
-    """Run one configuration on `WORLD` processes and return rank 0's result."""
+    """Run one configuration on `WORLD` processes and return rank 0's result.
+
+    The result is read while the workers run: rank 0 cannot exit until its queue is
+    drained once the result outgrows the pipe buffer, so joining first deadlocks.
+    """
     queue = mp.get_context(method="spawn").Queue()
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))  # noqa: NAR001
         port = sock.getsockname()[1]
-    spawn(  # noqa: NAR001
-        _worker, args=(port, mode, kind, bug, seed, queue), nprocs=WORLD, join=True
+    context = spawn(  # noqa: NAR001
+        _worker, args=(port, mode, kind, bug, seed, queue), nprocs=WORLD, join=False
     )
-    return queue.get()
+    assert context is not None
+    while True:
+        try:
+            result = queue.get(timeout=5)
+            break
+        except Empty:
+            context.join(timeout=0)  # re-raises a worker's failure
+    while not context.join():
+        pass
+    return result
 
 
 def write_csv(name: str, rows: list[dict]) -> None:

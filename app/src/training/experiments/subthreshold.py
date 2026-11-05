@@ -391,14 +391,21 @@ def write_csv(name: str, rows: list[dict]) -> None:
         writer.writerows(rowdicts=rows)
 
 
-def first_flag(rows: list[dict], key: str, limit: float | list[float]) -> int | None:
-    """First step at which `row[key]` exceeds `limit`, elementwise for per-tensor lists."""
+def flag_stats(rows: list[dict], key: str, limit: float | list[float]) -> tuple[int | None, float]:
+    """First step at which `row[key]` exceeds `limit`, and the worst `row[key] / limit`.
+
+    Per-tensor lists are compared elementwise with per-tensor limits. The worst ratio
+    is the margin a tolerance would need to pass the run: below 1, the run passes.
+    """
+    first, worst = None, 0.0
     for row in rows:
         is_list = isinstance(limit, list)  # noqa: NAR001
         values, bounds = (row[key], limit) if is_list else ([row[key]], [limit])
-        if any(v > bound for v, bound in zip(values, bounds, strict=True)):  # noqa: NAR001
-            return row["step"]
-    return None
+        ratio = max(v / bound for v, bound in zip(values, bounds, strict=True))  # noqa: NAR001
+        worst = max(worst, ratio)  # noqa: NAR001
+        if first is None and ratio > 1:
+            first = row["step"]
+    return first, worst
 
 
 def summarize(runs: list[dict]) -> tuple[list[dict], dict[str, float | list[float]]]:
@@ -438,8 +445,13 @@ def summarize(runs: list[dict]) -> tuple[list[dict], dict[str, float | list[floa
         rows.append(  # noqa: NAR001
             {"kind": run["kind"], "bug": run["bug"], "seed": run["seed"]}
             | {
-                f"first_step_{check}": first_flag(rows=run[source], key=key, limit=limits[check])
+                f"{name}_{check}": value
                 for check, (source, key) in checks.items()
+                for name, value in zip(  # noqa: NAR001
+                    ("first_step", "worst_over_limit"),
+                    flag_stats(rows=run[source], key=key, limit=limits[check]),
+                    strict=True,
+                )
             }
             | {
                 "drift_flagged_by_step": hits[0] if hits else None,

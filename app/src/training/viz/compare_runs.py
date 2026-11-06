@@ -57,12 +57,16 @@ def main():
     numeric_keys_a = {
         key
         for key in history_a[0]
-        if key != "epoch" and isinstance(history_a[0][key], (int, float))  # noqa: NAR001
+        if key != "epoch"
+        and not key.endswith("_seed")  # noqa: NAR001
+        and isinstance(history_a[0][key], (int, float))  # noqa: NAR001
     }
     numeric_keys_b = {
         key
         for key in history_b[0]
-        if key != "epoch" and isinstance(history_b[0][key], (int, float))  # noqa: NAR001
+        if key != "epoch"
+        and not key.endswith("_seed")  # noqa: NAR001
+        and isinstance(history_b[0][key], (int, float))  # noqa: NAR001
     }
     shared_metric_names = sorted(numeric_keys_a & numeric_keys_b)  # noqa: NAR001
 

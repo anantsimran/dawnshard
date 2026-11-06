@@ -51,10 +51,11 @@ def metric_series(history: list[dict]) -> dict[str, dict[str, list[tuple[int, fl
     `<split>_<name>` and the fields of `<split>_metrics` go to panel `<name>` as line
     `<split>`, for each split in SPLITS. Inside a metrics dict only floats are
     plotted: ints there are accumulator counts and lists are per-class tallies,
-    neither of which reads as a curve. Any other numeric top-level field is its own
-    panel and line. When a nested field repeats a top-level one, as `train_metrics`'s
-    `loss` repeats `train_loss`, the first in record order is kept. None values,
-    such as validation on an epoch that skipped it, are left out.
+    neither of which reads as a curve. Seed fields are skipped. Any other numeric
+    top-level field is its own panel and line. When a nested field repeats a
+    top-level one, as `train_metrics`'s `loss` repeats `train_loss`, the first in
+    record order is kept. None values, such as validation on an epoch that skipped
+    it, are left out.
     """
     points: dict[str, dict[str, dict[int, float]]] = {}
 
@@ -66,7 +67,12 @@ def metric_series(history: list[dict]) -> dict[str, dict[str, list[tuple[int, fl
     for record in history:
         epoch = record["epoch"]
         for key, value in record.items():
-            if key == "epoch" or value is None:
+            # Seeds repeat on every record; a flat line says nothing about the run.
+            if (
+                key == "epoch"
+                or key.endswith("_seed")  # noqa: NAR001
+                or value is None
+            ):
                 continue
             split, _, name = key.partition("_")  # noqa: NAR001
             if split in SPLITS and name == "metrics" and isinstance(value, dict):  # noqa: NAR001

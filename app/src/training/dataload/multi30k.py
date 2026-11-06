@@ -1,30 +1,21 @@
-# 1. Rename to multi30k.py
-# 2. Change change, encoding to both de and en
-# 3. ADD BOS and EOS (Depending on source and target language)
-# 4. The output batch should be stacked, not cat
-#
-#
 """
 multi30k.py
 Multi30k sentences as translation pairs or as English masked-language-modelling
 batches, tokenized with our from-scratch BPE.
 
-Splits are the official train, val, and test_2016_flickr files for one language,
-downloaded once to data_dir/multi30k/<lang>/. The download cache only checks that the
-files exist.
+Splits are the official train, val, and test_2016_flickr files for one language.
+`get_multi30k_texts` downloads all three and, given a `Dao`, stores them, so a caller
+can train a tokenizer from `.train` without a second download. The loaders take their
+tokenizers instead of training them: the caller decides which texts a tokenizer trains
+on and what to call it (see `get_tokenizer`), and the loader decides how to reach the
+data with it. Given a `Dao`, the encodings are stored there too.
 
-Each tokenizer trains on train rows only. A trained tokenizer is reused only once it
-is the default: the merges file that a tokenizer_path.txt pointer file names, which
-only set_default_tokenizer=True writes. Until then every call retrains and logs a
-warning that the new merges file will not be reused. This is intentional: nothing
-becomes the default by accident. The default is loaded as is, so pass
-retrain_tokenizer=True after changing train_num or BPE_NUM_MERGES.
-
-Translation pairs read both languages with one train sample seed, so row i of the
-source and the target are the same sentence. Each side gets its own tokenizer. The
-source and the target input start with BOS_ID; the target output is the target
-shifted one left and ended with EOS_ID, so position l of the target input predicts
-position l of the target output.
+Translation pairs draw one set of train indices and apply it to both languages, so row
+i of the source and the target are the same sentence; the two languages must have the
+same number of rows in every split. Each side has its own tokenizer. The source and
+the target input start with BOS_ID; the target output is the target shifted one left
+and ended with EOS_ID, so position l of the target input predicts position l of the
+target output.
 
 Masking follows BERT: MASK_PROB of the non-protected tokens are selected, and of
 those MASK_TOKEN_PROB become MASK_ID, RANDOM_TOKEN_PROB a random non-protected id,
@@ -35,183 +26,63 @@ use no worker processes, because the ids are already in memory.
 
 import gzip
 import random
-import time
 import urllib.request
-from dataclasses import astuple, dataclass
+from dataclasses import dataclass
 from functools import partial
-from pathlib import Path
 from typing import Optional
 
 import torch
-from loguru import logger
 from torch.utils.data import DataLoader
-from training.common import bpe
-from training.common.constants import BOS_ID, EOS_ID, MASK_ID, PAD_ID, PROTECTED_IDS
 from training.constants import CROSS_ENTROPY_IGNORE_INDEX
-from training.dataload.constants import DATASETS_CACHE_DIR
+from training.dal.cache import cached
+from training.dal.dao.dao import Dao
 from training.dataload.datasets import InMemoryDataset
+from training.preprocess.constants import BOS_ID, EOS_ID, MASK_ID, PAD_ID, PROTECTED_IDS
+from training.preprocess.tokenizer import Tokenizer
 from training.utils.timing import log_elapsed
 
 # (index, ids: (seq_len,) int64); the index lets _mlm_collate seed masking per sample.
 type Multi30kENDatasetChunk = tuple[int, torch.Tensor]
 type Multi30kENBatch = tuple[torch.Tensor, torch.Tensor]  # X (B, seq_len), Y (B*seq_len,)
 
-TRAIN_TXT_NAME = "train.txt"
-TEST_TXT_NAME = "test.txt"
-VAL_TXT_NAME = "val.txt"
 MULTI30K_URL = (
     "https://raw.githubusercontent.com/multi30k/dataset/master/data/task1/raw/{name}.{lang}.gz"
 )
 MULTI30K_RAW_NAMES = {"train": "train", "val": "val", "test": "test_2016_flickr"}
-DEFAULT_TOKENIZER_PATHS_FILE_NAME = "tokenizer_path.txt"
-DATA_SUBDIR_NAME = "multi30k"
-BPE_NUM_MERGES = 10000
 MASK_PROB = 0.15
 MASK_TOKEN_PROB = 0.8  # of the selected 15%
 RANDOM_TOKEN_PROB = 0.1  # the next 10%; the rest stay unchanged
 
 
-@dataclass(frozen=True)
-class Multi30kPaths:
-    """Paths of the three split text files, one sentence per line."""
+@dataclass
+class Multi30kTexts:
+    """The train, val, and test sentences of one language, one string per row."""
 
-    train: Path
-    val: Path
-    test: Path
+    train: list[str]
+    val: list[str]
+    test: list[str]
 
 
-def _get_cached_or_downloaded_txts(cache: bool, data_dir: Path, lang: str) -> Multi30kPaths:
+@cached(version="1")
+def get_multi30k_texts(lang: str) -> Multi30kTexts:
     """
-    Return the paths of the train, val, and test text files for `lang`.
+    Return the train, val, and test sentences for `lang`, downloading them.
 
-    On a cache miss, downloads the official Multi30k splits for `lang` (test is
-    test_2016_flickr). The cache only checks that the files exist.
+    The test split is test_2016_flickr. Blank lines are dropped. With a `cache`
+    (the keyword `@cached` adds), the result is stored only after all three splits
+    downloaded, so a failure partway leaves nothing behind and the error propagates.
 
     Args:
         lang: Multi30k language code, such as "en" or "de". Not every language has a
             test_2016_flickr file upstream, so the download fails for those.
-
-    Side effects:
-        On a cache miss, writes the three files under data_dir/multi30k/<lang>/.
     """
-    txt_dir = data_dir / DATA_SUBDIR_NAME
-    paths = Multi30kPaths(
-        train=txt_dir / lang / TRAIN_TXT_NAME,
-        val=txt_dir / lang / VAL_TXT_NAME,
-        test=txt_dir / lang / TEST_TXT_NAME,
-    )
-    if cache and all(path.exists() for path in astuple(obj=paths)):  # noqa: NAR001
-        logger.info("Loading Multi30k {} splits from {}", lang, txt_dir / lang)  # noqa: NAR001
-        return paths
-
-    (txt_dir / lang).mkdir(parents=True, exist_ok=True)
+    splits = {}
     with log_elapsed(label=f"Downloaded Multi30k {lang}"):
         for split, name in MULTI30K_RAW_NAMES.items():
             with urllib.request.urlopen(url=MULTI30K_URL.format(name=name, lang=lang)) as response:
                 text = gzip.decompress(data=response.read()).decode(encoding="utf-8")
-            rows = [line for line in text.splitlines() if line.strip()]
-            path = getattr(paths, split)  # noqa: NAR001
-            path.write_text(  # noqa: NAR001
-                data="\n".join(rows) + "\n",  # noqa: NAR001
-                encoding="utf-8",
-            )
-            logger.info(  # noqa: NAR001
-                "Wrote {} {} sentences to {}",
-                len(rows),  # noqa: NAR001
-                split,
-                path,
-            )
-    return paths
-
-
-def _save_merges(merges: list[bpe.Phrase], path: Path) -> None:
-    """Write each merge as a "first_id second_id" line, in rank order."""
-    ids = {bpe.Phrase(encoding=b): b for b in range(256)}  # noqa: NAR001
-    ids.update(  # noqa: NAR001
-        {m: bpe.FIRST_MERGE_ID + k for k, m in enumerate(merges)}  # noqa: NAR001
-    )
-    lines = []
-    for m in merges:
-        assert m.first is not None and m.second is not None
-        lines.append(f"{ids[m.first]} {ids[m.second]}")  # noqa: NAR001
-    path.write_text(data="\n".join(lines), encoding="utf-8")  # noqa: NAR001
-
-
-def _load_merges(path: Path) -> tuple[list[bpe.Phrase], dict[int, str]]:
-    """Rebuild (merges, vocab) as bpe.train returns them from a _save_merges file."""
-    lines = path.read_text(encoding="utf-8").splitlines()
-    pairs = [(int(a), int(b)) for a, b in (line.split() for line in lines)]  # noqa: NAR001
-    return bpe.tokenizer_from_pairs(pairs=pairs)
-
-
-def _train_tokenizer_or_cached(
-    retrain_tokenizer: bool,
-    set_default_tokenizer: bool,
-    train_rows: list[str],
-    data_dir: Path,
-) -> tuple[list[bpe.Phrase], dict[int, str]]:
-    """
-    Return (merges, vocab), trained on train_rows or loaded from the default tokenizer.
-
-    The default tokenizer is the merges file that the pointer file
-    data_dir/multi30k/tokenizer_path.txt names. It is loaded as is: nothing
-    checks that it was trained on these rows or with BPE_NUM_MERGES, so pass
-    retrain_tokenizer=True after changing either.
-
-    Args:
-        retrain_tokenizer: Train a new tokenizer even if a default exists. With no
-            default, it trains regardless.
-        set_default_tokenizer: After training, point the pointer file at the new
-            merges. Ignored when the tokenizer is loaded.
-        train_rows: Text the tokenizer trains on, one sentence per row.
-        data_dir: Root of this tokenizer's pointer and merges files. Pass a
-            different one per tokenizer that must not share a default, such as one
-            per language.
-
-    Side effects:
-        On training, writes merges_{len(train_rows)}_{timestamp}.txt under
-        data_dir/multi30k/, and overwrites the pointer file if
-        set_default_tokenizer. Without it, nothing references the new merges file,
-        a later call will not load it, and a warning says so. With no default and
-        set_default_tokenizer=False, every call retrains; this is intentional.
-    """
-    tokenization_paths_file = data_dir / DATA_SUBDIR_NAME / DEFAULT_TOKENIZER_PATHS_FILE_NAME
-    merges_path = None
-    if tokenization_paths_file.exists() and tokenization_paths_file.stat().st_size > 0:
-        merges_path = Path(  # noqa: NAR001
-            tokenization_paths_file.read_text(encoding="utf-8").strip()
-        )
-    if merges_path is not None and merges_path.stat().st_size > 0 and not retrain_tokenizer:
-        return _load_merges(path=merges_path)
-
-    merges_path = (
-        data_dir
-        / DATA_SUBDIR_NAME
-        / (
-            f"merges_{len(train_rows)}_"  # noqa: NAR001
-            f"{time.strftime('%Y%m%d-%H%M%S')}.txt"  # noqa: NAR001
-        )
-    )
-    merges_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_elapsed(label=f"BPE trained {BPE_NUM_MERGES} merges"):
-        merges, vocab = bpe.train(
-            text="\n".join(train_rows),  # noqa: NAR001
-            num_merges=BPE_NUM_MERGES,
-        )
-        _save_merges(merges=merges, path=merges_path)
-    if set_default_tokenizer:
-        tokenization_paths_file.write_text(
-            data=str(merges_path),  # noqa: NAR001
-            encoding="utf-8",
-        )
-    else:
-        logger.warning(  # noqa: NAR001
-            "Trained a tokenizer at {} but it is not the default, so no later call "
-            "will load it; pass retrain_tokenizer=True, set_default_tokenizer=True "
-            "to keep the next one",
-            merges_path,
-        )
-    return merges, vocab
+            splits[split] = [line for line in text.splitlines() if line.strip()]
+    return Multi30kTexts(**splits)
 
 
 def _pad_and_tensorize(
@@ -242,73 +113,45 @@ def _pad_and_tensorize(
     )
 
 
-def _read_rows(
-    datapaths: Multi30kPaths,
-    train_sample_seed: float,
-    train_num: Optional[int],
-    val_num: Optional[int],
-    test_num: Optional[int],
-) -> tuple[list[str], list[str], list[str]]:
+def _sample_train_indices(num_rows: int, train_num: Optional[int]) -> list[int]:
     """
-    Return (train_rows, val_rows, test_rows) read from datapaths.
+    Return the train row indices to keep, in sampled order.
 
     Args:
-        train_sample_seed: Seeds the sample of train_num train rows. Two languages
-            read with the same seed keep the same sentence indices, so their rows
-            stay aligned, because the files have the same number of lines.
-    """
-    train_rows = datapaths.train.read_text(encoding="utf-8").splitlines()
-    if train_num is not None:
-        train_rows = random.Random(x=train_sample_seed).sample(  # noqa: NAR001
-            population=train_rows, k=train_num
-        )
-    val_rows = datapaths.val.read_text(encoding="utf-8").splitlines()[:val_num]
-    test_rows = datapaths.test.read_text(encoding="utf-8").splitlines()[:test_num]
-    return train_rows, val_rows, test_rows
-
-
-def _validate_flags(cache: bool, retrain_tokenizer: bool, set_default_tokenizer: bool) -> None:
-    """
-    Reject cache and tokenizer flag combinations that cannot work together.
+        num_rows: Rows in the train split.
+        train_num: Rows to sample without replacement; None keeps all of them in
+            file order.
 
     Raises:
-        ValueError: If cache=False without retrain_tokenizer, or
-            set_default_tokenizer without retrain_tokenizer.
+        ValueError: If train_num is larger than num_rows.
+
+    Side effects:
+        Draws one float from the global torch RNG to seed the sample, so seeding torch
+        before the call makes the sample repeat. The draw happens even when train_num
+        is None.
     """
-    if not cache and not retrain_tokenizer:
-        raise ValueError(  # noqa: NAR001
-            "cache=False re-downloads the data, so retrain_tokenizer must be True"
-        )
-    if set_default_tokenizer and not retrain_tokenizer:
-        raise ValueError(  # noqa: NAR001
-            "set_default_tokenizer=True requires retrain_tokenizer=True"
-        )
+    # Drawn even when train_num is None, so the global RNG advances the same way
+    # whether or not the train split is sampled.
+    sample_seed = float(torch.rand(size=()))  # noqa: NAR001
+    if train_num is None:
+        return list(range(num_rows))  # noqa: NAR001
+    return random.Random(x=sample_seed).sample(population=range(num_rows), k=train_num)  # noqa: NAR001
 
 
 def get_multi30k_translation_dataloader(
     seq_len: int,
     batch_size: int,
-    cache: bool = True,
+    src_tokenizer: Tokenizer,
+    tgt_tokenizer: Tokenizer,
     src_lang: str = "en",
     tgt_lang: str = "de",
     train_num: Optional[int] = 29000,
     val_num: Optional[int] = 1014,
     test_num: Optional[int] = 1000,
-    retrain_tokenizer: bool = False,
-    set_default_tokenizer: bool = False,
-    data_dir: Path = DATASETS_CACHE_DIR,
-) -> tuple[
-    DataLoader,
-    DataLoader,
-    DataLoader,
-    list[bpe.Phrase],
-    dict[int, str],
-    list[bpe.Phrase],
-    dict[int, str],
-]:
+    cache: Optional[Dao] = None,
+) -> tuple[DataLoader, DataLoader, DataLoader]:
     """
-    Return (train_loader, val_loader, test_loader, src_merges, src_vocab, tgt_merges,
-    tgt_vocab).
+    Return (train_loader, val_loader, test_loader).
 
     Each loader yields (X, Y), both int64. X is (B, 2, seq_len): the source ids at
     index 0 and the target input ids at index 1, each starting with BOS_ID. Y is the
@@ -317,75 +160,51 @@ def get_multi30k_translation_dataloader(
     row-major to (B*seq_len,), as in get_multi30ken_mlm_dataloader.
 
     Args:
+        src_tokenizer: Tokenizer for the source side, trained on `src_lang` rows.
+        tgt_tokenizer: Tokenizer for the target side, trained on `tgt_lang` rows.
         src_lang: Multi30k language code of the source side.
         tgt_lang: Multi30k language code of the target side.
-        train_num: Train pairs to sample; None keeps all of them. Both languages
-            sample with one seed, so the pairs stay aligned.
+        train_num: Train pairs to sample; None keeps all of them. One set of indices
+            serves both languages, so the pairs stay aligned.
         val_num: Leading val pairs to keep; None keeps all of them.
         test_num: Leading test pairs to keep; None keeps all of them.
-        retrain_tokenizer: Forwarded to both tokenizers; see
-            _train_tokenizer_or_cached.
-        set_default_tokenizer: Forwarded to both tokenizers.
+        cache: Stores the downloaded texts and the encodings; None stores nothing.
 
     Raises:
-        ValueError: On an invalid flag combination; see _validate_flags.
+        ValueError: If a split has a different number of rows in the two languages,
+            or train_num exceeds the train split.
 
     Side effects:
-        May download both languages' splits, and writes each side's merges file and
-        pointer under data_dir/<lang>/multi30k/; see _get_cached_or_downloaded_txts
-        and _train_tokenizer_or_cached.
+        May download both languages' splits and store them and the encodings in
+        `cache`. Draws once from the global torch RNG.
     """
-    _validate_flags(
-        cache=cache,
-        retrain_tokenizer=retrain_tokenizer,
-        set_default_tokenizer=set_default_tokenizer,
-    )
+    src_texts = get_multi30k_texts(lang=src_lang, cache=cache)  # noqa: NAR001
+    tgt_texts = get_multi30k_texts(lang=tgt_lang, cache=cache)  # noqa: NAR001
+    for split in MULTI30K_RAW_NAMES:
+        src_len, tgt_len = len(getattr(src_texts, split)), len(getattr(tgt_texts, split))  # noqa: NAR001
+        if src_len != tgt_len:
+            raise ValueError(  # noqa: NAR001
+                f"Multi30k {split} has {src_len} {src_lang} rows but {tgt_len} {tgt_lang} "
+                "rows, so the pairs cannot be aligned"
+            )
 
-    src_datapaths = _get_cached_or_downloaded_txts(cache=cache, data_dir=data_dir, lang=src_lang)
-    tgt_datapaths = _get_cached_or_downloaded_txts(cache=cache, data_dir=data_dir, lang=tgt_lang)
-
-    # One seed for both languages, so source and target sample the same sentences.
-    train_sample_seed = float(torch.rand(size=()))  # noqa: NAR001
-    src_train_rows, src_val_rows, src_test_rows = _read_rows(
-        datapaths=src_datapaths,
-        train_sample_seed=train_sample_seed,
-        train_num=train_num,
-        val_num=val_num,
-        test_num=test_num,
-    )
-    tgt_train_rows, tgt_val_rows, tgt_test_rows = _read_rows(
-        datapaths=tgt_datapaths,
-        train_sample_seed=train_sample_seed,
-        train_num=train_num,
-        val_num=val_num,
-        test_num=test_num,
-    )
-
-    src_merges, src_vocab = _train_tokenizer_or_cached(
-        retrain_tokenizer=retrain_tokenizer,
-        set_default_tokenizer=set_default_tokenizer,
-        train_rows=src_train_rows,
-        data_dir=data_dir / src_lang,
-    )
-
-    tgt_merges, tgt_vocab = _train_tokenizer_or_cached(
-        retrain_tokenizer=retrain_tokenizer,
-        set_default_tokenizer=set_default_tokenizer,
-        train_rows=tgt_train_rows,
-        data_dir=data_dir / tgt_lang,
-    )
+    train_indices = _sample_train_indices(num_rows=len(src_texts.train), train_num=train_num)  # noqa: NAR001
     ds = {}
-    for split, src_rows, tgt_rows in zip(  # noqa: NAR001
-        ("train", "val", "test"),
-        (src_train_rows, src_val_rows, src_test_rows),
-        (tgt_train_rows, tgt_val_rows, tgt_test_rows),
+    for split, src_rows, tgt_rows in (
+        (
+            "train",
+            [src_texts.train[i] for i in train_indices],
+            [tgt_texts.train[i] for i in train_indices],
+        ),
+        ("val", src_texts.val[:val_num], tgt_texts.val[:val_num]),
+        ("test", src_texts.test[:test_num], tgt_texts.test[:test_num]),
     ):
         src = _pad_and_tensorize(
-            rows=bpe.encode_many(texts=src_rows, merges=src_merges),
+            rows=src_tokenizer.encode(texts=src_rows, cache=cache),
             seq_len=seq_len,
             append_bos=True,
         )
-        encoded_tgt_rows = bpe.encode_many(texts=tgt_rows, merges=tgt_merges)
+        encoded_tgt_rows = tgt_tokenizer.encode(texts=tgt_rows, cache=cache)
         tgt_in = _pad_and_tensorize(rows=encoded_tgt_rows, seq_len=seq_len, append_bos=True)
         tgt_out = _pad_and_tensorize(rows=encoded_tgt_rows, seq_len=seq_len, append_eos=True)
         tgt_out = tgt_out.masked_fill(mask=tgt_out == PAD_ID, value=CROSS_ENTROPY_IGNORE_INDEX)
@@ -417,10 +236,6 @@ def get_multi30k_translation_dataloader(
             shuffle=False,
             collate_fn=_translation_collate,
         ),
-        src_merges,
-        src_vocab,
-        tgt_merges,
-        tgt_vocab,
     )
 
 
@@ -429,16 +244,14 @@ def get_multi30ken_mlm_dataloader(
     val_seed: int,
     test_seed: int,
     batch_size: int,
-    cache: bool = True,
+    tokenizer: Tokenizer,
     train_num: Optional[int] = 29000,
     val_num: Optional[int] = 1014,
     test_num: Optional[int] = 1000,
-    retrain_tokenizer: bool = False,
-    set_default_tokenizer: bool = False,
-    data_dir: Path = DATASETS_CACHE_DIR,
-) -> tuple[DataLoader, DataLoader, DataLoader, list[bpe.Phrase], dict[int, str]]:
+    cache: Optional[Dao] = None,
+) -> tuple[DataLoader, DataLoader, DataLoader]:
     """
-    Return (train_loader, val_loader, test_loader, merges, vocab).
+    Return (train_loader, val_loader, test_loader) over the English sentences.
 
     Each loader yields (X, Y), both int64: X is the masked input, (B, seq_len), and Y
     the original id at each selected position, CROSS_ENTROPY_IGNORE_INDEX elsewhere.
@@ -452,51 +265,37 @@ def get_multi30ken_mlm_dataloader(
             sample i share masks whenever val_seed + j == test_seed + i. VAL_SEED
             and TEST_SEED in training.constants are.
         test_seed: As val_seed, for the test split.
+        tokenizer: Tokenizer trained on English rows.
         train_num: Train rows to sample; None keeps all of them.
         val_num: Leading val rows to keep; None keeps all of them.
         test_num: Leading test rows to keep; None keeps all of them.
+        cache: Stores the downloaded texts and the encodings; None stores nothing.
 
     Raises:
-        ValueError: On an invalid flag combination; see _validate_flags.
+        ValueError: If train_num exceeds the train split.
 
     Side effects:
-        May download the splits and write a merges file under data_dir; see
-        _get_cached_or_downloaded_txts and _train_tokenizer_or_cached.
+        May download the splits and store them and the encodings in `cache`. Draws
+        once from the global torch RNG when train_num is set.
     """
-    _validate_flags(
-        cache=cache,
-        retrain_tokenizer=retrain_tokenizer,
-        set_default_tokenizer=set_default_tokenizer,
-    )
-
-    datapaths = _get_cached_or_downloaded_txts(cache=cache, data_dir=data_dir, lang="en")
-
-    train_rows, val_rows, test_rows = _read_rows(
-        datapaths=datapaths,
-        train_sample_seed=float(torch.rand(size=())),  # noqa: NAR001
-        train_num=train_num,
-        val_num=val_num,
-        test_num=test_num,
-    )
-
-    merges, vocab = _train_tokenizer_or_cached(
-        retrain_tokenizer=retrain_tokenizer,
-        set_default_tokenizer=set_default_tokenizer,
-        train_rows=train_rows,
-        data_dir=data_dir,
-    )
+    texts = get_multi30k_texts(lang="en", cache=cache)  # noqa: NAR001
+    train_indices = _sample_train_indices(num_rows=len(texts.train), train_num=train_num)  # noqa: NAR001
     train_ds, val_ds, test_ds = (
         InMemoryDataset(
             items=list(  # noqa: NAR001
                 enumerate(  # noqa: NAR001
                     _pad_and_tensorize(
-                        rows=bpe.encode_many(texts=rows, merges=merges),
+                        rows=tokenizer.encode(texts=rows, cache=cache),
                         seq_len=seq_len,
                     ).unbind(dim=0)
                 )
             )
         )
-        for rows in (train_rows, val_rows, test_rows)
+        for rows in (
+            [texts.train[i] for i in train_indices],
+            texts.val[:val_num],
+            texts.test[:test_num],
+        )
     )
 
     # Data is already tokenized in memory, so worker processes would only add
@@ -506,7 +305,7 @@ def get_multi30ken_mlm_dataloader(
             dataset=train_ds,
             batch_size=batch_size,
             shuffle=True,
-            collate_fn=partial(_mlm_collate, vocab_length=len(vocab)),  # noqa: NAR001
+            collate_fn=partial(_mlm_collate, vocab_length=len(tokenizer.vocab)),  # noqa: NAR001
         ),
         DataLoader(
             dataset=val_ds,
@@ -514,7 +313,7 @@ def get_multi30ken_mlm_dataloader(
             shuffle=False,
             collate_fn=partial(  # noqa: NAR001
                 _mlm_collate,
-                vocab_length=len(vocab),  # noqa: NAR001
+                vocab_length=len(tokenizer.vocab),  # noqa: NAR001
                 seed=val_seed,
             ),
         ),
@@ -524,12 +323,10 @@ def get_multi30ken_mlm_dataloader(
             shuffle=False,
             collate_fn=partial(  # noqa: NAR001
                 _mlm_collate,
-                vocab_length=len(vocab),  # noqa: NAR001
+                vocab_length=len(tokenizer.vocab),  # noqa: NAR001
                 seed=test_seed,
             ),
         ),
-        merges,
-        vocab,
     )
 
 

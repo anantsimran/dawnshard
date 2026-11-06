@@ -11,11 +11,13 @@ import torch
 from loguru import logger
 from torch import Tensor
 from torch.utils.data import DataLoader
-from training.constants import HISTORY_PATH, TRACES_PATH
+from training.constants import CHECKPOINTS_PATH, TRACES_PATH
+from training.dataclass.config import FitConfig
+from training.dataclass.model import EpochRecord, EpochSpec, Metrics, TrainState
+from training.train.checkpoint import checkpoint, serialize_epoch_record
+from training.train.early_stopper import EarlyStopper
 from training.train.environment import collect_system_metrics
-from training.train.model import EpochRecord, EpochSpec, Metrics, TrainState
-from training.train.serialization import serialize_epoch_record
-from training.train.utils import save_history
+from training.utils.expect import expect
 
 Batch = tuple[Tensor, Tensor]
 StepFn = Callable[["TrainState", "EpochSpec", Batch, int, int, Optional[int]], "Metrics"]
@@ -132,73 +134,77 @@ def run_epoch(
     return epoch_spec.reduce_metrics(accumulator)  # noqa: NAR001
 
 
-def load(state: TrainState, epoch_spec: EpochSpec, checkpoint_path: Path) -> None:
-    """Restore model + optimizer (+ scheduler) from a checkpoint."""
-    checkpoint = torch.load(f=checkpoint_path, map_location=epoch_spec.device)
-    state.model.load_state_dict(state_dict=checkpoint["model"])
-    state.optimizer.load_state_dict(state_dict=checkpoint["optimizer"])
-    if state.scheduler is not None and "scheduler" in checkpoint:
-        state.scheduler.load_state_dict(state_dict=checkpoint["scheduler"])
-
-
 def fit(
     state: TrainState,
     epoch_spec: EpochSpec,
     train_loader: DataLoader,
     val_loader: DataLoader,
-    num_epochs: int,
-    val_epoch_list: list[int],
-    train_seed: int,
-    val_seed: int,
-    test_seed: int,
-    history_path: Optional[Path] = None,
+    fit_config: FitConfig,
     wandb_run: Optional[Any] = None,
-    run_uuid: Optional[str] = None,
 ) -> list[EpochRecord]:
-    """Run num_epochs of training; validate only on epochs in val_epoch_list.
+    """Run epochs `epoch_start` to `num_epochs` of `fit_config`; validate on its `val_epoch_list`.
 
     Args:
-        train_seed: Seeds the global torch RNG once, before the first epoch, so
-            shuffling, dropout, and any randomness a collate draws repeat across runs.
-            The caller builds the model before `fit` sees it, so weight init is not
-            covered: seed before constructing the model if you want that too. It is
-            not handed to training steps or their probe; they get None, and any
-            randomness they need comes from the global RNG this seeds.
-        val_seed: Handed to every validation step and on to its probe, so a probe that
-            draws randomness draws the same thing on each validation pass. Pass the
-            repo-wide `VAL_SEED` unless a run has a reason not to; `fit` does not
-            reseed the global RNG with it.
-        test_seed: Recorded in the history file. `fit` runs no test pass, so nothing
-            reads it yet; it is here so a run's three seeds are written down together.
-        run_uuid: Identifies this run when `history_path` is not given, so the
-            history file lands at `HISTORY_PATH / f"{run_uuid}.json"`. Defaults to a
-            fresh uuid4.
+        fit_config: The run's epochs and seeds; `fit` reads it and never writes it.
+            `val_epoch_list=None` validates after every epoch.
+            If `early_stopping` is set, `fit` stops after the first validation pass
+            that leaves `patience` consecutive passes without a `val_loss` that beats
+            the best by more than `min_delta`; the history then ends at that epoch.
+
+            - `train_seed`: Required, though the field defaults to None so a YAML can
+              leave it out. Seeds the global torch RNG once, before the first epoch,
+              so shuffling, dropout, and any randomness a collate draws repeat across
+              runs. The caller builds the model before `fit` sees it, so weight init
+              is not covered: seed before constructing the model if you want that
+              too. It is not handed to training steps or their probe; they get None,
+              and any randomness they need comes from the global RNG this seeds.
+            - `val_seed`: Handed to every validation step and on to its probe, so a
+              probe that draws randomness draws the same thing on each validation
+              pass. Pass the repo-wide `VAL_SEED` unless a run has a reason not to;
+              `fit` does not reseed the global RNG with it.
+            - `test_seed`: Stamped on every record. `fit` runs no test pass, so
+              nothing reads it yet; it is here so a run's three seeds are written
+              down together.
+            - `run_uuid`: Names the checkpoint folder, `CHECKPOINTS_PATH / run_uuid`;
+              a fresh uuid4 stands in when it is None. Name the history file with
+              the same uuid so the two pair up.
 
     Returns:
-        Per-epoch history.
+        Per-epoch history. `fit` writes no history file; pass it to
+        `checkpoint.save_history` to keep it.
+
+    Raises:
+        ValueError: If `fit_config.train_seed` is None.
 
     Side effects:
-        Seeds the global torch RNG from `train_seed`, and writes the history file.
+        Seeds the global torch RNG from `fit_config.train_seed`. After every
+        validation pass, writes a `checkpoint` of `state` to
+        `CHECKPOINTS_PATH / run_uuid / f"epoch_{epoch}.pt"`, after the scheduler has
+        stepped, so `load` resumes the run at the next epoch.
     """
+    run_uuid = fit_config.run_uuid
     if run_uuid is None:
         run_uuid = str(uuid4())  # noqa: NAR001
-    if history_path is None:
-        history_path = HISTORY_PATH / f"{run_uuid}.json"
+    train_seed = expect(value=fit_config.train_seed, message="draw train_seed before calling fit")
     torch.manual_seed(seed=train_seed)
     logger.info(  # noqa: NAR001
-        "fit | epochs {} | val_epochs {} | seeds {}/{}/{} | device {} | wandb {} | history {}",
-        num_epochs,
-        val_epoch_list,
+        "fit | epochs {}-{} | val_epochs {} | seeds {}/{}/{} | device {} | wandb {} | run {}",
+        fit_config.epoch_start,
+        fit_config.num_epochs,
+        fit_config.val_epoch_list,
         train_seed,
-        val_seed,
-        test_seed,
+        fit_config.val_seed,
+        fit_config.test_seed,
         epoch_spec.device,
         wandb_run is not None,
-        history_path,
+        run_uuid,
     )
-    val_epoch_set = set(val_epoch_list)  # noqa: NAR001
+    val_epoch_set = set(  # noqa: NAR001
+        fit_config.val_epoch_list or range(1, fit_config.num_epochs + 1)  # noqa: NAR001
+    )
+    early_stopper = EarlyStopper(early_stopping=fit_config.early_stopping)
     history: list[EpochRecord] = []
-    for epoch_number in range(1, num_epochs + 1):  # noqa: NAR001
+    for epoch_number in range(fit_config.epoch_start, fit_config.num_epochs + 1):  # noqa: NAR001
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
         epoch_start_time = time.perf_counter()
@@ -225,7 +231,7 @@ def fit(
                 step_fn=eval_step,
                 epoch=epoch_number,
                 train=False,
-                seed=val_seed,
+                seed=fit_config.val_seed,
             )
             val_loss = val_metrics.loss
             logger.info(  # noqa: NAR001
@@ -233,6 +239,10 @@ def fit(
                 epoch_number,
                 train_loss,
                 val_loss,
+            )
+            checkpoint(
+                state=state,
+                checkpoint_path=CHECKPOINTS_PATH / run_uuid / f"epoch_{epoch_number}.pt",
             )
         else:
             logger.info("epoch {:>3} | train {:.4f}", epoch_number, train_loss)  # noqa: NAR001
@@ -242,6 +252,9 @@ def fit(
             train_metrics=train_metrics,
             epoch_duration_seconds=epoch_duration_seconds,
             system_metrics=collect_system_metrics(),
+            train_seed=train_seed,
+            val_seed=fit_config.val_seed,
+            test_seed=fit_config.test_seed,
             val_loss=val_loss,
             val_metrics=val_metrics,
         )
@@ -249,13 +262,9 @@ def fit(
         if wandb_run is not None:
             wandb_run.log(data=record_dict)
         history.append(epoch_record)  # noqa: NAR001
-    save_history(
-        history=[serialize_epoch_record(record=record) for record in history],
-        history_path=history_path,
-        train_state=state,
-        epoch_spec=epoch_spec,
-        seeds={"train": train_seed, "val": val_seed, "test": test_seed},
-    )
+        if val_loss is not None and early_stopper.update(val_loss=val_loss):
+            logger.info("early stopping after epoch {}", epoch_number)  # noqa: NAR001
+            break
     return history
 
 
@@ -319,64 +328,63 @@ def profiled_fit(
     epoch_spec: EpochSpec,
     train_loader: DataLoader,
     val_loader: DataLoader,
-    num_epochs: int,
-    val_epoch_list: list[int],
+    fit_config: FitConfig,
     profile_epoch_list: list[int],
-    train_seed: int,
-    val_seed: int,
-    test_seed: int,
-    history_path: Optional[Path] = None,
-    history_detailed_path: Optional[Path] = None,
     wandb_run: Optional[Any] = None,
-    run_uuid: Optional[str] = None,
-) -> list[EpochRecord]:
+) -> tuple[list[EpochRecord], dict[int, dict]]:
     """Like fit, but wraps profiling epochs with torch.profiler.profile.
 
-    Writes history.json (base metrics, same as fit) and history_detailed.json
-    (same records, with profiling metrics and trace_path merged in on
-    profiling epochs). Returns the base per-epoch history list.
+    Stops early under the same `fit_config.early_stopping` rule as `fit`. Like `fit`,
+    it writes no history file; pass both return values to `checkpoint.save_history`
+    for a history whose profiled epochs carry the profiler's timings and trace path.
 
     Args:
-        train_seed: As in `fit`; seeds the global torch RNG for the run.
-        val_seed: As in `fit`; handed to every validation step and its probe.
-        test_seed: As in `fit`; recorded in both history files, read by nothing.
-        run_uuid: As in `fit`; also names the trace directory,
-            `TRACES_PATH / run_uuid`. Defaults to a fresh uuid4.
+        fit_config: As in `fit`, with the same fields and seeds. Its `run_uuid`
+            also names the trace directory, `TRACES_PATH / run_uuid`.
+        profile_epoch_list: Epochs whose training pass runs under the profiler.
+
+    Returns:
+        The per-epoch history, as `fit` returns it, and the profiler metrics of each
+        profiled epoch keyed by epoch number, `trace_path` included.
+
+    Raises:
+        ValueError: If `fit_config.train_seed` is None.
 
     Side effects:
-        Seeds the global torch RNG from `train_seed`, and writes both history files
-        and one Chrome trace per profiled epoch.
+        Seeds the global torch RNG from `fit_config.train_seed`, writes one Chrome
+        trace per profiled epoch, and checkpoints after every validation pass as
+        `fit` does.
     """
     from torch.profiler import ProfilerActivity, profile
 
+    run_uuid = fit_config.run_uuid
     if run_uuid is None:
         run_uuid = str(uuid4())  # noqa: NAR001
-    if history_path is None:
-        history_path = HISTORY_PATH / f"{run_uuid}.json"
-    if history_detailed_path is None:
-        history_detailed_path = HISTORY_PATH / f"{run_uuid}_detailed.json"
     traces_dir = TRACES_PATH / run_uuid
+    train_seed = expect(value=fit_config.train_seed, message="draw train_seed before calling fit")
     torch.manual_seed(seed=train_seed)
     logger.info(  # noqa: NAR001
-        "profiled_fit epochs={} val={} profile={} seeds={}/{}/{} device={} history={} detailed={}",
-        num_epochs,
-        val_epoch_list,
+        "profiled_fit epochs={} val={} profile={} seeds={}/{}/{} device={} traces={}",
+        fit_config.num_epochs,
+        fit_config.val_epoch_list,
         profile_epoch_list,
         train_seed,
-        val_seed,
-        test_seed,
+        fit_config.val_seed,
+        fit_config.test_seed,
         epoch_spec.device,
-        history_path,
-        history_detailed_path,
+        traces_dir,
     )
-    val_epoch_set = set(val_epoch_list)  # noqa: NAR001
+    val_epoch_set = set(  # noqa: NAR001
+        fit_config.val_epoch_list or range(1, fit_config.num_epochs + 1)  # noqa: NAR001
+    )
     profile_epoch_set = set(profile_epoch_list)  # noqa: NAR001
     activities = [ProfilerActivity.CPU]
     if torch.cuda.is_available():
         activities.append(ProfilerActivity.CUDA)  # noqa: NAR001
+    early_stopper = EarlyStopper(early_stopping=fit_config.early_stopping)
     history: list[EpochRecord] = []
-    history_detailed: list[dict] = []
-    for epoch_number in range(1, num_epochs + 1):  # noqa: NAR001
+    profiling_metrics: dict[int, dict] = {}
+    for epoch_number in range(fit_config.epoch_start, fit_config.num_epochs + 1):  # noqa: NAR001
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
         epoch_start_time = time.perf_counter()
@@ -396,7 +404,7 @@ def profiled_fit(
                     train=True,
                     seed=None,
                 )
-            profiling_metrics = _extract_profiler_metrics(
+            profiling_metrics[epoch_number] = _extract_profiler_metrics(
                 prof=prof,
                 epoch_number=epoch_number,
                 traces_dir=traces_dir,
@@ -411,7 +419,6 @@ def profiled_fit(
                 train=True,
                 seed=None,
             )
-            profiling_metrics = None
         if state.scheduler is not None:
             state.scheduler.step()
         train_loss = train_metrics.loss
@@ -426,7 +433,7 @@ def profiled_fit(
                 step_fn=eval_step,
                 epoch=epoch_number,
                 train=False,
-                seed=val_seed,
+                seed=fit_config.val_seed,
             )
             val_loss = val_metrics.loss
             logger.info(  # noqa: NAR001
@@ -434,6 +441,10 @@ def profiled_fit(
                 epoch_number,
                 train_loss,
                 val_loss,
+            )
+            checkpoint(
+                state=state,
+                checkpoint_path=CHECKPOINTS_PATH / run_uuid / f"epoch_{epoch_number}.pt",
             )
         else:
             logger.info(  # noqa: NAR001
@@ -445,30 +456,16 @@ def profiled_fit(
             train_metrics=train_metrics,
             epoch_duration_seconds=epoch_duration_seconds,
             system_metrics=collect_system_metrics(),
+            train_seed=train_seed,
+            val_seed=fit_config.val_seed,
+            test_seed=fit_config.test_seed,
             val_loss=val_loss,
             val_metrics=val_metrics,
         )
-        record_dict = serialize_epoch_record(record=epoch_record)
         if wandb_run is not None:
-            wandb_run.log(data=record_dict)
+            wandb_run.log(data=serialize_epoch_record(record=epoch_record))
         history.append(epoch_record)  # noqa: NAR001
-        detailed_record = (
-            {**record_dict, **profiling_metrics} if profiling_metrics is not None else record_dict
-        )
-        history_detailed.append(detailed_record)  # noqa: NAR001
-    seeds = {"train": train_seed, "val": val_seed, "test": test_seed}
-    save_history(
-        history=[serialize_epoch_record(record=record) for record in history],
-        history_path=history_path,
-        train_state=state,
-        epoch_spec=epoch_spec,
-        seeds=seeds,
-    )
-    save_history(
-        history=history_detailed,
-        history_path=history_detailed_path,
-        train_state=state,
-        epoch_spec=epoch_spec,
-        seeds=seeds,
-    )
-    return history
+        if val_loss is not None and early_stopper.update(val_loss=val_loss):
+            logger.info("early stopping after epoch {}", epoch_number)  # noqa: NAR001
+            break
+    return history, profiling_metrics

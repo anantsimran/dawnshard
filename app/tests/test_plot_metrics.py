@@ -46,3 +46,8 @@ def test_unsplit_fields_get_their_own_panel():
         "epoch_duration_seconds": {"epoch_duration_seconds": [(1, 50.0)]},
         "ram_used_gb": {"ram_used_gb": [(1, 9)]},
     }
+
+
+def test_seed_fields_get_no_panel():
+    history = [{"epoch": 1, "train_loss": 2.0, "train_seed": 1, "val_seed": 2, "test_seed": 3}]
+    assert metric_series(history=history) == {"loss": {"train": [(1, 2.0)]}}

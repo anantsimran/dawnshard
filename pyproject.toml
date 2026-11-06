@@ -13,6 +13,7 @@ dependencies = [
     "matplotlib",
     "sortedcontainers",
     "regex",
+    "pyyaml",
 ]
 
 [dependency-groups]

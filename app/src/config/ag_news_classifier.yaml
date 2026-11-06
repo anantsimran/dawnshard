@@ -1,0 +1,23 @@
+# AGNewsClassifierTrainConfig, read by run/ag_news_classifier.py.
+model:
+  d_model: 64
+  # seq_length is also the loader's max_len.
+  embedding: {seq_length: 128, dropout: 0.1}
+  num_encoders: 2
+  encoder:
+    attention: {h: 4, qk_norm: true}
+    dropout: 0.1
+fit:
+  num_epochs: 20
+  # The repo-wide VAL_SEED and TEST_SEED. train_seed is drawn fresh per run unless
+  # set here; val_epoch_list is left out, so every epoch validates.
+  val_seed: 1000000
+  test_seed: 2000000
+optimizer: {name: adam, lr: 0.001}
+dataloader: {batch_size: 64}
+data:
+  n_train: 100000
+  n_eval: 2000
+  n_test: 2000
+  sample_seed: 0
+  bpe_num_merges: 1000

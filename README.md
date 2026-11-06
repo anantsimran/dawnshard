@@ -52,22 +52,26 @@ history = fit(
     epoch_spec=epoch_spec,
     train_loader=train_loader,
     val_loader=val_loader,
-    num_epochs=15,
-    val_epoch_list=[5, 10, 15],
-    train_seed=random.getrandbits(32),
-    val_seed=VAL_SEED,
-    test_seed=TEST_SEED,
+    fit_config=FitConfig(
+        num_epochs=15,
+        val_epoch_list=[5, 10, 15],
+        train_seed=random.getrandbits(32),
+        val_seed=VAL_SEED,
+        test_seed=TEST_SEED,
+    ),
 )
 ```
 
-Three objects, three jobs:
+Four objects, three jobs:
 
 - `TrainState` is the state: the model, the optimizer, the loss, and an optional
   scheduler.
-- `EpochSpec` is the policy: which device, how to score a batch, what to watch.
-- `fit` is the mechanism, a function over the two. It returns one `EpochRecord` per
-  epoch and writes a history file with the git commit and the machine's CPU, RAM, and
-  GPU usage.
+- `EpochSpec` and `FitConfig` are the policy. `EpochSpec` says which device, how to
+  score a batch, and what to watch. `FitConfig` says how many epochs, which ones
+  validate, which seeds, and when to stop early.
+- `fit` is the mechanism, a function over the three. It returns one `EpochRecord` per
+  epoch, with the machine's CPU, RAM, and GPU usage, and checkpoints the state after
+  every validation pass.
 
 That is the entire API. The rest of this page explains why it is built this way.
 
@@ -90,13 +94,14 @@ loop.
 
 ### State: `TrainState`
 
-Defined in [model.py](app/src/training/train/model.py). A dataclass with four
+Defined in [model.py](app/src/training/dataclass/model.py). A dataclass with four
 fields: `model`, `optimizer`, `criterion`, and `scheduler`. It holds the caller-owned
 objects the loop changes: model parameters, optimizer state, and an optional
 scheduler. A checkpoint saves their `state_dict`s through
-[`save_state`](app/src/training/train/utils.py) and restores them through
-[`load`](app/src/training/train/train_loop.py). The criterion is supplied again by
-the caller; the checkpoint does not save it.
+[`checkpoint`](app/src/training/train/checkpoint.py) and restores them through
+[`load`](app/src/training/train/checkpoint.py). `fit` writes one after every
+validation pass. The criterion is supplied again by the caller; the checkpoint does
+not save it.
 
 ### Policy: `EpochSpec`
 
@@ -106,6 +111,23 @@ writes to it. Supply `Metrics` and the functions in
 [loss_only_metrics.py](app/src/training/metrics/loss_only_metrics.py) to use the same
 loop for a regressor. Set `train_probe` to capture gradient norms. Nothing in
 `EpochSpec` names the model or dataset it will drive.
+
+`FitConfig`, in [config.py](app/src/training/dataclass/config.py), is the other
+half of the policy: `num_epochs`, the val and test seeds, and optional `train_seed`,
+`val_epoch_list`, `epoch_start`, `run_uuid`, and `early_stopping`. `fit` and
+`profiled_fit` read those fields and never write to them. A `val_epoch_list` of
+`None` validates every epoch, and an empty one is rejected when the config is built,
+since a run that never validates would never checkpoint.
+
+`FitConfig` is the `fit` section of a `TrainConfig`, the root of a run's YAML file
+under [app/src/config/](app/src/config/). `fit` never sees the other sections:
+`model`, `optimizer`, `scheduler`, `dataloader`, and `data`. The entry point in
+[run/](app/src/training/run/) builds the model, the `TrainState`, and the loaders from
+them with `build_optimizer` and `build_scheduler` in
+[optim.py](app/src/training/train/optim.py). A YAML leaves `train_seed` out, so the
+entry point draws a fresh one for each run, writes it and the `run_uuid` into the
+config, and hands the whole config to `save_history` after `fit` returns, so the
+history file holds every section, `model` and `data` included.
 
 ### Mechanism: the functions
 
@@ -122,7 +144,8 @@ batch's index, and the seed of the pass, passed through for probes: `val_seed` o
 validation pass, `None` on a training pass.
 
 `train_step` and `eval_step` are the two `StepFn`s. `run_epoch` walks a loader with
-whichever one it is handed, `fit` runs the epochs and writes the history, and
+whichever one it is handed, `fit` runs the epochs, checkpoints after each validation
+pass, and returns the records, and
 `profiled_fit` does the same with a profiler on the epochs you pick. None of these
 functions owns persistent training state; they change the objects inside `TrainState`
 and return metrics or epoch records.
@@ -186,9 +209,9 @@ own argument at the call site.
   [a model test](app/tests/test_ag_news_classifier.py) calls the classifier's forward
   pass directly, with no loop around it.
 - **A sweep is a for loop over `fit`.** `grid_search` in
-  [experiments/common.py](app/src/training/experiments/common.py) takes three builder
+  [ablations/setup.py](app/src/training/ablations/setup.py) takes three builder
   functions (loaders, state, and spec) and calls `fit` once per config. The 66
-  comparison runs in the [ablation report](experiments/reports/multi30k_ablations.md) went
+  comparison runs in the [ablation report](app/src/training/ablations/reports/multi30k_ablations.md) went
   through it.
 
 The [trainer design article](knowledge_sharing/trainer_design.md) follows one change
@@ -217,20 +240,21 @@ A probe sees the model and current batch after a step, while training gradients 
 still on the parameters: input, target, detached prediction, epoch, batch index,
 and pass seed. It can write to disk or a log and returns nothing. Attention maps,
 gradient norms, activations for a fixed input: same signature, same slot on
-`EpochSpec`. The signature lives in [model.py](app/src/training/train/model.py).
+`EpochSpec`. The signature lives in [model.py](app/src/training/dataclass/model.py).
 
 ### Everything else: a named function
 
 - Need a trace? [`profiled_fit`](app/src/training/train/train_loop.py) profiles the
   epochs you select, using the same state, policy, and steps.
-- Need to resume? [`save_state`](app/src/training/train/utils.py) and
-  [`load`](app/src/training/train/train_loop.py) run where the caller puts them.
-- What happened in a run? [`save_history`](app/src/training/train/utils.py) writes
-  the records that `fit` builds at the end of the run.
+- Need to resume? `fit` calls [`checkpoint`](app/src/training/train/checkpoint.py)
+  after every validation pass, and [`load`](app/src/training/train/checkpoint.py)
+  restores any of those files into a `TrainState`.
+- What happened in a run? [`save_history`](app/src/training/train/checkpoint.py)
+  writes the records that `fit` returns, with the config the run was built from.
 - Who controls randomness? The example entry points seed before model construction,
   and [`fit`](app/src/training/train/train_loop.py) seeds before training. The caller
   passes the validation and test seeds; `fit` forwards the validation seed to
-  probes and records all three.
+  probes and stamps all three on every record.
 
 ### No hidden complexity
 
@@ -256,16 +280,18 @@ accident.
 
 | Package | Owns |
 |---|---|
-| `train/` | the loop: `TrainState`, `EpochSpec`, the step functions, `fit`, checkpoints, history and its serialization |
+| `dataclass/` | the plain dataclasses the loop and the models share: `TrainState`, `EpochSpec`, and `Metrics` in `model.py`; `TrainConfig`, `FitConfig`, and the model configs in `config.py` |
+| `train/` | the loop: the step functions, `fit`, checkpoints, history and its serialization, and the optimizer and scheduler a config names |
 | `metrics/` | the `Metrics` subclasses and their three functions |
 | `transformer/` | attention, the encoder block, masks, probes, axis names |
-| `common/` | the BPE tokenizer and the indexed max-heap it trains with |
-| `dataload/` | dataset caches and the AG News and Multi30k pipelines |
-| `model/` | the MNIST classifiers, AG News classifier, and Multi30k predictor |
-| `experiments/` | config sweeps and ablations over a model's entry point |
+| `dal/` | `@cached`, the `Dao` protocol, and its SQLite file |
+| `preprocess/` | the `Tokenizer` interface and `get_tokenizer`, the BPE tokenizer in `bpe/`, and the protected token ids |
+| `dataload/` | the AG News and Multi30k pipelines |
+| `model/` | the `nn.Module`s: the MNIST classifiers, AG News classifier, Multi30k predictor, and Multi30k translator |
+| `run/` | one entry point per transformer model: its `TrainConfig` subclass, and the builders that turn a YAML from `app/src/config/` into loaders, a `TrainState`, and an `EpochSpec` |
+| `ablations/` | config studies, each a pinned YAML with per-arm overrides, built with `run/`'s builders, with their results and reports |
 | `viz/` | every plot |
-| `analytics/` | printed dataset statistics |
-| `utils/` | the git commit, `log_elapsed` step timing |
+| `utils/` | the git commit, `log_elapsed` step timing, an indexed max-heap, `expect` for Optionals |
 
 Four rules fall out of that layout:
 
@@ -283,14 +309,21 @@ not Python import direction:
 
 ```mermaid
 flowchart LR
-  common["common: BPE"] --> data["dataload: batches"]
+  yaml["config: YAML → TrainConfig"] --> data
+  yaml --> model
+  yaml --> loop
+  dal["dal: versioned cache"] --> data["dataload: batches"]
+  preprocess["preprocess: BPE"] --> data
   data --> loop["fit / run_epoch"]
+  loop --> checkpoints["checkpoint per validation pass"]
   transformer["transformer: attention + masks"] --> model["model: nn.Module"]
   model --> state["TrainState"]
   state --> loop
   metrics["metrics: scoring functions"] --> policy["EpochSpec"]
   policy --> loop
-  loop --> history["history JSON"]
+  loop --> save["save_history"]
+  yaml --> save
+  save --> history["history JSON"]
   history --> viz["viz: plots"]
 ```
 
@@ -302,7 +335,6 @@ flowchart LR
 | Every import between packages follows the declared dependency map. | [test_layout.py](app/tests/test_layout.py) checks imports, including type-only imports, and rejects cycles in the map. |
 | Every non-test function in `app/src/` has a docstring or an explicit exemption. | [check_docstrings.py](scripts/check_docstrings.py) checks AST definitions; `# noqa: NAR002` marks a deliberate exception. The versioned [pre-commit hook](.githooks/pre-commit) runs it. |
 | Every `@jaxtyped(typechecker=beartype)` boundary checks its annotated tensor shapes when called. | The decorators on model `forward` methods and [transformer functions](app/src/training/transformer/functions.py) run the check; [axis names](app/src/training/transformer/constants.py) keep annotations consistent. |
-| Every successful `fit` writes run history. | [train_loop.py](app/src/training/train/train_loop.py) calls [save_history](app/src/training/train/utils.py) with the git commit, seeds, state summary, and per-epoch metrics. |
 | Every `create-pr` invocation through the Claude Code hook runs the source gates first. | [check_tests_before_pr.py](.claude/hooks/check_tests_before_pr.py) checks named arguments, tests, and README updates when source changes. |
 
 The [Makefile](Makefile) exposes the tests and source checks as stable commands.
@@ -335,7 +367,7 @@ On successful exit, loguru prints one INFO line such as `Prepared dataset in 1.2
 The timer uses `time.perf_counter()` and rounds to one decimal place. If the block
 raises, it logs no duration. The Multi30k loader uses it for downloads and BPE
 training; these setup timings appear in the terminal, not in the run history.
-For accelerator step timing, see [Observability](tutorials/training.md#the-async-gotcha-that-invalidates-naive-timing).
+For accelerator step timing, see [Observability](knowledge_sharing/tutorials/training.md#the-async-gotcha-that-invalidates-naive-timing).
 
 ### The history file: everything
 
@@ -344,14 +376,15 @@ Three functions build it:
 1. `fit` makes an `EpochRecord` for each epoch: the reduced training metrics, the
    validation metrics if the epoch had a validation pass, the wall-clock duration,
    and a `SystemMetrics` snapshot from psutil and torch with CPU percent, RAM used,
-   and peak GPU memory on CUDA or current allocation on MPS.
+   and peak GPU memory on CUDA or current allocation on MPS. Each record also carries
+   the run's three seeds.
 1. `serialize_epoch_record` flattens that into one dict, hoisting the system fields to
    the top level and dropping anything unset.
-1. When `fit` returns, `save_history` writes the records to
-   `app/history/<run-uuid>.json` under a `meta` block with the git commit, a summary
-   of the `TrainState` (type names, the model's parameter count and the shape of
-   every named parameter, and the optimizer's parameter groups, never weights), the
-   device, and the run's three seeds.
+1. When `fit` returns, the entry point calls `save_history`, which writes the records
+   to `app/history/<run-uuid>.json` under a `meta` block with the git commit, a
+   summary of the `TrainState` (type names, the model's parameter count and the shape
+   of every named parameter, and the optimizer's parameter groups, never weights), the
+   device, and the whole `TrainConfig` the run was built from, seeds included.
 
 This is the run the screenshot below comes from, trimmed to its first epoch and
 rounded:
@@ -359,27 +392,53 @@ rounded:
 ```json
 {
   "meta": {
-    "git_commit": "a408911da11658f59bd1e36d6d4bfb66f7f3b93f",
+    "git_commit": "24f047fb9dbc6cad2e1cde146d1548bca2b631d2",
     "train_state": {
       "model": "AGNewsClassifier",
-      "optimizer": {"type": "Adam", "param_groups": [{"lr": 0.001, "betas": [0.9, 0.999], "weight_decay": 0}]},
+      "optimizer": {"type": "Adam", "param_groups": [{"lr": 0.001, "betas": [0.9, 0.999], "weight_decay": 0.0}]},
       "criterion": "CrossEntropyLoss",
       "scheduler": null
     },
-    "train_config": {"device": "mps"},
-    "seeds": {"train": 2847715383, "val": 1, "test": 2}
+    "epoch_spec": {"device": "mps"},
+    "train_config": {
+      "model": {
+        "d_model": 64,
+        "embedding": {"seq_length": 128, "dropout": 0.1, "position_encoding": true},
+        "num_encoders": 2,
+        "encoder": {"attention": {"h": 4, "qk_norm": true}, "ffn_multiplier": 4, "dropout": 0.1, "norm": "layernorm"},
+        "final_norm": true
+      },
+      "fit": {
+        "num_epochs": 20,
+        "val_seed": 1000000,
+        "test_seed": 2000000,
+        "train_seed": 4202753195,
+        "val_epoch_list": null,
+        "epoch_start": 1,
+        "run_uuid": "52c88c6d-4980-4fa5-836d-9755547f7c12",
+        "early_stopping": null
+      },
+      "optimizer": {"name": "adam", "lr": 0.001, "weight_decay": 0.0},
+      "dataloader": {"batch_size": 64},
+      "data": {"n_train": 100000, "n_eval": 2000, "n_test": 2000, "sample_seed": 0, "bpe_num_merges": 1000},
+      "scheduler": null
+    },
+    "epoch": 20
   },
   "history": [
     {
       "epoch": 1,
-      "train_loss": 0.8845,
-      "train_metrics": {"loss": 0.8845, "count": 20000, "correct": 12732, "accuracy": 0.6366, "precision": 0.6359, "recall": 0.6366},
-      "val_loss": 0.5147,
-      "val_metrics": {"loss": 0.5147, "count": 2000, "correct": 1627, "accuracy": 0.8135, "precision": 0.8145, "recall": 0.8142},
-      "epoch_duration_seconds": 21.41,
-      "cpu_usage_percent": 13.9,
-      "ram_used_gb": 9.29,
-      "gpu_memory_allocated_gb": 0.056
+      "train_loss": 0.6462,
+      "train_metrics": {"loss": 0.6462, "count": 100000, "correct": 74673, "accuracy": 0.7467, "precision": 0.746, "recall": 0.7467},
+      "val_loss": 0.4394,
+      "val_metrics": {"loss": 0.4394, "count": 2000, "correct": 1696, "accuracy": 0.848, "precision": 0.8482, "recall": 0.8494},
+      "epoch_duration_seconds": 45.14,
+      "cpu_usage_percent": 11.2,
+      "ram_used_gb": 9.65,
+      "gpu_memory_allocated_gb": 0.024,
+      "train_seed": 4202753195,
+      "val_seed": 1000000,
+      "test_seed": 2000000
     }
   ]
 }
@@ -395,15 +454,16 @@ the gap between them is the first thing you see. Counts and per-class lists insi
 metrics dicts are left out.
 
 ```bash
-uv run python app/src/training/viz/plot_metrics.py app/history/fd13cf78-a573-465a-b151-55439ff68d36.json
+uv run python app/src/training/viz/plot_metrics.py app/history/52c88c6d-4980-4fa5-836d-9755547f7c12.json
 ```
 
-![plot_metrics output for the run above: train loss falls every epoch while val loss bottoms out at epoch 4 and rises; train accuracy, precision, and recall climb toward 0.97 while val holds near 0.85; epoch duration and GPU memory stay flat](tutorials/assets/plot_metrics.png)
+![plot_metrics output for the run above: train loss falls every epoch while val loss bottoms out at epoch 12 and drifts back up; train accuracy, precision, and recall climb to 0.92 while val holds near 0.88; epoch duration stays near 45 seconds apart from one 51-second epoch, and GPU memory stays flat](knowledge_sharing/tutorials/assets/plot_metrics.png)
 
-The turn in the val line of the loss panel is the overfitting the numbers showed, and
-the accuracy panel shows what it costs: val accuracy stops at 0.85 while train keeps
-climbing. The flat duration and memory panels rule out the run changing character
-halfway through.
+The val line of the loss panel turns at epoch 12 while the train line keeps falling,
+which is overfitting, and the accuracy panel shows what it costs: val accuracy stays
+near 0.88 while train climbs to 0.92. Epoch duration holds near 45 seconds except at
+epoch 17, which took 51 and lines up with the CPU panel's one spike. GPU memory is
+flat throughout, so the run did not change character halfway through.
 
 ### Compare two runs
 
@@ -445,16 +505,18 @@ ______________________________________________________________________
 | Training loop | `fit`, `profiled_fit`, `run_epoch`, `train_step`, `eval_step`; checkpoints, probes, and a history file per run | [train/](app/src/training/train/) |
 | Metrics | loss-only; classification with accuracy and macro-averaged precision and recall; masked-token accuracy and perplexity for per-position targets; each as three functions the loop injects | [metrics/](app/src/training/metrics/) |
 | Attention | scaled dot-product attention, multi-head self- and cross-attention with optional QK norm, fixed sinusoidal position encodings, pre-norm encoder and decoder blocks, padding and causal masks; design notes and axis names in the [transformer README](app/src/training/transformer/README.md) | [transformer/](app/src/training/transformer/) |
-| Tokenizer | byte-level BPE, written from scratch, with an indexed max-heap so each merge updates pair counts in O(log n) | [common/](app/src/training/common/) |
+| Tokenizer | byte-level BPE, written from scratch; training links each distinct chunk once and keeps pair counts in a heap, so a merge touches only the pairs it changes | [preprocess/](app/src/training/preprocess/) |
+| Cache | `@cached` stores a function's result in a versioned SQLite file; downloads, samples, and encodings use it | [dal/](app/src/training/dal/) |
 | Data | MNIST through torchvision; AG News and Multi30k sampled, tokenized, and cached; how a `DataLoader` is built in the [dataload README](app/src/training/dataload/README.md) | [dataload/](app/src/training/dataload/), [mnist.py](app/src/training/model/mnist.py) |
 | Models | three MNIST classifiers, an AG News transformer classifier, a Multi30k masked-token predictor, and a Multi30k encoder-decoder translator | [model/](app/src/training/model/) |
-| Experiments | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation and its scale study, each a grid search ranked by best val loss | [experiments/](app/src/training/experiments/) |
+| Configs | one YAML per transformer model holding its architecture, epochs and seeds, optimizer, schedule, batch size, and data settings; an entry point per model reads it | [app/src/config/](app/src/config/), [run/](app/src/training/run/) |
+| Ablations | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation and its scale study, each a grid search ranked by best val loss | [ablations/](app/src/training/ablations/) |
 | Visualization | a run's metrics, two runs side by side, a model's autograd graph, attention heatmaps, BPE sequence length against merges | [viz/](app/src/training/viz/) |
-| Analytics | BPE length stats (mean, min, max, percentiles) for each Multi30k EN split | [analytics/](app/src/training/analytics/) |
+| Notebooks | a starter notebook, the Multi30k tokenizer experiments, BPE length stats (mean, min, max, percentiles) for each Multi30k EN split, and a checkpoint-and-reload walkthrough | [notebooks/](app/src/notebooks/) |
 | Tests | a pytest suite; `attention` is checked against `torch.nn.functional.scaled_dot_product_attention` | [tests/](app/tests/) |
-| Tutorials | theory and revision notes from tensors to attention masks, published as a website | [tutorials/](tutorials/) |
+| Tutorials | theory and revision notes from tensors to attention masks, published as a website | [knowledge_sharing/tutorials/](knowledge_sharing/tutorials/) |
 | Knowledge sharing | engineering articles that trace design choices through the implementation | [Trainer design](knowledge_sharing/trainer_design.md), [Reproducibility](knowledge_sharing/reproducibility.md) |
-| Reports | measured tradeoffs, with figures, exported data, and reproduction commands | [Multi30k ablations](experiments/reports/multi30k_ablations.md), [tokenisation](experiments/reports/multi30k_tokenisation.md) |
+| Reports | measured tradeoffs, with figures, exported data, and reproduction commands | [Multi30k ablations](app/src/training/ablations/reports/multi30k_ablations.md), [tokenisation](app/src/training/ablations/reports/multi30k_tokenisation.md) |
 
 Logs go through loguru, Weights & Biases is optional, and everything runs with `uv`
 locally or in Docker.
@@ -476,6 +538,8 @@ import random
 import torch
 from torch import nn
 from training.constants import TEST_SEED, VAL_SEED
+from training.dataclass.config import FitConfig
+from training.dataclass.model import EpochSpec, TrainState
 from training.metrics.classification_metrics import (
     ClassificationMetrics,
     accumulate_metrics,
@@ -483,24 +547,26 @@ from training.metrics.classification_metrics import (
     reduce_metrics,
 )
 from training.setup import DEVICE
-from training.train.model import EpochSpec, TrainState
 from training.train.train_loop import fit
 ```
 
-With these imports, the three calls in
+With these imports, the calls in
 [A training run in one screen](#a-training-run-in-one-screen) are a complete program.
 
 `fit` runs a training pass every epoch, then steps the scheduler if `TrainState` has
-one, then runs a validation pass only if the epoch is in `val_epoch_list`. Both passes
+one, then runs a validation pass only if the epoch is in `fit_config.val_epoch_list`, or
+on every epoch when that is `None`. Both passes
 go through the same `run_epoch`, which takes the step function as an argument:
 `train_step` for training, and `eval_step`, which runs under `torch.no_grad()`, for
 validation. `run_epoch` sets the model's train or eval mode, walks the loader, and
 hands each step the epoch number and the batch index.
 
-`fit` returns one `EpochRecord` per epoch and writes the history file, at a path you
-can choose with `history_path=`. [Debuggability](#debuggability) shows what the file
-holds and how to plot it. To use a learning-rate scheduler, pass `scheduler=` to
-`TrainState`. For a model that doesn't classify, import the same three functions from
+`fit` returns one `EpochRecord` per epoch and writes no history file; it checkpoints
+after each validation pass (see
+[Save and restore a checkpoint](#save-and-restore-a-checkpoint)). Pass the records
+to `save_history` with a path and the run's config to keep them;
+[Debuggability](#debuggability) shows what the file holds and how to plot it. To use
+a learning-rate scheduler, pass `scheduler=` to `TrainState`. For a model that doesn't classify, import the same three functions from
 `training.metrics.loss_only_metrics` and set `metrics_type=Metrics`.
 
 ### Seed a run
@@ -519,24 +585,27 @@ history = fit(
     epoch_spec=epoch_spec,
     train_loader=train_loader,
     val_loader=val_loader,
-    num_epochs=15,
-    val_epoch_list=[5, 10, 15],
-    train_seed=train_seed,
-    val_seed=VAL_SEED,
-    test_seed=TEST_SEED,
+    fit_config=FitConfig(
+        num_epochs=15,
+        val_epoch_list=[5, 10, 15],
+        train_seed=train_seed,
+        val_seed=VAL_SEED,
+        test_seed=TEST_SEED,
+    ),
 )
 ```
 
-All three seeds are required, and none of them defaults, so every run states which
-random streams it used. Each one has a single job:
+`fit` needs all three seeds and defaults none of them, so every run states which
+random streams it used. `train_seed` is optional on `FitConfig` only so that a YAML can
+leave it out; `fit` raises if it is still `None`. Each seed has a single job:
 
 - **`train_seed` owns the global RNG.** `fit` calls `torch.manual_seed` with it once,
   before the first epoch, which seeds CPU, CUDA, MPS, and XPU for shuffling, dropout,
   and training collates. Weight init happens before `fit` sees the model, so each
   `main` seeds with the same value just before building it. Those two calls are the
   only `torch.manual_seed` in `app/src`. Each `main` draws the seed fresh with
-  `random.getrandbits(32)`, so a result that only holds for one lucky draw shows
-  itself across runs.
+  `random.getrandbits(32)` unless its YAML sets `fit.train_seed`, so a result that
+  only holds for one lucky draw shows itself across runs.
 - **`val_seed` and `test_seed` are fixed repo-wide**, as `VAL_SEED` and `TEST_SEED` in
   [constants.py](app/src/training/constants.py). With masked language modelling, a
   `val_loss` drop from 2.31 to 2.29 could be a better model or an easier mask; fixed
@@ -550,7 +619,8 @@ random streams it used. Each one has a single job:
   loader's job; see
   [Random collates](app/src/training/dataload/README.md#random-collates-mask-validation-and-test-once).
 
-All three land in the history file's `meta.seeds`.
+All three land in the history file's `meta.train_config.fit` and on every epoch
+record.
 
 The second `torch.manual_seed` call rewinds the generator to the start of the
 `train_seed` stream instead of continuing it. Draws made during setup therefore do not
@@ -563,22 +633,44 @@ the rewind implies for comparing runs.
 ### Repeat a past run
 
 ```bash
-jq '.meta.seeds' app/history/<run-uuid>.json
-# { "train": 2847715383, "val": 1, "test": 2 }
+jq '.meta.train_config' app/history/<run-uuid>.json > repeat.yaml
+uv run python app/src/training/run/<model>.py --config repeat.yaml
 ```
 
-```python
-train_seed = 2847715383  # from that run's meta.seeds, in place of a fresh draw
-```
+`meta.train_config` is the run's YAML with the drawn `train_seed` filled in, and JSON
+is valid YAML, so the file goes straight back to `--config`. The entry point keeps
+the recorded seed instead of drawing one and gives the repeat its own `run_uuid`.
 
 For the same model and loaders, `fit` starts from the same RNG state, and weight
 initialization does too when `torch.manual_seed` runs before the model is built. The
 seeds cannot reach data prepared before they were drawn: the Multi30k loader reorders
 its training rows before the entry point picks `train_seed`, and the downloaded splits
-and BPE merges are cache files the history does not identify. Keep those inputs and
-the model configuration next to the seed;
+and BPE merges are entries in the cache database, which the history does not identify. Keep those inputs next
+to the history file;
 [What a replay covers](knowledge_sharing/reproducibility.md#what-a-replay-covers)
 lists the rest.
+
+### Stop early
+
+```python
+from training.dataclass.config import EarlyStoppingConfig
+
+fit_config = FitConfig(
+    num_epochs=50,
+    train_seed=train_seed,
+    val_seed=VAL_SEED,
+    test_seed=TEST_SEED,
+    early_stopping=EarlyStoppingConfig(patience=3, min_delta=0.001),
+)
+```
+
+`fit` stops when `patience` validation passes in a row fail to beat the best
+`val_loss` by more than `min_delta`. It counts validation passes, not epochs, so
+with `val_epoch_list=[5, 10, 15]` and `patience=1` the run can end at epoch 10. The
+history and the saved `meta.epoch` end at the epoch where it stopped. Every
+validation pass leaves a checkpoint, so the best `val_loss` epoch's weights are on
+disk as that epoch's file.
+`profiled_fit` follows the same rule.
 
 ### Add a metric
 
@@ -589,7 +681,7 @@ error:
 from dataclasses import dataclass
 
 from torch import Tensor
-from training.train.model import Metrics
+from training.dataclass.model import Metrics
 
 
 @dataclass
@@ -706,17 +798,19 @@ one batch of weights per block on the device between calls. `save_attention_maps
 ```python
 from training.train.train_loop import profiled_fit
 
-profiled_fit(
+history, profiling_metrics = profiled_fit(
     state=train_state,
     epoch_spec=epoch_spec,
     train_loader=train_loader,
     val_loader=val_loader,
-    num_epochs=5,
-    val_epoch_list=[5],
+    fit_config=FitConfig(
+        num_epochs=5,
+        val_epoch_list=[5],
+        train_seed=random.getrandbits(32),
+        val_seed=VAL_SEED,
+        test_seed=TEST_SEED,
+    ),
     profile_epoch_list=[2],
-    train_seed=random.getrandbits(32),
-    val_seed=VAL_SEED,
-    test_seed=TEST_SEED,
 )
 ```
 
@@ -726,32 +820,44 @@ phases, and writes a Chrome trace to `app/history/traces/<run-uuid>/epoch_N.json
 `chrome://tracing` or Perfetto. Validation passes aren't profiled. Profiling epoch 2
 rather than 1 keeps one-time startup costs out of the trace.
 
-It writes the normal history file and a second `<run-uuid>_detailed.json`, in which
-the profiled epochs also carry dataloader and step CPU time, CUDA time on a GPU, and
-the trace path.
+It returns `fit`'s records and, beside them, the profiler metrics of each profiled
+epoch: dataloader and step CPU time, CUDA time on a GPU, and the trace path. Pass both
+to `save_history(history=history, profiling_metrics=profiling_metrics, ...)` and the
+profiled epochs' rows carry those fields; leave `profiling_metrics` out and the file
+has `fit`'s format.
 
 Profiling is its own function rather than a flag on `fit` for two reasons. The
 profiler slows down every step it records, so you pick which epochs pay for it. And
-the regular history file keeps `fit`'s format, so profiled runs compare directly with
+the profiler metrics stay out of the records, so profiled runs compare directly with
 normal ones.
 
 ### Save and restore a checkpoint
 
 ```python
 from training.constants import CHECKPOINTS_PATH
-from training.train.train_loop import load
-from training.train.utils import save_state
+from training.train.checkpoint import checkpoint, load
 
-checkpoint_path = CHECKPOINTS_PATH / "model.pt"
-checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-save_state(state=train_state, checkpoint_path=checkpoint_path)
-load(state=train_state, epoch_spec=epoch_spec, checkpoint_path=checkpoint_path)
+# fit already wrote one file per validation pass:
+load(
+    state=train_state,
+    epoch_spec=epoch_spec,
+    checkpoint_path=CHECKPOINTS_PATH / run_uuid / "epoch_10.pt",
+)
+# Anywhere else, call it yourself:
+checkpoint(state=train_state, checkpoint_path=CHECKPOINTS_PATH / "model.pt")
 ```
 
-`save_state` writes the model, optimizer, and scheduler `state_dict`s, and `load`
-restores them into an existing `TrainState`, so build the model and optimizer first.
-`save_state` doesn't create the folder, hence the `mkdir`. `fit` calls neither, so a
-checkpoint happens exactly where you put the call.
+`checkpoint` writes the model weights and the optimizer and scheduler `state_dict`s,
+creating the folder if it has to, and `load` restores them into an existing
+`TrainState`, so build the model and optimizer first. `fit` calls `checkpoint` after
+every validation pass, after the scheduler has stepped, writing
+`app/history/checkpoints/<run-uuid>/epoch_N.pt`. Loading one resumes the run at epoch
+N + 1, and the folder shares its `run_uuid` with the history file, so every
+checkpoint pairs with the run that produced it. A file per validated epoch costs disk:
+a `val_epoch_list` of `None` saves the model once per epoch.
+[multi30k_checkpoint.ipynb](app/src/notebooks/multi30k_checkpoint.ipynb) trains one
+epoch, reloads that epoch's file into a freshly built model, and gets the same val
+loss back.
 
 ______________________________________________________________________
 
@@ -760,17 +866,19 @@ ______________________________________________________________________
 The tokenizer is byte-pair encoding, written from scratch. It works on UTF-8 bytes, so
 any text can be encoded without an unknown token. It splits text with GPT-4's
 pre-tokenization pattern first, and merges never cross those chunks. Usage lives in
-[common/README.md](app/src/training/common/README.md).
+[preprocess/README.md](app/src/training/preprocess/README.md).
 
 ```python
-from common import bpe
+from training.preprocess.bpe import gpt4_preprocessor, train
 
-merges, vocab = bpe.train(text=corpus, num_merges=2000)
-ids = bpe.encode(text="Stocks rally as tech earnings beat forecasts", merges=merges)
+chunks = gpt4_preprocessor.preprocess(text=corpus)
+tokenizer = train.build_tokenizer(chunks=chunks, num_merges=2000)
+ids = tokenizer.encode(texts=["Stocks rally as tech earnings beat forecasts"])
+tokenizer.decode(ids=ids)[0]  # the text again
 ```
 
 On the AG News train split, 2,000 merges bring the average sample down from 236 bytes
-to 79 tokens. The [Multi30k tokenisation report](experiments/reports/multi30k_tokenisation.md)
+to 79 tokens. The [Multi30k tokenisation report](app/src/training/ablations/reports/multi30k_tokenisation.md)
 measures how vocabulary size changes caption lengths in English and German.
 
 ______________________________________________________________________
@@ -805,29 +913,30 @@ Everything runs through `uv run`, never a bare `python`. With `UV_ENV_FILE` set,
 `PYTHONPATH=app/src` is loaded automatically.
 
 ```bash
-# Train the transformer classifier on AG News, saving attention maps as it goes
-uv run python app/src/training/model/ag_news_classifier.py
+# Train the transformer classifier on AG News, saving attention maps as it goes.
+# Each run/ script reads its YAML in app/src/config/; pass --config to use another.
+uv run python app/src/training/run/ag_news_classifier.py
 
 # Train the MNIST model (CNN by default — edit main() to pick a model)
 uv run python app/src/training/model/mnist.py
 
 # Train the Multi30k masked-token predictor once
-uv run python app/src/training/model/multi30ken_predictor.py
+uv run python app/src/training/run/multi30ken_predictor.py
 
 # Train the Multi30k encoder-decoder translator once
-uv run python app/src/training/model/multi30k_translator.py
+uv run python app/src/training/run/multi30k_translator.py
 
 # Run the Multi30k masked-token predictor's ablation (3 arms x 3 seeds, 100 epochs each)
-uv run python app/src/training/experiments/multi30ken_predictor_ablation.py
+uv run python app/src/training/ablations/multi30ken_predictor_ablation.py
 
 # Run the Multi30k translator's ablation (10 arms x 3 seeds, 30 epochs each)
-uv run python app/src/training/experiments/multi30k_translator_ablation.py
+uv run python app/src/training/ablations/multi30k_translator_ablation.py
 
 # Run its scale follow-up: d_model=256 and 512, 12+12 blocks, schedules, dropout
-uv run python app/src/training/experiments/multi30k_translator_ablation.py scale
+uv run python app/src/training/ablations/multi30k_translator_ablation.py scale
 
-# Retrain the scale study's best arm to its best epoch and save it to app/history/checkpoints/
-uv run python app/src/training/experiments/multi30k_translator_ablation.py best
+# Retrain the scale study's best arm to its best epoch, checkpointed under app/history/checkpoints/<run-uuid>/
+uv run python app/src/training/ablations/multi30k_translator_ablation.py best
 
 # Plot one run's per-epoch metrics
 uv run python app/src/training/viz/plot_metrics.py app/history/<run-id>.json
@@ -838,17 +947,21 @@ uv run python app/src/training/viz/compare_runs.py app/history/<run-a>.json app/
 # Plot mean BPE tokens per sample against the number of merges (AG News train)
 uv run python app/src/training/viz/bpe_seq_len.py
 
-# Print BPE length stats (mean, min, max, percentiles) for each Multi30k EN split
-uv run python app/src/training/analytics/multi30ken_bpe_len.py
+# Execute the BPE length notebook and print stats (mean, min, max, percentiles)
+# for each Multi30k EN split, leaving the file unchanged
+uv run jupyter nbconvert --execute --to markdown --stdout app/src/notebooks/multi30ken_bpe_len.ipynb
 
 # Export the tokenisation report's CSV and plots from saved notebook output
-uv run python experiments/reports/generate_multi30k_tokenisation.py
+uv run python app/src/training/ablations/reports/generate_multi30k_tokenisation.py
 
 # Export the ablation report's summary and plots from checked-in study CSVs
-uv run python experiments/reports/generate_multi30k_ablations.py
+uv run python app/src/training/ablations/reports/generate_multi30k_ablations.py
 
 # Execute the starter notebook and print its outputs, leaving the file unchanged
-uv run jupyter nbconvert --execute --to markdown --stdout notebooks/hello_world.ipynb
+uv run jupyter nbconvert --execute --to markdown --stdout app/src/notebooks/hello_world.ipynb
+
+# Train a small translator for one epoch, then reload fit's checkpoint and re-validate
+uv run jupyter nbconvert --execute --to notebook --inplace app/src/notebooks/multi30k_checkpoint.ipynb
 
 # Run the test suite
 make test
@@ -856,6 +969,30 @@ make test
 
 **Device selection is automatic** ([setup.py](app/src/training/setup.py)): CUDA → MPS →
 CPU, in that order. Force CPU with `DISABLE_GPU=1`.
+
+### The cache database
+
+```python
+tokenizer = get_tokenizer(
+    merges_path=TOKENIZERS_PATH / "multi30k-en-10000.json",
+    train_texts=texts.train,
+    num_merges=10000,
+)
+with SqliteDao(path=CACHE_PATH) as cache:
+    ids = tokenizer.encode(texts=texts.val, cache=cache)
+```
+
+The entry points above open `app/datasets/cache/cache.sqlite` themselves, and keep
+merges in `app/datasets/tokenizers/`. The first run downloads the data, trains each
+tokenizer, and stores both. Later runs load them and log a cache hit for each step.
+
+- **A tokenizer is stored by path.** The file name carries the corpus and
+  `num_merges`, so a new `num_merges` trains a new file. Rename or delete the file
+  after changing the texts it trains on.
+- **A new version replaces an old entry.** Bump a `@cached` function's `version`
+  whenever its output changes, as the [dal README](app/src/training/dal/README.md)
+  explains.
+- **Both are gitignored and safe to delete.** The next run rebuilds them.
 
 ### The three MNIST models
 
@@ -944,25 +1081,25 @@ ______________________________________________________________________
 
 ## Tutorials
 
-The [tutorials/](tutorials/) directory explains the theory behind the code as
-revision notes. Its [guide](tutorials/index.md) offers question-led revision
+The [knowledge_sharing/tutorials/](knowledge_sharing/tutorials/) directory explains the theory behind the code as
+revision notes. Its [guide](knowledge_sharing/tutorials/index.md) offers question-led revision
 routes, a page list, and a map from specific questions to the sections that
 answer them. Pages begin with the central idea and end with a quick recall check;
 the longer derivations remain available when you need them.
 
 One file per topic, each a sequence of `##` sections:
 
-- [tutorials/pytorch.md](tutorials/pytorch.md) — a PyTorch series: tensors, shapes and
+- [knowledge_sharing/tutorials/pytorch.md](knowledge_sharing/tutorials/pytorch.md) — a PyTorch series: tensors, shapes and
   broadcasting, autograd and gradient descent, `nn.Module` and multi-layer
   networks, where the transpose in a linear layer's backward pass comes from, ReLU
   and dead neurons, data loading, and best practices for inspecting a model.
-- [tutorials/training.md](tutorials/training.md) — the training loop, optimizers and
+- [knowledge_sharing/tutorials/training.md](knowledge_sharing/tutorials/training.md) — the training loop, optimizers and
   learning-rate schedulers, Adam and the learning rate, and what the training loop
   measures for free versus a profiler.
-- [tutorials/math.md](tutorials/math.md) — the matrix calculus behind backprop, adapted
+- [knowledge_sharing/tutorials/math.md](knowledge_sharing/tutorials/math.md) — the matrix calculus behind backprop, adapted
   from Parr & Howard with PyTorch checks.
-- [tutorials/vision.md](tutorials/vision.md) — convolutional networks for MNIST.
-- [tutorials/transformer.md](tutorials/transformer.md) — attention masks and
+- [knowledge_sharing/tutorials/vision.md](knowledge_sharing/tutorials/vision.md) — convolutional networks for MNIST.
+- [knowledge_sharing/tutorials/transformer.md](knowledge_sharing/tutorials/transformer.md) — attention masks and
   cross-attention, pre-norm vs post-norm, and compute and memory planning.
 
 The [trainer design article](knowledge_sharing/trainer_design.md) compares where
@@ -970,9 +1107,9 @@ Keras, Lightning, Hugging Face, Flax, and Dawnshard keep state, policy, and
 mechanism, and what each framework offers.
 The [reproducibility article](knowledge_sharing/reproducibility.md) follows the
 library's random streams through initialization, loaders, workers, and masks.
-The [Multi30k tokenisation report](experiments/reports/multi30k_tokenisation.md) compares BPE
+The [Multi30k tokenisation report](app/src/training/ablations/reports/multi30k_tokenisation.md) compares BPE
 vocabulary sizes with downloadable figures and statistics.
-The [Multi30k ablation report](experiments/reports/multi30k_ablations.md) follows dropout,
+The [Multi30k ablation report](app/src/training/ablations/reports/multi30k_ablations.md) follows dropout,
 depth, and learning-rate schedules across 66 comparison runs, with links to the
 full study records and their data.
 
@@ -986,7 +1123,7 @@ the publishing source must be **GitHub Actions**; branch publishing runs a separ
 Jekyll build that can replace the MkDocs site.
 
 **When you add or change a tutorial, update
-[tutorials/index.md](tutorials/index.md).** A new tutorial is a `##` section appended
+[knowledge_sharing/tutorials/index.md](knowledge_sharing/tutorials/index.md).** A new tutorial is a `##` section appended
 to the topic file it belongs to, so it needs no `nav:` entry; only a new *topic* file
 gets a line in the `nav:` list in [mkdocs.yml](mkdocs.yml). Otherwise the page is built
 but doesn't appear in the site's navigation, and the build prints a warning naming any
@@ -1004,13 +1141,26 @@ ______________________________________________________________________
 dawnshard/
 ├── app/
 │   ├── src/
+│   │   ├── config/                       # one YAML per model, read by run/
+│   │   │   ├── ag_news_classifier.yaml   # model, fit, optimizer, scheduler, dataloader, data
+│   │   │   ├── multi30ken_predictor.yaml
+│   │   │   ├── multi30k_translator.yaml
+│   │   │   └── ablations/                # each study's pinned reference config
+│   │   ├── notebooks/
+│   │   │   ├── hello_world.ipynb         # starter notebook: the sys.path cell to borrow, then imports
+│   │   │   ├── multi30k_checkpoint.ipynb # one translator epoch, then load fit's checkpoint into a fresh model
+│   │   │   ├── multi30k_dataload.ipynb   # Multi30k BPE training and tokenization stats
+│   │   │   └── multi30ken_bpe_len.ipynb  # BPE length percentiles for each Multi30k EN split
 │   │   └── training/
+│   │       ├── dataclass/
+│   │       │   ├── config.py         # TrainConfig (the YAML root), FitConfig, EarlyStoppingConfig, model, optimizer, scheduler, dataloader configs
+│   │       │   └── model.py          # TrainState, EpochSpec, Metrics, Probe, EpochRecord, SystemMetrics
 │   │       ├── train/                # the functional training loop
-│   │       │   ├── model.py          # TrainState, EpochSpec, Metrics, Probe, EpochRecord, SystemMetrics
 │   │       │   ├── train_loop.py     # fit/profiled_fit/run_epoch/step
 │   │       │   ├── environment.py    # per-epoch CPU/RAM/GPU snapshot
-│   │       │   ├── serialization.py  # TrainState, EpochSpec, EpochRecord → history-JSON dicts
-│   │       │   └── utils.py          # save_state, save_history
+│   │       │   ├── checkpoint.py     # checkpoint/load, save_history, history-JSON serialization
+│   │       │   ├── early_stopper.py  # EarlyStopper: when fit stops, from its validation losses
+│   │       │   └── optim.py          # build_optimizer, build_scheduler (cosine, warmup_cosine, one_cycle)
 │   │       ├── metrics/              # Metrics subclasses + calculate/accumulate/reduce functions
 │   │       ├── transformer/          # attention built from scratch
 │   │       │   ├── README.md         # attention design choices and axis names
@@ -1019,40 +1169,52 @@ dawnshard/
 │   │       │   ├── probes.py         # save_attention_maps: probe that saves attention maps per epoch
 │   │       │   ├── mask.py           # padding and causal keep masks, pad-masked mean pool
 │   │       │   └── constants.py      # axis names for shape strings: B, L, D_MODEL, H, D_K
-│   │       ├── common/
+│   │       ├── dal/                  # versioned cache: @cached and its stores
+│   │       │   ├── README.md         # @cached keys, versions, and swapping the store
+│   │       │   ├── cache.py          # @cached, CacheKeyed
+│   │       │   └── dao/
+│   │       │       ├── dao.py        # Dao protocol: get/put with a version
+│   │       │       └── sqlite_dao.py # SqliteDao: one SQLite file, WAL mode
+│   │       ├── preprocess/
 │   │       │   ├── README.md         # BPE usage: batching, saving, translation, chunking
-│   │       │   ├── bpe.py            # byte-level BPE with GPT-4 pre-tokenization
-│   │       │   ├── constants.py      # protected token ids: PAD, MASK, CLS, SEP, BOS, EOS
-│   │       │   └── priority_queue.py # indexed max-heap with O(log n) priority updates
-│   │       ├── dataload/             # dataset caches and text pipelines
+│   │       │   ├── tokenizer.py      # Tokenizer interface; get_tokenizer: load or train a merges file
+│   │       │   ├── bpe/
+│   │       │   │   ├── gpt4_preprocessor.py  # preprocess: whitespace and GPT-4 chunking
+│   │       │   │   ├── tokenizer.py          # BpeTokenizer: merges, vocab, text encode/decode
+│   │       │   │   ├── train.py              # build_tokenizer: learn merges with a pair heap
+│   │       │   │   ├── encode.py             # encode_chunks: chunks to ids, cached by tokenizer_id
+│   │       │   │   └── decode.py             # decode_ids: ids to bytes
+│   │       │   └── constants.py      # protected token ids, FIRST_MERGE_ID
+│   │       ├── dataload/             # text pipelines
 │   │       │   ├── README.md         # DataLoader internals: collate, shuffling, seeding, chunks
 │   │       │   ├── datasets.py       # InMemoryDataset: an in-memory split of prebuilt items
-│   │       │   ├── ag_news.py        # AG News: sample, tokenize, cache, one DataLoader per split
+│   │       │   ├── ag_news.py        # AG News: sample, encode, one DataLoader per split
 │   │       │   ├── multi30k.py       # Multi30k: translation pairs and English masked-LM batches
-│   │       │   └── constants.py      # DATASETS_CACHE_DIR
-│   │       ├── model/                # MNIST, AG News, and Multi30k model entry points
-│   │       │   ├── mnist.py                # three digit classifiers
-│   │       │   ├── ag_news_classifier.py   # text classifier and attention probe
-│   │       │   ├── multi30ken_predictor.py # masked-token predictor and its single run
-│   │       │   └── multi30k_translator.py  # encoder-decoder translator and its single run
-│   │       ├── experiments/          # config studies over a model's entry point
-│   │       │   ├── common.py         # grid_search, LR schedules, norm names, seed repeats
+│   │       │   └── constants.py      # DATASETS_CACHE_DIR, CACHE_PATH, TOKENIZERS_PATH
+│   │       ├── model/                # MNIST, AG News, and Multi30k nn.Modules
+│   │       │   ├── mnist.py                # three digit classifiers and their single run
+│   │       │   ├── ag_news_classifier.py   # text classifier
+│   │       │   ├── multi30ken_predictor.py # masked-token predictor
+│   │       │   └── multi30k_translator.py  # encoder-decoder translator
+│   │       ├── run/                  # entry points: train one model from its YAML
+│   │       │   ├── ag_news_classifier.py   # AGNewsClassifierTrainConfig and main
+│   │       │   ├── multi30ken_predictor.py # its TrainConfig, loaders, TrainState, EpochSpec, main
+│   │       │   └── multi30k_translator.py  # its TrainConfig, loaders, TrainState, EpochSpec, main
+│   │       ├── ablations/            # config studies: a pinned YAML plus overrides per arm
+│   │       │   ├── setup.py          # grid_search, seed repeats
 │   │       │   ├── multi30ken_predictor_ablation.py # sweep, follow-ups, ablation
-│   │       │   └── multi30k_translator_ablation.py  # component, depth, LR, language ablation
+│   │       │   ├── multi30k_translator_ablation.py  # component, depth, LR, language ablation
+│   │       │   ├── <model>/<date>/   # one study per folder: write-up, CSV exports, plots
+│   │       │   └── reports/          # measured tradeoffs, report generators, CSV data, PNG/SVG figures
 │   │       ├── viz/                  # metrics, run comparison, model graph, attention, BPE length
-│   │       ├── analytics/            # printed stats: Multi30k EN BPE length percentiles
-│   │       ├── utils/                # git commit, log_elapsed timing
+│   │       ├── utils/                # git commit, log_elapsed timing, priority_queue.py (indexed max-heap), expect (unwrap an Optional)
 │   │       ├── setup.py              # device selection + wandb init
-│   │       └── constants.py          # repo-root-relative paths (CHECKPOINTS_PATH, HISTORY_PATH, TRACES_PATH, ATTENTION_PROBES_PATH)
+│   │       └── constants.py          # repo-root-relative paths (CHECKPOINTS_PATH, HISTORY_PATH, TRACES_PATH, ATTENTION_PROBES_PATH, CONFIGS_PATH)
 │   ├── tests/                    # pytest suite; test_layout.py checks imports between packages
 │   ├── history/                  # per-run history JSON; traces/ and attention_probes/ (gitignored)
-│   └── datasets/                 # downloaded dataset cache (gitignored)
-├── tutorials/                    # theory and revision, one file per topic: pytorch.md, training.md, transformer.md, math.md, vision.md; index.md
-├── experiments/
-│   ├── <model>/<date>/           # one study per folder: write-up, CSV exports, plots
-│   └── reports/                  # measured tradeoffs, report generators, CSV data, PNG/SVG figures
+│   └── datasets/                 # dataset downloads and cache.sqlite (gitignored)
 ├── knowledge_sharing/            # standalone engineering articles and SVG diagrams
-├── notebooks/hello_world.ipynb   # starter notebook: the sys.path cell to borrow, then imports
+│   └── tutorials/                # theory and revision, one file per topic: pytorch.md, training.md, transformer.md, math.md, vision.md; index.md
 ├── pages/                        # MkDocs hooks and theme overrides for the website
 ├── scripts/
 │   ├── check_named_args.py       # keyword-argument linter

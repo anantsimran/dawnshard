@@ -6,6 +6,9 @@ HISTORY_PATH = REPO_ROOT / "app" / "history"
 CHECKPOINTS_PATH = HISTORY_PATH / "checkpoints"
 TRACES_PATH = HISTORY_PATH / "traces"
 ATTENTION_PROBES_PATH = HISTORY_PATH / "attention_probes"
+# One YAML per runnable model, read by its `run/` module; ablation studies pin theirs
+# under `ablations/`.
+CONFIGS_PATH = REPO_ROOT / "app" / "src" / "config"
 
 # Eval randomness (masking, subsampling, augmentation) is fixed repo-wide so that
 # val and test numbers compare across runs; only the train seed varies per run.

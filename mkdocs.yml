@@ -5,17 +5,18 @@ repo_url: https://github.com/anantsimran/dawnshard
 repo_name: anantsimran/dawnshard
 
 # MkDocs needs a single docs_dir, but the site mirrors repo paths so relative links
-# behave the same here as on github.com. pages/hooks.py re-roots tutorials/ under
-# tutorials/ and adds the READMEs listed in its EXTRA_PAGES.
-docs_dir: tutorials
+# behave the same here as on github.com. pages/hooks.py re-roots
+# knowledge_sharing/tutorials/ under its repo path and adds the READMEs listed in its
+# EXTRA_PAGES.
+docs_dir: knowledge_sharing/tutorials
 hooks:
   - pages/hooks.py
 watch:
   - README.md
-  - app/src/training/common/README.md
+  - app/src/training/preprocess/README.md
   - app/src/training/dataload/README.md
   - app/src/training/transformer/README.md
-  - experiments
+  - app/src/training/ablations
   - knowledge_sharing
   - pages
 
@@ -82,27 +83,28 @@ validation:
 
 nav:
   - Home: README.md
-  - Revision guide: tutorials/index.md
+  - Revision guide: knowledge_sharing/tutorials/index.md
   # One page per topic. A new tutorial is a ## section inside one of these files,
   # so it needs no nav entry; only a new topic file does.
   - Topics:
-      - PyTorch: tutorials/pytorch.md
-      - Training: tutorials/training.md
-      - Transformers: tutorials/transformer.md
-      - Math: tutorials/math.md
-      - Vision: tutorials/vision.md
+      - PyTorch: knowledge_sharing/tutorials/pytorch.md
+      - Training: knowledge_sharing/tutorials/training.md
+      - Transformers: knowledge_sharing/tutorials/transformer.md
+      - Math: knowledge_sharing/tutorials/math.md
+      - Vision: knowledge_sharing/tutorials/vision.md
   - Knowledge sharing:
       - Trainer design compared: knowledge_sharing/trainer_design.md
       - Reproducibility: knowledge_sharing/reproducibility.md
   - Code notes:
-      - BPE tokenizer: app/src/training/common/README.md
+      - BPE tokenizer: app/src/training/preprocess/README.md
       - DataLoader internals: app/src/training/dataload/README.md
+      - Versioned cache: app/src/training/dal/README.md
       - Attention implementation: app/src/training/transformer/README.md
   - Reports:
-      - Multi30k ablation studies: experiments/reports/multi30k_ablations.md
-      - Multi30k tokenisation: experiments/reports/multi30k_tokenisation.md
-  - Experiments:
-      - Multi30k masked-token pretraining: experiments/multi30ken_predictor/2026-09-29/README.md
-      - Multi30k masked-token dropout and decay: experiments/multi30ken_predictor/2026-10-15/README.md
-      - Multi30k translation ablation: experiments/multi30k_translator/2026-10-13/README.md
-      - Multi30k translation scale study: experiments/multi30k_translator/2026-10-15/README.md
+      - Multi30k ablation studies: app/src/training/ablations/reports/multi30k_ablations.md
+      - Multi30k tokenisation: app/src/training/ablations/reports/multi30k_tokenisation.md
+  - Ablations:
+      - Multi30k masked-token pretraining: app/src/training/ablations/multi30ken_predictor/2026-09-29/README.md
+      - Multi30k masked-token dropout and decay: app/src/training/ablations/multi30ken_predictor/2026-10-15/README.md
+      - Multi30k translation ablation: app/src/training/ablations/multi30k_translator/2026-10-13/README.md
+      - Multi30k translation scale study: app/src/training/ablations/multi30k_translator/2026-10-15/README.md

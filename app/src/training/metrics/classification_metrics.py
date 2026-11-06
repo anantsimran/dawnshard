@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 
 import torch
 from torch import Tensor
-from training.train.model import Metrics
+from training.dataclass.model import Metrics
 
 
 @dataclass

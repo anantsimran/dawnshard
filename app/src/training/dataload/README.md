@@ -1,14 +1,14 @@
 # Dataload
 
 This package owns getting data to the loop. A loader module returns one ready-to-use
-`torch.utils.data.DataLoader` per split and keeps downloaded data under
-`DATASETS_CACHE_DIR` from [constants.py](constants.py). The loop relies on one
-contract: each batch is an `(input, target)` tuple. Sampling, padding, masking, and
-caching all happen on this side of it.
+`torch.utils.data.DataLoader` per split. Downloaded data and encodings live in the
+cache database at `CACHE_PATH` from [constants.py](constants.py), which the caller
+opens. The loop relies on one contract: each batch is an `(input, target)` tuple.
+Sampling, padding, masking, and caching all happen on this side of it.
 
 | Owns | Imports from the library | Never sees |
 |---|---|---|
-| downloads, caches, datasets, collate functions, one loader per split | `common`, `constants`, `utils` | the model, the metrics, the training loop |
+| downloads, cached texts, datasets, collate functions, one loader per split | `constants`, `dal`, `preprocess`, `utils` | the model, the metrics, the training loop |
 
 [test_layout.py](../../../tests/test_layout.py) fails on any other import, so a
 loader cannot start depending on the model it feeds. See the
@@ -18,7 +18,7 @@ This page is the shared guide to building a loader: the sampler, dataset, and co
 pipeline, followed by split and randomness decisions. Dataset-specific choices belong
 in the loader module's docstring. For the basics (why mini-batches, transforms, and
 normalization), see the
-[data loading tutorial](../../../../tutorials/pytorch.md#dataloader--batching-and-the-dataset-abstraction).
+[data loading tutorial](../../../../knowledge_sharing/tutorials/pytorch.md#dataloader--batching-and-the-dataset-abstraction).
 
 ______________________________________________________________________
 
@@ -309,6 +309,41 @@ A chunk is one sample, not a batch. The hierarchy is:
 
 ______________________________________________________________________
 
+## Caching and tokenizers
+
+```python
+with SqliteDao(path=CACHE_PATH) as cache:
+    texts = get_texts(split_sizes, cache=cache)  # a @cached function
+    tokenizer = get_tokenizer(
+        merges_path=TOKENIZERS_PATH / "corpus-2000.json",
+        train_texts=texts.train,
+        num_merges=2000,
+    )
+    loaders = get_loaders(tokenizer=tokenizer, texts=texts, cache=cache)
+```
+
+The caller decides what to cache and which tokenizer to use. It opens the database,
+picks the training texts, and chooses the file the tokenizer's merges live in. The loader decides how to reach
+the data with that tokenizer, so it takes the tokenizer as an argument and never
+trains one.
+
+- **Cache the expensive, deterministic steps.** A download, a sample keyed by its
+  sizes and seed, and an encoding are each a `@cached` function or a call into one.
+  Every argument that changes the result is part of the key. See the
+  [dal README](../dal/README.md) for the key rules and the versioning rule.
+- **The loader passes its `cache` to `encode`.** `Tokenizer.encode(texts=..., cache=cache)` stores one entry per call, keyed by the tokenizer's `cache_key` and
+  the distinct texts. A reordered or duplicated input, such as a fresh train
+  permutation on every call, still hits.
+- **`get_tokenizer` trains once per path.** It loads the merges file when it exists,
+  and otherwise trains on `train_texts` and writes it. The path alone identifies the
+  tokenizer, so put `num_merges` in it, and rename or delete the file after changing
+  the training texts.
+- **Store a dataset only once it is whole.** A download that fails partway raises
+  before anything is stored, so the cache never holds a partial split.
+- **`cache=None` stores nothing.** Tests and one-off scripts need no database.
+
+______________________________________________________________________
+
 ## Writing a new loader
 
 1. **Write the Dataset.** One sample per `__getitem__`, in the structure the model's
@@ -321,8 +356,12 @@ ______________________________________________________________________
 1. **Decide on workers.** Data already in memory gains nothing from
    `num_workers > 0`: workers add startup and pickling cost. Workers pay off when
    `__getitem__` reads from disk or does heavy per-sample work.
-1. **Document the dataset's choices in the module docstring:** splits, caching, and
-   anything a caller must pass to invalidate the cache.
+1. **Take the tokenizer and the cache as arguments.** The caller gets the tokenizer
+   from `get_tokenizer` and opens the `Dao`; type the tokenizer as `Tokenizer`, pass
+   the `Dao` to its `encode`, and decorate each expensive step with `@cached`, so
+   every argument that changes its result is in the key.
+1. **Document the dataset's choices in the module docstring:** splits, what is cached
+   and under which arguments, and when to bump a `@cached` version.
 
 ______________________________________________________________________
 

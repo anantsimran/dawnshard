@@ -1,0 +1,25 @@
+# ABLATION_REFERENCE of ablations/multi30k_translator_ablation.py, pinned to the
+# values the studies ran with: editing ../multi30k_translator.yaml changes no study.
+# Every arm is this file with a few fields overridden.
+model:
+  d_model: 128
+  src: {seq_length: 32, dropout: 0.1}
+  tgt: {seq_length: 32, dropout: 0.1}
+  num_encoders: 6
+  num_decoders: 6
+  encoder: &block
+    attention: {h: 4, qk_norm: true}
+    ffn_multiplier: 6
+    dropout: 0.1
+    norm: layernorm
+  decoder: *block
+fit:
+  # The first control run (100 epochs) bottomed out in val loss at epoch 9 and climbed
+  # steadily after, so 30 epochs covers every arm's minimum at under a third of the
+  # cost. The scale study overrides it.
+  num_epochs: 30
+  val_seed: 1000000
+  test_seed: 2000000
+optimizer: {name: adam, lr: 0.001}
+dataloader: {batch_size: 64}
+data: {src_lang: en, tgt_lang: de, bpe_num_merges: 10000}

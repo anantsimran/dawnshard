@@ -1,0 +1,26 @@
+# Multi30kTranslatorTrainConfig, read by run/multi30k_translator.py.
+model:
+  d_model: 512
+  # The loader pads both sides to one length, so the two seq_lengths must match.
+  src: {seq_length: 32, dropout: 0.3}
+  tgt: {seq_length: 32, dropout: 0.3}
+  num_encoders: 6
+  num_decoders: 6
+  # The two stacks use the same block; the config allows them to differ.
+  encoder: &block
+    attention: {h: 4, qk_norm: false}
+    ffn_multiplier: 6
+    dropout: 0.3
+    norm: layernorm
+  decoder: *block
+fit:
+  num_epochs: 100
+  # The repo-wide VAL_SEED and TEST_SEED. train_seed is drawn fresh per run unless
+  # set here; val_epoch_list is left out, so every epoch validates.
+  val_seed: 1000000
+  test_seed: 2000000
+optimizer: {name: adam, lr: 0.001}
+# Leave it out to train at a constant learning rate.
+scheduler: {name: cosine}
+dataloader: {batch_size: 64}
+data: {src_lang: en, tgt_lang: de, bpe_num_merges: 10000}

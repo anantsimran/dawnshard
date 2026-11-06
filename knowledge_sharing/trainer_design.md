@@ -70,12 +70,17 @@ concern is one object at the call site:
 StepFn = Callable[["TrainState", "EpochSpec", Batch, int, int, Optional[int]], "Metrics"]
 ```
 
-[`TrainState`](../app/src/training/train/model.py) holds the model, optimizer,
+[`TrainState`](../app/src/training/dataclass/model.py) holds the model, optimizer,
 criterion, and optional scheduler. These are ordinary PyTorch objects owned by the
 caller and changed in place, because PyTorch optimizers update parameters in place.
-[`EpochSpec`](../app/src/training/train/model.py) holds the device, a `Metrics` type,
+[`EpochSpec`](../app/src/training/dataclass/model.py) holds the device, a `Metrics` type,
 three functions that score and reduce batches, and two optional probes. The loop
-reads it and never writes to it. [`train_step`, `eval_step`, `run_epoch`, and
+reads it and never writes to it. So does `FitConfig`, which holds the epoch count,
+the validation epochs, the three seeds, and an optional early-stopping rule. It is one
+section of a run's YAML-backed `TrainConfig`, whose other sections name the
+architecture, optimizer, scheduler, batch size, and data. The entry point builds the
+state and loaders from those sections; the loop never sees them.
+[`train_step`, `eval_step`, `run_epoch`, and
 `fit`](../app/src/training/train/train_loop.py) take both as arguments and keep no
 training state of their own.
 
@@ -110,7 +115,8 @@ events.
 A change of mechanism gets a new function instead of a new hook.
 [`profiled_fit`](../app/src/training/train/train_loop.py) wraps the epochs you select
 in `torch.profiler.profile` and labels the loader and step phases. It reuses
-`train_step` and `eval_step` unchanged and writes the same history format as `fit`.
+`train_step` and `eval_step` unchanged and returns the same records as `fit`, with the
+profiler's timings beside them.
 
 ## The loop runs without its infrastructure
 
@@ -121,10 +127,10 @@ in `torch.profiler.profile` and labels the loader and step phases. It reuses
 classifier's forward pass directly.
 
 The same property makes a sweep an ordinary `for` loop.
-[`grid_search`](../app/src/training/experiments/common.py) takes three builder
+[`grid_search`](../app/src/training/ablations/setup.py) takes three builder
 functions, for the loaders, the state, and the spec, and calls `fit` once per config.
 The 66 comparison runs behind the
-[Multi30k ablation report](../experiments/reports/multi30k_ablations.md) went through it.
+[Multi30k ablation report](../app/src/training/ablations/reports/multi30k_ablations.md) went through it.
 
 ## The boundaries are tested
 
@@ -155,11 +161,11 @@ one on. The last column is what Dawnshard has today.
 | Gradient accumulation | optimizer `gradient_accumulation_steps` | `accumulate_grad_batches` | `gradient_accumulation_steps` | `optax.MultiSteps` | not built in |
 | Gradient clipping | optimizer `clipnorm` or `global_clipnorm` | `gradient_clip_val` | `max_grad_norm`, 1.0 by default | `optax.clip_by_global_norm` | not built in |
 | Compilation | `compile(jit_compile=...)` | `torch.compile` the module first | `torch_compile=True` | `jax.jit` | not built in |
-| Early stopping | `EarlyStopping` callback | `EarlyStopping` callback | `EarlyStoppingCallback` | `flax.training.early_stopping` | not built in |
-| Checkpoints | `ModelCheckpoint` callback | a default `ModelCheckpoint` | `save_strategy`, `load_best_model_at_end` | Orbax, which Flax recommends | `save_state` and `load`, called where you put them |
+| Early stopping | `EarlyStopping` callback | `EarlyStopping` callback | `EarlyStoppingCallback` | `flax.training.early_stopping` | `FitConfig.early_stopping`, counted in validation passes |
+| Checkpoints | `ModelCheckpoint` callback | a default `ModelCheckpoint` | `save_strategy`, `load_best_model_at_end` | Orbax, which Flax recommends | `fit` calls `checkpoint` after every validation pass; `load` restores one |
 | Learning-rate schedules | a schedule as the optimizer's `learning_rate` | returned from `configure_optimizers` | `lr_scheduler_type`, `warmup_steps` | Optax schedules | `TrainState.scheduler`, stepped once per epoch |
 | Validation cadence | `validation_freq` | `val_check_interval` | `eval_strategy` | your loop | `val_epoch_list` |
-| Experiment tracking | callbacks such as `TensorBoard` | `logger=` | `report_to=` | your loop | a history file for every run, plus an optional `wandb_run` |
+| Experiment tracking | callbacks such as `TensorBoard` | `logger=` | `report_to=` | your loop | `save_history`, called after `fit` with the run's whole config, plus an optional `wandb_run` |
 | Seeding | `keras.utils.set_random_seed` | `seed_everything`, `deterministic=True` | `seed=`, 42 by default | explicit PRNG keys | three required seeds, written to the history file |
 | Debugging runs | | `fast_dev_run`, `overfit_batches` | | | `run_epoch` accepts a plain list |
 
@@ -170,8 +176,7 @@ The Hugging Face `Trainer` can also push each saved model to the Hub with
 Under Dawnshard's split, each missing feature has a known home. Mixed precision,
 clipping, and accumulation change what one step does, so each would be a new
 `StepFn` beside `train_step`, with a variant of `fit` that runs it, as `profiled_fit`
-did for profiling. Early stopping is a decision about when to stop, which is policy.
-Compilation and device placement act on the model before the run, which is state the
+did for profiling. Compilation and device placement act on the model before the run, which is state the
 caller builds.
 
 ## Recap
@@ -180,7 +185,8 @@ caller builds.
 position. In Dawnshard it is `TrainState`, owned by the caller.
 
 **Policy** is the set of decisions the loop reads without changing: scoring,
-observation, and device. In Dawnshard it is `EpochSpec`.
+observation, and device, plus the run's epochs, seeds, and stopping rule. In
+Dawnshard that is `EpochSpec` and `FitConfig`.
 
 **Mechanism** is the code that runs the work: the loop and the step. In Dawnshard it
 is `fit`, `run_epoch`, `train_step`, and `eval_step`, which take state and policy as

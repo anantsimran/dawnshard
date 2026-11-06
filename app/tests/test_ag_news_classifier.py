@@ -1,101 +1,143 @@
 import csv
-import json
+import io
 
 import pytest
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+from training.constants import TEST_SEED, VAL_SEED
+from training.dal.dao.sqlite_dao import SqliteDao
+from training.dataload import ag_news
 from training.dataload.ag_news import (
     AGNewsDataset,
     _encode_rows,
-    _load_merges,
-    _read_raw_rows,
-    _read_split,
-    _save_merges,
-    _write_split,
+    _get_raw_rows,
+    get_ag_news_texts,
 )
-from training.common import bpe
-from training.common.constants import PAD_ID
-from training.constants import TEST_SEED, VAL_SEED
-from training.dataload.constants import DATASETS_CACHE_DIR
 from training.metrics.classification_metrics import (
     ClassificationMetrics,
     accumulate_metrics,
     calculate_metrics,
     reduce_metrics,
 )
-from training.model.ag_news_classifier import MAX_LEN, AGNewsClassifier
-from training.model.ag_news_classifier import H as NUM_HEADS
-from training.model.ag_news_classifier import NUM_BLOCKS
-from training.train.model import EpochSpec, TrainState
+from training.model.ag_news_classifier import AGNewsClassifier
+from training.preprocess.bpe.gpt4_preprocessor import preprocess
+from training.preprocess.bpe.train import build_tokenizer
+from training.preprocess.constants import PAD_ID
+from training.dataclass.config import FitConfig
+from training.dataclass.model import EpochSpec, TrainState
+from training.run.ag_news_classifier import DEFAULT_CONFIG_PATH, AGNewsClassifierTrainConfig
 from training.train.train_loop import fit
 from training.transformer.probes import save_attention_maps
 
 
-def test_read_raw_rows_converts_label_to_zero_indexed_and_joins_title_and_description(
-    tmp_path,
+MODEL_CONFIG = AGNewsClassifierTrainConfig.from_yaml(path=DEFAULT_CONFIG_PATH).model
+MAX_LEN = MODEL_CONFIG.embedding.seq_length
+NUM_BLOCKS = MODEL_CONFIG.num_encoders
+NUM_HEADS = MODEL_CONFIG.encoder.attention.h
+
+
+class _FakeResponse:
+    def __init__(self, body):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _fake_csv_download(monkeypatch, rows):
+    buffer = io.StringIO()
+    csv.writer(buffer).writerows(rows)  # noqa: NAR001
+    monkeypatch.setattr(
+        target=ag_news.urllib.request,
+        name="urlopen",
+        value=lambda url: _FakeResponse(buffer.getvalue().encode("utf-8")),
+    )
+
+
+def test_get_raw_rows_converts_label_to_zero_indexed_and_joins_title_and_description(
+    monkeypatch,
 ):
-    path = tmp_path / "raw.csv"
-    with open(file=path, mode="w", newline="", encoding="utf-8") as f:
-        csv.writer(f).writerows([["1", "Title", "Description"]])  # noqa: NAR001
+    _fake_csv_download(monkeypatch=monkeypatch, rows=[["1", "Title", "Description"]])
 
-    assert _read_raw_rows(path=path) == [("Title Description", 0)]
+    assert _get_raw_rows(split="train") == [("Title Description", 0)]
 
 
-def test_read_raw_rows_replaces_escaped_linebreaks_with_space(tmp_path):
-    path = tmp_path / "raw.csv"
-    with open(file=path, mode="w", newline="", encoding="utf-8") as f:
-        csv.writer(f).writerows([["2", "Title", r"line1\line2"]])  # noqa: NAR001
+def test_get_raw_rows_replaces_escaped_linebreaks_with_space(monkeypatch):
+    _fake_csv_download(monkeypatch=monkeypatch, rows=[["2", "Title", r"line1\line2"]])
 
-    assert _read_raw_rows(path=path) == [("Title line1 line2", 1)]
+    assert _get_raw_rows(split="train") == [("Title line1 line2", 1)]
 
 
-def test_write_split_then_read_split_roundtrips(tmp_path):
-    path = tmp_path / "split" / "rows.csv"
-    rows = [("first", 0), ("second", 3)]
+def test_get_raw_rows_keeps_linebreaks_inside_quoted_fields(monkeypatch):
+    _fake_csv_download(monkeypatch=monkeypatch, rows=[["3", "Title", "line1\nline2"]])
 
-    _write_split(rows=rows, path=path)
-
-    assert _read_split(path=path) == rows
+    assert _get_raw_rows(split="train") == [("Title line1\nline2", 2)]
 
 
-def test_save_merges_then_load_merges_roundtrips(tmp_path):
-    path = tmp_path / "bpe.json"
-    merges, vocab = bpe.train(text="the cat sat on the mat", num_merges=20)
-
-    _save_merges(merges=merges, num_merges=20, path=path)
-    loaded = _load_merges(path=path, num_merges=20)
-
-    assert loaded is not None
-    loaded_merges, loaded_vocab = loaded
-    assert [m.to_str(vocab=loaded_vocab) for m in loaded_merges] == [
-        m.to_str(vocab=vocab) for m in merges
-    ]
-    assert loaded_vocab == vocab
-
-
-def test_load_merges_returns_none_when_num_merges_changed(tmp_path):
-    path = tmp_path / "bpe.json"
-    merges, _ = bpe.train(text="the cat sat on the mat", num_merges=20)
-
-    _save_merges(merges=merges, num_merges=20, path=path)
-
-    assert _load_merges(path=path, num_merges=21) is None
+def test_get_raw_rows_downloads_once_with_a_cache(monkeypatch, tmp_path):
+    calls = []
+    _fake_csv_download(monkeypatch=monkeypatch, rows=[["1", "T", "D"]])
+    fake = ag_news.urllib.request.urlopen
+    monkeypatch.setattr(
+        target=ag_news.urllib.request,
+        name="urlopen",
+        value=lambda url: calls.append(url) or fake(url=url),
+    )
+    with SqliteDao(path=tmp_path / "c.sqlite") as cache:
+        _get_raw_rows(split="train", cache=cache)
+        _get_raw_rows(split="train", cache=cache)
+    assert len(calls) == 1
 
 
-def test_load_merges_returns_none_for_cache_without_first_merge_id(tmp_path):
-    path = tmp_path / "bpe.json"
-    path.write_text(json.dumps({"num_merges": 1, "merges": [[97, 97]]}))
-
-    assert _load_merges(path=path, num_merges=1) is None
+def _labelled_rows(count, label_offset=0):
+    return [(f"row {i}", (i + label_offset) % 4) for i in range(count)]
 
 
-def test_load_merges_returns_none_when_file_missing(tmp_path):
-    assert _load_merges(path=tmp_path / "missing.json", num_merges=1) is None
+def test_get_ag_news_texts_samples_disjoint_eval_and_test_and_is_seeded(monkeypatch):
+    raw = {"train": _labelled_rows(50), "test": _labelled_rows(40)}
+    monkeypatch.setattr(
+        target=ag_news,
+        name="_get_raw_rows",
+        value=lambda split, cache=None: raw[split],
+    )
+
+    first = get_ag_news_texts(n_train=10, n_eval=5, n_test=6, seed=1)
+    again = get_ag_news_texts(n_train=10, n_eval=5, n_test=6, seed=1)
+
+    assert first == again
+    assert [len(first[split]) for split in ("train", "eval", "test")] == [10, 5, 6]
+    assert not set(first["eval"]) & set(first["test"])
+    assert set(first["train"]) <= set(raw["train"])
+    assert set(first["eval"] + first["test"]) <= set(raw["test"])
+
+
+def test_get_ag_news_texts_keys_the_cache_by_sizes_and_seed(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_raw_rows(split, cache=None):
+        calls.append(split)
+        return _labelled_rows(40)
+
+    monkeypatch.setattr(target=ag_news, name="_get_raw_rows", value=fake_raw_rows)
+    with SqliteDao(path=tmp_path / "c.sqlite") as cache:
+        get_ag_news_texts(n_train=5, n_eval=2, n_test=2, seed=0, cache=cache)
+        get_ag_news_texts(n_train=5, n_eval=2, n_test=2, seed=0, cache=cache)
+        assert len(calls) == 2
+        get_ag_news_texts(n_train=6, n_eval=2, n_test=2, seed=0, cache=cache)
+        assert len(calls) == 4
+        get_ag_news_texts(n_train=5, n_eval=2, n_test=2, seed=1, cache=cache)
+        assert len(calls) == 6
 
 
 def test_encode_rows_pads_to_max_len_with_pad_id():
-    dataset = _encode_rows(rows=[("ab", 0)], merges=[], max_len=5)
+    dataset = _encode_rows(encoded=[[97, 98]], labels=[0], max_len=5)
 
     assert isinstance(dataset, AGNewsDataset)
     assert len(dataset) == 1
@@ -106,7 +148,7 @@ def test_encode_rows_pads_to_max_len_with_pad_id():
 
 
 def test_encode_rows_truncates_to_max_len():
-    dataset = _encode_rows(rows=[("abcd", 0)], merges=[], max_len=2)
+    dataset = _encode_rows(encoded=[[97, 98, 99, 100]], labels=[0], max_len=2)
 
     ids, _ = dataset[0]
     assert torch.equal(ids, torch.tensor([97, 98]))
@@ -120,7 +162,7 @@ def _padded_ids(batch_size, length):
 
 def test_classifier_forward_stores_detached_attention_map_per_block():
     torch.manual_seed(seed=0)
-    model = AGNewsClassifier(vocab_size=PAD_ID + 1)
+    model = AGNewsClassifier(model_config=MODEL_CONFIG, vocab_size=PAD_ID + 1)
     model(_padded_ids(batch_size=3, length=12))  # noqa: NAR001
     assert list(model.attention_map) == ["encoder"]  # noqa: NAR001
     assert len(model.attention_map["encoder"]) == NUM_BLOCKS  # noqa: NAR001
@@ -131,7 +173,7 @@ def test_classifier_forward_stores_detached_attention_map_per_block():
 
 def test_classifier_is_sensitive_to_token_order():
     torch.manual_seed(seed=0)
-    model = AGNewsClassifier(vocab_size=PAD_ID + 1).eval()
+    model = AGNewsClassifier(model_config=MODEL_CONFIG, vocab_size=PAD_ID + 1).eval()
     ids = _padded_ids(batch_size=3, length=12)
     reversed_ids = ids.clone()
     reversed_ids[:, :-2] = ids[:, :-2].flip(dims=(1,))
@@ -143,7 +185,7 @@ def test_classifier_is_sensitive_to_token_order():
 
 def test_save_attention_maps_writes_first_batch_rows_once_per_epoch(tmp_path):
     torch.manual_seed(seed=0)
-    model = AGNewsClassifier(vocab_size=PAD_ID + 1)
+    model = AGNewsClassifier(model_config=MODEL_CONFIG, vocab_size=PAD_ID + 1)
     first = _padded_ids(batch_size=5, length=12)
     second = _padded_ids(batch_size=5, length=12)
     for epoch in (1, 3):
@@ -171,27 +213,30 @@ def test_save_attention_maps_writes_first_batch_rows_once_per_epoch(tmp_path):
     assert capture["weights"]["encoder"][0].shape == (2, NUM_HEADS, 12, 12)
 
 
-def test_small_training_run_reduces_train_loss(tmp_path):
-    # Reuse the cached rows and BPE merges instead of get_ag_news_dataloader, which
-    # would retrain the tokenizer and encode every cached row.
-    sampled_dir = DATASETS_CACHE_DIR / "ag_news" / "sampled"
-    cached = _load_merges(path=sampled_dir / "train" / "bpe.json", num_merges=2000)
-    if cached is None:
-        pytest.skip(reason="needs the cached AG News splits and BPE merges")
-    merges, vocab = cached
-    train_rows = _read_split(path=sampled_dir / "train" / "rows.csv")[:500]
-    eval_rows = _read_split(path=sampled_dir / "eval" / "rows.csv")[:100]
-    train_loader = DataLoader(
-        dataset=_encode_rows(rows=train_rows, merges=merges, max_len=MAX_LEN),
-        batch_size=64,
-        shuffle=True,
+def test_small_training_run_reduces_train_loss():
+    # Each class has its own words, so a small model can learn them in three epochs.
+    class_words = ["senate vote", "goal match", "stock market", "chip software"]
+    rows = [(f"{class_words[i % 4]} story {i}", i % 4) for i in range(600)]
+    tokenizer = build_tokenizer(
+        chunks=preprocess(text="\n".join(text for text, _ in rows)), num_merges=50
     )
-    val_loader = DataLoader(
-        dataset=_encode_rows(rows=eval_rows, merges=merges, max_len=MAX_LEN),
-        batch_size=64,
-    )
+    train_rows, eval_rows = rows[:500], rows[500:]
+
+    def loader(subset, shuffle):
+        return DataLoader(
+            dataset=_encode_rows(
+                encoded=tokenizer.encode(texts=[text for text, _ in subset]),
+                labels=[label for _, label in subset],
+                max_len=MAX_LEN,
+            ),
+            batch_size=64,
+            shuffle=shuffle,
+        )
+
+    train_loader = loader(subset=train_rows, shuffle=True)
+    val_loader = loader(subset=eval_rows, shuffle=False)
     torch.manual_seed(seed=0)
-    model = AGNewsClassifier(vocab_size=len(vocab))
+    model = AGNewsClassifier(model_config=MODEL_CONFIG, vocab_size=len(tokenizer.vocab))
     state = TrainState(
         model=model,
         optimizer=torch.optim.Adam(params=model.parameters(), lr=1e-3),
@@ -210,12 +255,13 @@ def test_small_training_run_reduces_train_loss(tmp_path):
         epoch_spec=epoch_spec,
         train_loader=train_loader,
         val_loader=val_loader,
-        num_epochs=3,
-        val_epoch_list=[1, 2, 3],
-        train_seed=0,
-        val_seed=VAL_SEED,
-        test_seed=TEST_SEED,
-        history_path=tmp_path / "history.json",
+        fit_config=FitConfig(
+            num_epochs=3,
+            val_epoch_list=[1, 2, 3],
+            train_seed=0,
+            val_seed=VAL_SEED,
+            test_seed=TEST_SEED,
+        ),
     )
 
     assert history[-1].train_loss < history[0].train_loss

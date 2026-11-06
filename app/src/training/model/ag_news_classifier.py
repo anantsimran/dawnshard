@@ -5,73 +5,60 @@ Text classifier for the AG News dataset (see dataload.ag_news for loading).
 AG News is a set of news article titles and descriptions, labelled World, Sports,
 Business, or Sci/Tech. The loader turns it into padded token ids:
 
+    from training.dal.dao.sqlite_dao import SqliteDao
     from training.dataload.ag_news import (
         get_ag_news_dataloader,
+        get_ag_news_texts,
         inspect_ag_news_dataset,
     )
+    from training.dataload.constants import CACHE_PATH, TOKENIZERS_PATH
+    from training.preprocess.tokenizer import get_tokenizer
 
-    train_loader, eval_loader, test_loader, merges, vocab = get_ag_news_dataloader(
-        max_len=128
-    )
-    inspect_ag_news_dataset(loader=train_loader, vocab=vocab)
+    with SqliteDao(path=CACHE_PATH) as cache:
+        texts = get_ag_news_texts(n_train=100_000, n_eval=2_000, n_test=2_000, seed=0, cache=cache)
+        tokenizer = get_tokenizer(
+            merges_path=TOKENIZERS_PATH / "ag_news-1000.json",
+            train_texts=[text for text, _ in texts["train"]],
+            num_merges=1000,
+        )
+        train_loader, eval_loader, test_loader = get_ag_news_dataloader(
+            tokenizer=tokenizer, max_len=128, cache=cache
+        )
+    inspect_ag_news_dataset(loader=train_loader, tokenizer=tokenizer)
 
 BPE is trained on the train rows only, which come from `train.csv`. The eval and test
 rows are two non-overlapping samples from `test.csv`, so the tokenizer never sees
 them.
 
-By default the loader samples 20,000 train rows and 2,000 each for eval and test, with
-a fixed seed, and caches them as CSV files. The cache only checks that those files
-exist, so pass `refresh_cache=True` after changing the sample sizes or the seed. The
-trained merges are cached next to them and retrained whenever the rows, `num_merges`,
-or BPE's pre-tokenization pattern change.
+`run/ag_news_classifier.py` trains one model from its YAML, which samples 100,000 train
+rows and 2,000 each for eval and test, with a fixed seed. The sample is stored in the
+cache database keyed by those sizes and the seed, so changing any of them samples
+afresh. The tokenizer's merges live in `ag_news-{bpe_num_merges}.json` under
+TOKENIZERS_PATH: the first run trains and writes it, and later runs load it. The path
+alone identifies it, so rename the file, or delete it, after changing the rows it
+trains on.
 
 Each split is tokenized once, into a single `(N, max_len)` tensor padded on the right
 with `PAD_ID`. Because the data is already in memory, the `DataLoader`s don't use
 worker processes, which would only add startup and pickling time. A batch is
 `(ids, labels)` with shapes `(B, max_len)` and `(B,)`, and a model reading it needs an
-embedding with `len(vocab)` rows and `padding_idx=PAD_ID`.
-
-Train from the repo root; losses are logged to the terminal after every epoch:
-
-    uv run python app/src/training/model/ag_news_classifier.py
+embedding with `len(tokenizer.vocab)` rows and `padding_idx=PAD_ID`.
 """
-
-import random
-from functools import partial
-from uuid import uuid4
 
 import torch
 from beartype import beartype
 from jaxtyping import Float, Int, jaxtyped
 from torch import nn
-from training.common.constants import PAD_ID
-from training.constants import ATTENTION_PROBES_PATH, TEST_SEED, VAL_SEED
-from training.dataload.ag_news import NUM_CLASSES, get_ag_news_dataloader
-from training.metrics.classification_metrics import (
-    ClassificationMetrics,
-    accumulate_metrics,
-    calculate_metrics,
-    reduce_metrics,
-)
-from training.setup import DEVICE, init_wandb
-from training.train.model import EpochSpec, TrainState
-from training.train.train_loop import fit
+from training.dataclass.config import EncoderConfig
+from training.dataload.ag_news import NUM_CLASSES
+from training.preprocess.constants import PAD_ID
 from training.transformer.constants import B, L
 from training.transformer.mask import pad_masked_mean, padding_keep_mask
-from training.transformer.modules import EncoderBlock, SinusoidalEmbedding
-from training.transformer.probes import save_attention_maps
-from training.viz.attention_heatmap import plot_attention_probes
-
-MAX_LEN = 128
-D_MODEL = 64
-H = 4
-NUM_BLOCKS = 2
-DROPOUT = 0.1
-PROBE_SENTENCES = 4
+from training.transformer.modules import NORMS, EncoderBlock, SinusoidalEmbedding
 
 
 class AGNewsClassifier(nn.Module):
-    """Embedding + sin/cos positions → 2 pre-norm encoder blocks → mean pool → 4 logits.
+    """Embedding + sin/cos positions → pre-norm encoder stack → mean pool → 4 logits.
 
     ```
                     token_ids (B, L)  right-padded with PAD_ID
@@ -82,17 +69,17 @@ class AGNewsClassifier(nn.Module):
           (B, 1, 1, L)                    │  (B, L, d_model)
               │                           ▼
               │                   position_encoding      + fixed sin/cos table,
-              │                           │  (B, L, d_model)   L ≤ MAX_LEN
+              │                           │  (B, L, d_model)   L ≤ seq_length
               │                           ▼
               │                   embedding_dropout
               │                           │
-              ├──────────────► EncoderBlock × 2 ──► weights (B, h, L, L) each
+              ├──────► EncoderBlock × num_encoders ──► weights (B, h, L, L) each
               │                           │  (B, L, d_model)
               │                           ▼
-              │                      final_norm                the stack is
-              │                           │                    pre-norm, so its
-              │                           │                    output is not
-              │                           │                    normed otherwise
+              │                      final_norm                `encoder.norm`; the
+              │                           │                    stack is pre-norm,
+              │                           │                    so its output is
+              │                           │                    not normed otherwise
               └─► [:, 0, 0, :] ─► pad_masked_mean
                      (B, L)              │  (B, d_model)
                                          ▼
@@ -127,29 +114,55 @@ class AGNewsClassifier(nn.Module):
     Output: raw logits (no softmax), as CrossEntropyLoss expects.
     """
 
-    def __init__(self, vocab_size: int) -> None:
+    def __init__(self, model_config: EncoderConfig, vocab_size: int) -> None:
         """Build the embedding, encoder stack, and classifier head.
 
         Args:
-            vocab_size: `len(vocab)` from `get_ag_news_dataloader`; the ids are
-                contiguous, so this covers `PAD_ID` and every merge.
+            model_config: The architecture. `embedding.seq_length` sizes the position
+                table, so it must be at least the loader's `max_len`. `encoder.norm`
+                is the class of every norm, the final one included.
+                `embedding.position_encoding=False` and `final_norm=False` swap those
+                layers for `nn.Identity`; without positions the model is a bag of
+                tokens.
+            vocab_size: `len(tokenizer.vocab)` of the tokenizer the loader used; the
+                ids are contiguous, so this covers `PAD_ID` and every merge.
+
+        Raises:
+            ValueError: If `d_model` is not divisible by `encoder.attention.h`, from
+                `EncoderBlock`.
         """
         super().__init__()
+        d_model = model_config.d_model
+        embedding, encoder = model_config.embedding, model_config.encoder
+        norm = NORMS[encoder.norm]
         self.embedding = nn.Embedding(
             num_embeddings=vocab_size,
-            embedding_dim=D_MODEL,
+            embedding_dim=d_model,
             padding_idx=PAD_ID,
         )
-        self.position_encoding = SinusoidalEmbedding(seq_length=MAX_LEN, d_model=D_MODEL)
-        self.embedding_dropout = nn.Dropout(p=DROPOUT)
+        self.position_encoding = (
+            SinusoidalEmbedding(seq_length=embedding.seq_length, d_model=d_model)
+            if embedding.position_encoding
+            else nn.Identity()
+        )
+        self.embedding_dropout = nn.Dropout(p=embedding.dropout)
         self.blocks = nn.ModuleList(
             modules=[
-                EncoderBlock(d_model=D_MODEL, h=H, qk_norm=True, dropout=DROPOUT)
-                for _ in range(NUM_BLOCKS)  # noqa: NAR001
+                EncoderBlock(
+                    d_model=d_model,
+                    h=encoder.attention.h,
+                    qk_norm=encoder.attention.qk_norm,
+                    d_ff_multiplier=encoder.ffn_multiplier,
+                    dropout=encoder.dropout,
+                    norm=norm,
+                )
+                for _ in range(model_config.num_encoders)  # noqa: NAR001
             ]
         )
-        self.final_norm = nn.LayerNorm(normalized_shape=D_MODEL)
-        self.head = nn.Linear(in_features=D_MODEL, out_features=NUM_CLASSES)
+        self.final_norm = (
+            norm(normalized_shape=d_model) if model_config.final_norm else nn.Identity()
+        )
+        self.head = nn.Linear(in_features=d_model, out_features=NUM_CLASSES)
         self.attention_map: dict[str, list[torch.Tensor]] = {}
 
     @jaxtyped(typechecker=beartype)
@@ -160,14 +173,15 @@ class AGNewsClassifier(nn.Module):
 
         Args:
             token_ids: Padded ids from `get_ag_news_dataloader`, `(B, L)` with
-                `L ≤ MAX_LEN`; the mask is derived from `PAD_ID`, not from a length
-                argument.
+                `L ≤ embedding.seq_length`; the mask is derived from `PAD_ID`, not
+                from a length argument.
 
         Returns:
             Raw class logits, `(B, NUM_CLASSES)`.
 
         Raises:
-            ValueError: If `L` exceeds `MAX_LEN`, the length of the position table.
+            ValueError: If `L` exceeds `embedding.seq_length`, the length of the
+                position table.
 
         Side effects:
             Replaces `self.attention_map` with this call's attention weights under
@@ -175,7 +189,8 @@ class AGNewsClassifier(nn.Module):
         """
         pad_mask = padding_keep_mask(token_ids=token_ids, pad_id=PAD_ID)
         hidden = self.embedding(token_ids)  # noqa: NAR001
-        hidden = self.position_encoding(batch=hidden)
+        # Positional: nn.Identity, the no-position-encoding case, has no `batch` kwarg.
+        hidden = self.position_encoding(hidden)  # noqa: NAR001
         hidden = self.embedding_dropout(hidden)  # noqa: NAR001
         attention_map = []
         for block in self.blocks:
@@ -186,54 +201,3 @@ class AGNewsClassifier(nn.Module):
         # (B, 1, 1, L) is the attention view; the pool wants (B, L).
         pooled = pad_masked_mean(attn=normalized, mask=pad_mask[:, 0, 0, :])
         return self.head(pooled)  # noqa: NAR001
-
-
-def main():
-    """Train AGNewsClassifier on AG News, optionally logging to Weights & Biases."""
-    SHOULD_LOG_WANDB: bool = False
-    wandb_run = None
-    if SHOULD_LOG_WANDB:
-        wandb_run = init_wandb(project="dawnshard", run_name="ag_news_classifier")
-    probe_dir = ATTENTION_PROBES_PATH / str(uuid4())  # noqa: NAR001
-    epoch_spec = EpochSpec(
-        device=DEVICE,
-        metrics_type=ClassificationMetrics,
-        calculate_metrics=calculate_metrics,
-        accumulate_metrics=accumulate_metrics,
-        reduce_metrics=reduce_metrics,
-        eval_probe=partial(  # noqa: NAR001
-            save_attention_maps,
-            out_dir=probe_dir,
-            num_sentences=PROBE_SENTENCES,
-        ),
-    )
-    train_loader, val_loader, _, _, vocab = get_ag_news_dataloader(max_len=MAX_LEN)
-    # Fresh per run, so no single lucky draw is trained on forever; fit writes it to
-    # the history file, so a run can be repeated by passing its recorded seed back.
-    train_seed = random.getrandbits(32)  # noqa: NAR001
-    # fit reseeds from it, but only after the model exists; seed here so weight init
-    # is reproducible too. See the README on what the rewind implies.
-    torch.manual_seed(seed=train_seed)
-    model = AGNewsClassifier(vocab_size=len(vocab)).to(device=DEVICE)  # noqa: NAR001
-    train_state = TrainState(
-        model=model,
-        optimizer=torch.optim.Adam(params=model.parameters(), lr=1e-3),
-        criterion=nn.CrossEntropyLoss(),
-    )
-    fit(
-        state=train_state,
-        epoch_spec=epoch_spec,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        num_epochs=20,
-        val_epoch_list=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
-        train_seed=train_seed,
-        val_seed=VAL_SEED,
-        test_seed=TEST_SEED,
-        wandb_run=wandb_run,
-    )
-    plot_attention_probes(probe_dir=probe_dir, vocab=vocab)
-
-
-if __name__ == "__main__":
-    main()

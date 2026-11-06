@@ -16,6 +16,14 @@ from torch import nn
 from training.transformer.constants import D_MODEL, B, H, L, S
 from training.transformer.functions import attention
 
+# A config names its norm as a string, not the class, so it reads the same in a log
+# line, a history file, and a checkpoint; this maps it to the class a block's `norm`
+# argument takes.
+NORMS: dict[str, type[nn.LayerNorm] | type[nn.RMSNorm]] = {
+    "layernorm": nn.LayerNorm,
+    "rmsnorm": nn.RMSNorm,
+}
+
 
 class SinusoidalEmbedding(nn.Module):
     """Add fixed sinusoidal position encodings to token embeddings.

@@ -2,13 +2,12 @@
 
 Status: accepted, 2026-11-03
 
-Related: [model_config_spec.md](../../model_config_spec.md) (requirements),
-[the pickle discussion](../discussions/checkpoint-pickle-vs-state-dict.md) (reasoning),
-[the tokenizer discussion](../discussions/bpe-tokenizer-in-checkpoint.md) (not decided)
+Related: [the pickle discussion](../discussions/checkpoint-pickle-vs-state-dict.md)
+(reasoning)
 
 ## Context
 
-`save_state` writes the model, optimizer, and scheduler `state_dict`s. To use one of
+`checkpoint` writes the model, optimizer, and scheduler `state_dict`s. To use one of
 those files you also need the constructor arguments, which live in a constant block and
 in an ablation module, and you need to build a `TrainState` by hand before `load` can
 fill it. The file does not say how to rebuild what it holds.
@@ -102,16 +101,13 @@ nothing that loading with `map_location` does not already give.
 
 ## Not decided here
 
-- How `fit` writes a checkpoint between epochs. `fit` has no hook for it today, and the
-  spec's single save at the end of `main()` no longer covers the decision above. The
-  choice reaches the loop's public signature, so the README, the landing page, and the
-  trainer-design article move with it.
+- What `fit`'s checkpoints carry beyond `state_dict`s. `fit` now calls `checkpoint`
+  after every validation pass, into `CHECKPOINTS_PATH / run_uuid / epoch_N.pt`, but
+  those files hold no config, so how a model's config reaches them is still open.
 - Which package captures and restores the epoch, seeds, and RNG states, and so whether
   `train/` stays blind to everything in a checkpoint except what the model module hands
   it.
 - Whether the tokenizers go in the checkpoint. The model loads against whatever merges
-  file the loader finds, and a wrong match produces wrong output without an error. The
-  [tokenizer discussion](../discussions/bpe-tokenizer-in-checkpoint.md) holds the
-  options.
+  file the loader finds, and a wrong match produces wrong output without an error.
 - Where the config sits in the dict, and whether the git commit is stored beside it.
 - Converting existing checkpoints. They hold no config and stay in the old format.

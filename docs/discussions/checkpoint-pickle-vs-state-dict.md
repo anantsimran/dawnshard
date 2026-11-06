@@ -10,8 +10,7 @@ inference.
 The first prompt was: what is needed to reconstruct the model from scratch, without
 discussing a KV cache? The idea of a model config dataclass came up, along with how to
 save a `model.pt` between epochs, how to load it, whether config plus `model.pt` is
-enough, and what to do about the tokenizers. The last question moved to
-[the tokenizer discussion](bpe-tokenizer-in-checkpoint.md).
+enough, and what to do about the tokenizers. The last question is not settled here.
 
 ______________________________________________________________________
 

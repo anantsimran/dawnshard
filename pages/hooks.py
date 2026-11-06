@@ -1,6 +1,6 @@
 """MkDocs hooks that build the GitHub Pages site from markdown spread across the repo.
 
-Every page keeps its repo path as its src_uri (tutorials/..., README.md),
+Every page keeps its repo path as its src_uri (knowledge_sharing/tutorials/..., README.md),
 so relative links between pages resolve exactly as they do on github.com. Links to
 anything that isn't a site page (source files, the Makefile, CLAUDE.md) are pointed
 at the file on GitHub instead of 404ing.
@@ -21,28 +21,28 @@ REPRODUCIBILITY_PAGE = "knowledge_sharing/reproducibility.md"
 TRAINER_DESIGN_PAGE = "knowledge_sharing/trainer_design.md"
 # Knowledge-sharing articles share one article template.
 ARTICLE_PAGES = {REPRODUCIBILITY_PAGE, TRAINER_DESIGN_PAGE}
-TOKENISATION_REPORT = "experiments/reports/multi30k_tokenisation.md"
-ABLATION_REPORT = "experiments/reports/multi30k_ablations.md"
+TOKENISATION_REPORT = "app/src/training/ablations/reports/multi30k_tokenisation.md"
+ABLATION_REPORT = "app/src/training/ablations/reports/multi30k_ablations.md"
 STUDY_DETAILS = {
-    "experiments/multi30ken_predictor/2026-09-29/README.md": (
+    "app/src/training/ablations/multi30ken_predictor/2026-09-29/README.md": (
         "Masked-token pretraining",
         "34 completed runs",
         "20–50 epochs",
         "Sweep and ablation",
     ),
-    "experiments/multi30k_translator/2026-10-13/README.md": (
+    "app/src/training/ablations/multi30k_translator/2026-10-13/README.md": (
         "Translator components",
         "30 comparison runs",
         "3 seeds per arm",
         "30 epochs",
     ),
-    "experiments/multi30k_translator/2026-10-15/README.md": (
+    "app/src/training/ablations/multi30k_translator/2026-10-15/README.md": (
         "Translator scale",
         "27 comparison runs",
         "3 seeds per arm",
         "25 epochs",
     ),
-    "experiments/multi30ken_predictor/2026-10-15/README.md": (
+    "app/src/training/ablations/multi30ken_predictor/2026-10-15/README.md": (
         "Masked-token convergence",
         "9 comparison runs",
         "3 seeds per arm",
@@ -55,60 +55,61 @@ EXTRA_PAGES = [
     TRAINER_DESIGN_PAGE,
     TOKENISATION_REPORT,
     ABLATION_REPORT,
-    "app/src/training/common/README.md",
+    "app/src/training/preprocess/README.md",
     "app/src/training/transformer/README.md",
     "app/src/training/dataload/README.md",
-    "experiments/multi30ken_predictor/2026-09-29/README.md",
-    "experiments/multi30k_translator/2026-10-13/README.md",
-    "experiments/multi30ken_predictor/2026-10-15/README.md",
-    "experiments/multi30k_translator/2026-10-15/README.md",
+    "app/src/training/dal/README.md",
+    "app/src/training/ablations/multi30ken_predictor/2026-09-29/README.md",
+    "app/src/training/ablations/multi30k_translator/2026-10-13/README.md",
+    "app/src/training/ablations/multi30ken_predictor/2026-10-15/README.md",
+    "app/src/training/ablations/multi30k_translator/2026-10-15/README.md",
 ]
 
 # Images and downloads used by EXTRA_PAGES. Without them as site files, the
 # rewriter sends each one to GitHub, which serves HTML instead of the asset.
 EXTRA_ASSETS = [
-    "experiments/reports/assets/multi30k_ablations/training_budget.png",
-    "experiments/reports/assets/multi30k_ablations/training_budget.svg",
-    "experiments/reports/assets/multi30k_ablations/schedule_dynamics.png",
-    "experiments/reports/assets/multi30k_ablations/schedule_dynamics.svg",
-    "experiments/reports/assets/multi30k_ablations/loss_and_accuracy.png",
-    "experiments/reports/assets/multi30k_ablations/loss_and_accuracy.svg",
-    "experiments/reports/assets/multi30k_ablations/translator_components.png",
-    "experiments/reports/assets/multi30k_ablations/translator_components.svg",
-    "experiments/reports/assets/multi30k_ablations/width_and_schedule.png",
-    "experiments/reports/assets/multi30k_ablations/width_and_schedule.svg",
-    "experiments/reports/assets/multi30k_ablations/masked_token_convergence.png",
-    "experiments/reports/assets/multi30k_ablations/masked_token_convergence.svg",
-    "experiments/reports/assets/multi30k_ablations/summary.csv",
-    "experiments/multi30ken_predictor/2026-09-29/runs.csv",
-    "experiments/multi30ken_predictor/2026-09-29/epochs.csv",
-    "experiments/multi30k_translator/2026-10-13/runs.csv",
-    "experiments/multi30k_translator/2026-10-13/epochs.csv",
-    "experiments/multi30ken_predictor/2026-10-15/runs.csv",
-    "experiments/multi30ken_predictor/2026-10-15/epochs.csv",
-    "experiments/multi30k_translator/2026-10-15/runs.csv",
-    "experiments/multi30k_translator/2026-10-15/epochs.csv",
-    "experiments/reports/assets/multi30k_tokenisation/mean_length.png",
-    "experiments/reports/assets/multi30k_tokenisation/mean_length.svg",
-    "experiments/reports/assets/multi30k_tokenisation/tokens_per_word.png",
-    "experiments/reports/assets/multi30k_tokenisation/tokens_per_word.svg",
-    "experiments/reports/assets/multi30k_tokenisation/length_tail.png",
-    "experiments/reports/assets/multi30k_tokenisation/length_tail.svg",
-    "experiments/reports/assets/multi30k_tokenisation/stats.csv",
+    "app/src/training/ablations/reports/assets/multi30k_ablations/training_budget.png",
+    "app/src/training/ablations/reports/assets/multi30k_ablations/training_budget.svg",
+    "app/src/training/ablations/reports/assets/multi30k_ablations/schedule_dynamics.png",
+    "app/src/training/ablations/reports/assets/multi30k_ablations/schedule_dynamics.svg",
+    "app/src/training/ablations/reports/assets/multi30k_ablations/loss_and_accuracy.png",
+    "app/src/training/ablations/reports/assets/multi30k_ablations/loss_and_accuracy.svg",
+    "app/src/training/ablations/reports/assets/multi30k_ablations/translator_components.png",
+    "app/src/training/ablations/reports/assets/multi30k_ablations/translator_components.svg",
+    "app/src/training/ablations/reports/assets/multi30k_ablations/width_and_schedule.png",
+    "app/src/training/ablations/reports/assets/multi30k_ablations/width_and_schedule.svg",
+    "app/src/training/ablations/reports/assets/multi30k_ablations/masked_token_convergence.png",
+    "app/src/training/ablations/reports/assets/multi30k_ablations/masked_token_convergence.svg",
+    "app/src/training/ablations/reports/assets/multi30k_ablations/summary.csv",
+    "app/src/training/ablations/multi30ken_predictor/2026-09-29/runs.csv",
+    "app/src/training/ablations/multi30ken_predictor/2026-09-29/epochs.csv",
+    "app/src/training/ablations/multi30k_translator/2026-10-13/runs.csv",
+    "app/src/training/ablations/multi30k_translator/2026-10-13/epochs.csv",
+    "app/src/training/ablations/multi30ken_predictor/2026-10-15/runs.csv",
+    "app/src/training/ablations/multi30ken_predictor/2026-10-15/epochs.csv",
+    "app/src/training/ablations/multi30k_translator/2026-10-15/runs.csv",
+    "app/src/training/ablations/multi30k_translator/2026-10-15/epochs.csv",
+    "app/src/training/ablations/reports/assets/multi30k_tokenisation/mean_length.png",
+    "app/src/training/ablations/reports/assets/multi30k_tokenisation/mean_length.svg",
+    "app/src/training/ablations/reports/assets/multi30k_tokenisation/tokens_per_word.png",
+    "app/src/training/ablations/reports/assets/multi30k_tokenisation/tokens_per_word.svg",
+    "app/src/training/ablations/reports/assets/multi30k_tokenisation/length_tail.png",
+    "app/src/training/ablations/reports/assets/multi30k_tokenisation/length_tail.svg",
+    "app/src/training/ablations/reports/assets/multi30k_tokenisation/stats.csv",
     "knowledge_sharing/assets/rng-state.svg",
     "knowledge_sharing/assets/dawnshard-replay.svg",
     "knowledge_sharing/assets/trainer-ownership.svg",
-    "experiments/multi30ken_predictor/2026-09-29/assets/sweep_best_val.png",
-    "experiments/multi30ken_predictor/2026-09-29/assets/val_curves.png",
-    "experiments/multi30ken_predictor/2026-09-29/assets/follow_up_best_val.png",
-    "experiments/multi30k_translator/2026-10-13/assets/val_curves.png",
-    "experiments/multi30k_translator/2026-10-13/assets/best_val_by_arm.png",
-    "experiments/multi30ken_predictor/2026-10-15/assets/val_curves.png",
-    "experiments/multi30ken_predictor/2026-10-15/assets/best_val_by_arm.png",
-    "experiments/multi30k_translator/2026-10-15/assets/val_curves.png",
-    "experiments/multi30k_translator/2026-10-15/assets/best_val_by_arm.png",
-    "experiments/multi30k_translator/2026-10-15/assets/val_perplexity.png",
-    "experiments/multi30k_translator/2026-10-15/assets/val_accuracy.png",
+    "app/src/training/ablations/multi30ken_predictor/2026-09-29/assets/sweep_best_val.png",
+    "app/src/training/ablations/multi30ken_predictor/2026-09-29/assets/val_curves.png",
+    "app/src/training/ablations/multi30ken_predictor/2026-09-29/assets/follow_up_best_val.png",
+    "app/src/training/ablations/multi30k_translator/2026-10-13/assets/val_curves.png",
+    "app/src/training/ablations/multi30k_translator/2026-10-13/assets/best_val_by_arm.png",
+    "app/src/training/ablations/multi30ken_predictor/2026-10-15/assets/val_curves.png",
+    "app/src/training/ablations/multi30ken_predictor/2026-10-15/assets/best_val_by_arm.png",
+    "app/src/training/ablations/multi30k_translator/2026-10-15/assets/val_curves.png",
+    "app/src/training/ablations/multi30k_translator/2026-10-15/assets/best_val_by_arm.png",
+    "app/src/training/ablations/multi30k_translator/2026-10-15/assets/val_perplexity.png",
+    "app/src/training/ablations/multi30k_translator/2026-10-15/assets/val_accuracy.png",
 ]
 
 README_HERO_PREFIX = "# Dawnshard\n\n**A top-down–designed ML infrastructure library.**\n\n"

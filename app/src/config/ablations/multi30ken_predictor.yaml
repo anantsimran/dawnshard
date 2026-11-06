@@ -1,0 +1,20 @@
+# BASELINE of ablations/multi30ken_predictor_ablation.py, pinned to the values the
+# studies ran with: editing ../multi30ken_predictor.yaml changes no study. Every
+# study config is this file with a few fields overridden.
+model:
+  d_model: 64
+  embedding: {seq_length: 32, dropout: 0.1, position_encoding: true}
+  num_encoders: 6
+  encoder:
+    attention: {h: 4, qk_norm: true}
+    ffn_multiplier: 6
+    dropout: 0.1
+    norm: layernorm
+  final_norm: true
+fit:
+  num_epochs: 20
+  val_seed: 1000000
+  test_seed: 2000000
+optimizer: {name: adam, lr: 0.001}
+dataloader: {batch_size: 64}
+data: {bpe_num_merges: 10000}

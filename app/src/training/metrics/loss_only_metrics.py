@@ -1,5 +1,5 @@
 from torch import Tensor
-from training.train.model import Metrics
+from training.dataclass.model import Metrics
 
 
 def calculate_metrics(predicted: Tensor, target: Tensor) -> Metrics:

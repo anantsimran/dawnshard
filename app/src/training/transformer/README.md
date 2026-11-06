@@ -47,7 +47,7 @@ A few smaller choices:
   sublayers, because a Dropout holds no state and samples a fresh mask on every call.
 
 ```python
-from common.constants import PAD_ID
+from preprocess.constants import PAD_ID
 from transformer.mask import padding_keep_mask
 from transformer.modules import MultiHeadAttentionLayer
 
@@ -124,7 +124,7 @@ query keeps key 0.
 Build the masks once per batch and pass the same ones to every block in the stack:
 
 ```python
-from common.constants import PAD_ID
+from preprocess.constants import PAD_ID
 from transformer.mask import causal_keep_mask, padding_keep_mask
 
 src_keep = padding_keep_mask(token_ids=src_ids, pad_id=PAD_ID)  # (B, 1, 1, S)

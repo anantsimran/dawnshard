@@ -1,5 +1,3 @@
-import json
-
 import pytest
 import torch
 import torch.nn as nn
@@ -9,11 +7,17 @@ from training.metrics.loss_only_metrics import (
     calculate_metrics,
     reduce_metrics,
 )
-from training.train.model import EpochRecord, EpochSpec, Metrics, SystemMetrics, TrainState
-from training.train.serialization import serialize_epoch_record
+from training.dataclass.config import EarlyStoppingConfig, FitConfig
+from training.dataclass.model import EpochSpec, Metrics, TrainState
+from training.train.checkpoint import serialize_epoch_record
 from training.constants import TEST_SEED, VAL_SEED
-from training.train.train_loop import eval_step, fit, load, run_epoch, train_step
-from training.train.utils import save_history, save_state
+from training.train.train_loop import (
+    eval_step,
+    fit,
+    profiled_fit,
+    run_epoch,
+    train_step,
+)
 
 
 def make_state_and_config():
@@ -36,16 +40,16 @@ def test_train_state_create_moves_model_to_device():
     model = nn.Linear(in_features=2, out_features=1)
     optimizer = torch.optim.SGD(params=model.parameters(), lr=0.01)
     criterion = nn.MSELoss()
-    state = TrainState.create(
-        model=model, optimizer=optimizer, criterion=criterion, device=device
-    )
+    state = TrainState.create(model=model, optimizer=optimizer, criterion=criterion, device=device)
     assert next(state.model.parameters()).device.type == "cpu"  # noqa: NAR001
 
 
 def test_train_step_returns_loss_and_batch_size():
     state, config = make_state_and_config()
     batch = (torch.randn(4, 2), torch.randn(4, 1))  # noqa: NAR001
-    metrics = train_step(train_state=state, epoch_spec=config, batch=batch, epoch=1, batch_index=0, seed=0)
+    metrics = train_step(
+        train_state=state, epoch_spec=config, batch=batch, epoch=1, batch_index=0, seed=0
+    )
     assert isinstance(metrics.loss, float)  # noqa: NAR001
     assert metrics.count == 4
 
@@ -69,7 +73,9 @@ def test_eval_step_does_not_update_weights():
 def test_eval_step_returns_loss_and_batch_size():
     state, config = make_state_and_config()
     batch = (torch.randn(4, 2), torch.randn(4, 1))  # noqa: NAR001
-    metrics = eval_step(train_state=state, epoch_spec=config, batch=batch, epoch=1, batch_index=0, seed=0)
+    metrics = eval_step(
+        train_state=state, epoch_spec=config, batch=batch, epoch=1, batch_index=0, seed=0
+    )
     assert isinstance(metrics.loss, float)  # noqa: NAR001
     assert metrics.count == 4
 
@@ -164,7 +170,7 @@ def test_run_epoch_calls_only_the_matching_probe_with_epoch_and_batch_index():
     ]
 
 
-def test_fit_seeds_the_global_rng_with_train_seed(tmp_path):
+def test_fit_seeds_the_global_rng_with_train_seed():
     state, config = make_state_and_config()
     batches = [(torch.randn(4, 2), torch.randn(4, 1))]  # noqa: NAR001
     torch.manual_seed(seed=999)
@@ -173,17 +179,17 @@ def test_fit_seeds_the_global_rng_with_train_seed(tmp_path):
         epoch_spec=config,
         train_loader=batches,
         val_loader=batches,
-        num_epochs=1,
-        val_epoch_list=[],
-        train_seed=1234,
-        val_seed=VAL_SEED,
-        test_seed=TEST_SEED,
-        history_path=tmp_path / "history.json",
+        fit_config=FitConfig(
+            num_epochs=1,
+            train_seed=1234,
+            val_seed=VAL_SEED,
+            test_seed=TEST_SEED,
+        ),
     )
     assert torch.initial_seed() == 1234
 
 
-def test_fit_repeats_dropout_draws_from_train_seed_whatever_the_rng_state_was(tmp_path):
+def test_fit_repeats_dropout_draws_from_train_seed_whatever_the_rng_state_was():
     # The two runs enter fit with different global RNG states, so identical losses
     # can only come from fit reseeding it with train_seed.
     losses = []
@@ -203,18 +209,18 @@ def test_fit_repeats_dropout_draws_from_train_seed_whatever_the_rng_state_was(tm
             epoch_spec=config,
             train_loader=batches,
             val_loader=batches,
-            num_epochs=3,
-            val_epoch_list=[],
-            train_seed=42,
-            val_seed=VAL_SEED,
-            test_seed=TEST_SEED,
-            history_path=tmp_path / "history.json",
+            fit_config=FitConfig(
+                num_epochs=3,
+                train_seed=42,
+                val_seed=VAL_SEED,
+                test_seed=TEST_SEED,
+            ),
         )
         losses.append([record.train_loss for record in history])  # noqa: NAR001
     assert losses[0] == losses[1]
 
 
-def test_fit_hands_train_probes_no_seed_and_eval_probes_the_val_seed(tmp_path):
+def test_fit_hands_train_probes_no_seed_and_eval_probes_the_val_seed():
     state, config = make_state_and_config()
     seeds = []
     config.train_probe = lambda *args: seeds.append(("train", args[6]))  # noqa: NAR001
@@ -225,113 +231,214 @@ def test_fit_hands_train_probes_no_seed_and_eval_probes_the_val_seed(tmp_path):
         epoch_spec=config,
         train_loader=batches,
         val_loader=batches,
-        num_epochs=1,
-        val_epoch_list=[1],
-        train_seed=11,
-        val_seed=22,
-        test_seed=33,
-        history_path=tmp_path / "history.json",
+        fit_config=FitConfig(
+            num_epochs=1,
+            val_epoch_list=[1],
+            train_seed=11,
+            val_seed=22,
+            test_seed=33,
+        ),
     )
     assert seeds == [("train", None), ("eval", 22)]
 
 
-def test_fit_records_all_three_seeds_in_the_history_meta(tmp_path):
+def test_fit_runs_from_epoch_start_to_num_epochs():
     state, config = make_state_and_config()
     batches = [(torch.randn(4, 2), torch.randn(4, 1))]  # noqa: NAR001
-    history_path = tmp_path / "history.json"
+    history = fit(
+        state=state,
+        epoch_spec=config,
+        train_loader=batches,
+        val_loader=batches,
+        fit_config=FitConfig(
+            num_epochs=4,
+            train_seed=0,
+            val_seed=VAL_SEED,
+            test_seed=TEST_SEED,
+            epoch_start=3,
+        ),
+    )
+
+    assert [record.epoch for record in history] == [3, 4]
+
+
+def test_fit_stops_after_patience_validation_passes_without_a_gain():
+    state, config = make_state_and_config()
+    state.optimizer.param_groups[0]["lr"] = 0.0
+    batches = [(torch.randn(4, 2), torch.randn(4, 1))]  # noqa: NAR001
+    history = fit(
+        state=state,
+        epoch_spec=config,
+        train_loader=batches,
+        val_loader=batches,
+        fit_config=FitConfig(
+            num_epochs=10,
+            val_epoch_list=list(range(1, 11)),  # noqa: NAR001
+            train_seed=0,
+            val_seed=VAL_SEED,
+            test_seed=TEST_SEED,
+            early_stopping=EarlyStoppingConfig(patience=2),
+        ),
+    )
+
+    # Epoch 1 sets the best loss; epochs 2 and 3 repeat it, so patience=2 runs out.
+    assert [record.epoch for record in history] == [1, 2, 3]
+
+
+def test_fit_counts_patience_in_validation_passes_not_epochs():
+    state, config = make_state_and_config()
+    state.optimizer.param_groups[0]["lr"] = 0.0
+    batches = [(torch.randn(4, 2), torch.randn(4, 1))]  # noqa: NAR001
+    history = fit(
+        state=state,
+        epoch_spec=config,
+        train_loader=batches,
+        val_loader=batches,
+        fit_config=FitConfig(
+            num_epochs=10,
+            val_epoch_list=[2, 4, 6, 8, 10],
+            train_seed=0,
+            val_seed=VAL_SEED,
+            test_seed=TEST_SEED,
+            early_stopping=EarlyStoppingConfig(patience=1),
+        ),
+    )
+
+    # The pass at epoch 2 sets the best loss; the pass at epoch 4 repeats it.
+    assert [record.epoch for record in history] == [1, 2, 3, 4]
+
+
+def test_fit_min_delta_makes_a_small_gain_not_count():
+    state, config = make_state_and_config()
+    batches = [(torch.randn(4, 2), torch.randn(4, 1))]  # noqa: NAR001
+    history = fit(
+        state=state,
+        epoch_spec=config,
+        train_loader=batches,
+        val_loader=batches,
+        fit_config=FitConfig(
+            num_epochs=10,
+            val_epoch_list=list(range(1, 11)),  # noqa: NAR001
+            train_seed=0,
+            val_seed=VAL_SEED,
+            test_seed=TEST_SEED,
+            early_stopping=EarlyStoppingConfig(patience=1, min_delta=1e9),
+        ),
+    )
+
+    # No later loss beats the best by 1e9, so the second pass ends the run.
+    assert [record.epoch for record in history] == [1, 2]
+
+
+def test_profiled_fit_returns_profiler_metrics_for_profiled_epochs(tmp_path, monkeypatch):
+    monkeypatch.setattr("training.train.train_loop.TRACES_PATH", tmp_path / "traces")
+    state, config = make_state_and_config()
+    batches = [(torch.randn(4, 2), torch.randn(4, 1))]  # noqa: NAR001
+    history, profiling_metrics = profiled_fit(
+        state=state,
+        epoch_spec=config,
+        train_loader=batches,
+        val_loader=batches,
+        fit_config=FitConfig(
+            num_epochs=2,
+            val_epoch_list=[2],
+            train_seed=7,
+            val_seed=VAL_SEED,
+            test_seed=TEST_SEED,
+            run_uuid="run-a",
+        ),
+        profile_epoch_list=[1],
+    )
+
+    assert [record.epoch for record in history] == [1, 2]
+    assert torch.initial_seed() == 7
+    assert list(profiling_metrics) == [1]  # noqa: NAR001
+    trace_path = tmp_path / "traces" / "run-a" / "epoch_1.json"
+    assert profiling_metrics[1]["trace_path"] == str(trace_path)  # noqa: NAR001
+    assert trace_path.exists()
+
+
+def test_fit_and_profiled_fit_stamp_the_seeds_on_every_epoch_record(tmp_path, monkeypatch):
+    monkeypatch.setattr("training.train.train_loop.TRACES_PATH", tmp_path / "traces")
+    batches = [(torch.randn(4, 2), torch.randn(4, 1))]  # noqa: NAR001
+    fit_config = FitConfig(
+        num_epochs=2,
+        train_seed=11,
+        val_seed=22,
+        test_seed=33,
+    )
+    state, config = make_state_and_config()
+    fit_history = fit(
+        state=state,
+        epoch_spec=config,
+        train_loader=batches,
+        val_loader=batches,
+        fit_config=fit_config,
+    )
+    state, config = make_state_and_config()
+    profiled_history, _ = profiled_fit(
+        state=state,
+        epoch_spec=config,
+        train_loader=batches,
+        val_loader=batches,
+        fit_config=fit_config,
+        profile_epoch_list=[],
+    )
+
+    for record in fit_history + profiled_history:  # noqa: NAR001
+        assert (record.train_seed, record.val_seed, record.test_seed) == (11, 22, 33)
+    row = serialize_epoch_record(record=fit_history[0])
+    assert (row["train_seed"], row["val_seed"], row["test_seed"]) == (11, 22, 33)
+
+
+def test_fit_rejects_a_missing_train_seed():
+    state, config = make_state_and_config()
+    batches = [(torch.randn(4, 2), torch.randn(4, 1))]  # noqa: NAR001
+    with pytest.raises(expected_exception=ValueError, match="train_seed"):
+        fit(
+            state=state,
+            epoch_spec=config,
+            train_loader=batches,
+            val_loader=batches,
+            fit_config=FitConfig(num_epochs=1, val_seed=VAL_SEED, test_seed=TEST_SEED),
+        )
+
+
+def test_fit_validates_every_epoch_when_val_epoch_list_is_none():
+    state, config = make_state_and_config()
+    batches = [(torch.randn(4, 2), torch.randn(4, 1))]  # noqa: NAR001
+    history = fit(
+        state=state,
+        epoch_spec=config,
+        train_loader=batches,
+        val_loader=batches,
+        fit_config=FitConfig(
+            num_epochs=3, train_seed=0, val_seed=VAL_SEED, test_seed=TEST_SEED
+        ),
+    )
+    assert all(record.val_loss is not None for record in history)  # noqa: NAR001
+    assert len(history) == 3  # noqa: NAR001
+
+
+def test_fit_checkpoints_after_every_validation_pass_only(tmp_path):
+    state, config = make_state_and_config()
+    batches = [(torch.randn(4, 2), torch.randn(4, 1))]  # noqa: NAR001
     fit(
         state=state,
         epoch_spec=config,
         train_loader=batches,
         val_loader=batches,
-        num_epochs=1,
-        val_epoch_list=[1],
-        train_seed=5,
-        val_seed=VAL_SEED,
-        test_seed=TEST_SEED,
-        history_path=history_path,
+        fit_config=FitConfig(
+            num_epochs=3,
+            val_epoch_list=[2],
+            train_seed=0,
+            val_seed=VAL_SEED,
+            test_seed=TEST_SEED,
+            run_uuid="run-a",
+        ),
     )
 
-    with open(file=history_path) as history_file:
-        data = json.load(fp=history_file)
-
-    assert data["meta"]["seeds"] == {"train": 5, "val": VAL_SEED, "test": TEST_SEED}
-
-
-def test_save_and_load_roundtrip(tmp_path):
-    state, config = make_state_and_config()
-    checkpoint_path = tmp_path / "checkpoint.pt"
-    save_state(state=state, checkpoint_path=checkpoint_path)
-
-    original_weight = state.model.weight.clone()
-    state.model.weight.data.fill_(99.0)  # noqa: NAR001
-
-    load(state=state, epoch_spec=config, checkpoint_path=checkpoint_path)
-    assert torch.allclose(state.model.weight, original_weight)  # noqa: NAR001
-
-
-def test_save_history_writes_valid_json(tmp_path):
-    history = [{"epoch": 1, "train_loss": 0.5}]
-    history_path = tmp_path / "history.json"
-    save_history(history=history, history_path=history_path)
-
-    with open(file=history_path) as history_file:
-        data = json.load(fp=history_file)
-
-    assert data["history"] == history
-    assert "git_commit" in data["meta"]
-
-
-def test_save_history_includes_train_state_meta(tmp_path):
-    state, config = make_state_and_config()
-    history = [{"epoch": 1, "train_loss": 0.3}]
-    history_path = tmp_path / "history.json"
-    save_history(
-        history=history,
-        history_path=history_path,
-        train_state=state,
-        epoch_spec=config,
-    )
-
-    with open(file=history_path) as history_file:
-        data = json.load(fp=history_file)
-
-    assert "train_state" in data["meta"]
-    assert "train_config" in data["meta"]
-    assert data["meta"]["train_state"]["model"] == "Linear"
-
-
-def test_save_history_records_model_shape(tmp_path):
-    state, config = make_state_and_config()
-    history_path = tmp_path / "history.json"
-    save_history(
-        history=[],
-        history_path=history_path,
-        train_state=state,
-        epoch_spec=config,
-    )
-
-    with open(file=history_path) as history_file:
-        data = json.load(fp=history_file)
-
-    train_state_meta = data["meta"]["train_state"]
-    assert train_state_meta["parameter_shapes"] == {"weight": [1, 2], "bias": [1]}
-    assert train_state_meta["num_parameters"] == 3
-
-
-def test_serialize_epoch_record_flattens_and_drops_unset_fields():
-    record = EpochRecord(
-        epoch=2,
-        train_loss=0.4,
-        train_metrics=Metrics(loss=0.4, count=8),
-        epoch_duration_seconds=1.5,
-        system_metrics=SystemMetrics(cpu_usage_percent=10.0, ram_used_gb=3.0),
-    )
-    assert serialize_epoch_record(record=record) == {
-        "epoch": 2,
-        "train_loss": 0.4,
-        "train_metrics": {"loss": 0.4, "count": 8},
-        "epoch_duration_seconds": 1.5,
-        "cpu_usage_percent": 10.0,
-        "ram_used_gb": 3.0,
-    }
+    run_dir = tmp_path / "checkpoints" / "run-a"
+    assert sorted(path.name for path in run_dir.iterdir()) == ["epoch_2.pt"]  # noqa: NAR001
+    saved = torch.load(f=run_dir / "epoch_2.pt")
+    assert sorted(saved) == ["model", "optimizer"]  # noqa: NAR001

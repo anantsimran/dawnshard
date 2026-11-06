@@ -1,0 +1,23 @@
+# Multi30kEnPredictorTrainConfig, read by run/multi30ken_predictor.py.
+model:
+  d_model: 512
+  embedding: {seq_length: 32, dropout: 0.3, position_encoding: true}
+  num_encoders: 6
+  encoder:
+    attention: {h: 4, qk_norm: true}
+    ffn_multiplier: 6
+    dropout: 0.3
+    norm: layernorm
+  final_norm: true
+fit:
+  num_epochs: 50
+  # The repo-wide VAL_SEED and TEST_SEED. train_seed is drawn fresh per run unless
+  # set here; val_epoch_list is left out, so every epoch validates.
+  val_seed: 1000000
+  test_seed: 2000000
+optimizer: {name: adam, lr: 0.001}
+# fit steps it once per epoch, so it decays to 0 by the last one. Leave it out to
+# train at a constant learning rate.
+scheduler: {name: cosine}
+dataloader: {batch_size: 64}
+data: {bpe_num_merges: 10000}

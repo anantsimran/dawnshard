@@ -10,32 +10,47 @@ TRAINING_ROOT = Path(__file__).parent.parent / "src" / "training"
 ALLOWED_IMPORTS: dict[str, set[str]] = {
     "constants": set(),  # noqa: NAR001
     "setup": set(),  # noqa: NAR001
-    "common": set(),  # noqa: NAR001
     "transformer": set(),  # noqa: NAR001
     "utils": set(),  # noqa: NAR001
-    "train": {"constants", "utils"},
-    "metrics": {"constants", "train"},
-    "dataload": {"common", "constants", "utils"},
-    "viz": {"common", "constants", "dataload", "transformer"},
-    "analytics": {"common", "constants", "dataload"},
+    "dal": set(),  # noqa: NAR001
+    "dataclass": set(),  # noqa: NAR001
+    "preprocess": {"dal", "utils"},
+    "train": {"constants", "dataclass", "utils"},
+    "metrics": {"constants", "dataclass", "train"},
+    "dataload": {"constants", "dal", "preprocess", "utils"},
+    "viz": {"constants", "dal", "dataload", "preprocess", "transformer"},
     "model": {
-        "common",
         "constants",
+        "dataclass",
         "dataload",
         "metrics",
+        "preprocess",
+        "setup",
+        "train",
+        "transformer",
+    },
+    "run": {
+        "constants",
+        "dal",
+        "dataclass",
+        "dataload",
+        "metrics",
+        "model",
+        "preprocess",
         "setup",
         "train",
         "transformer",
         "viz",
     },
-    "experiments": {
+    "ablations": {
         "constants",
+        "dal",
+        "dataclass",
         "dataload",
         "metrics",
-        "model",
-        "setup",
+        "preprocess",
+        "run",
         "train",
-        "transformer",
     },
 }
 

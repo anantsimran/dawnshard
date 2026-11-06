@@ -6,6 +6,7 @@ Load, inspect, train, and evaluate on the MNIST dataset using PyTorch.
 import random
 from pathlib import Path
 from typing import cast
+from uuid import uuid4
 
 import torch
 import torch.nn as nn
@@ -15,7 +16,9 @@ from jaxtyping import Float, jaxtyped
 from loguru import logger
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from training.constants import TEST_SEED, VAL_SEED
+from training.constants import HISTORY_PATH, TEST_SEED, VAL_SEED
+from training.dataclass.config import FitConfig
+from training.dataclass.model import EpochSpec, Metrics, TrainState
 from training.dataload.constants import DATASETS_CACHE_DIR
 from training.metrics.loss_only_metrics import (
     accumulate_metrics,
@@ -23,7 +26,7 @@ from training.metrics.loss_only_metrics import (
     reduce_metrics,
 )
 from training.setup import DEVICE, init_wandb
-from training.train.model import EpochSpec, Metrics, TrainState
+from training.train.checkpoint import save_history
 from training.train.train_loop import fit
 
 IMAGE_SIZE = 28
@@ -171,9 +174,18 @@ def main():
         accumulate_metrics=accumulate_metrics,
         reduce_metrics=reduce_metrics,
     )
-    # Fresh per run, so no single lucky draw is trained on forever; fit writes it to
-    # the history file, so a run can be repeated by passing its recorded seed back.
+    # Fresh per run, so no single lucky draw is trained on forever; the history file
+    # records it, so a run can be repeated by passing its recorded seed back.
     train_seed = random.getrandbits(32)  # noqa: NAR001
+    run_uuid = str(uuid4())  # noqa: NAR001
+    fit_config = FitConfig(
+        num_epochs=15,
+        val_epoch_list=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        train_seed=train_seed,
+        val_seed=VAL_SEED,
+        test_seed=TEST_SEED,
+        run_uuid=run_uuid,
+    )
     # fit reseeds from it, but only after the model exists; seed here so weight init
     # is reproducible too. See the README on what the rewind implies.
     torch.manual_seed(seed=train_seed)
@@ -184,17 +196,21 @@ def main():
         criterion=nn.CrossEntropyLoss(),
     )
     train_loader, val_loader = get_mnist_dataloader()
-    fit(
+    history = fit(
         state=train_state,
         epoch_spec=epoch_spec,
         train_loader=train_loader,
         val_loader=val_loader,
-        num_epochs=15,
-        val_epoch_list=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
-        train_seed=train_seed,
-        val_seed=VAL_SEED,
-        test_seed=TEST_SEED,
+        fit_config=fit_config,
         wandb_run=wandb_run,
+    )
+    # MNIST has no YAML root config; the fit section is all of its config.
+    save_history(
+        history=history,
+        history_path=HISTORY_PATH / f"{run_uuid}.json",
+        train_state=train_state,
+        epoch_spec=epoch_spec,
+        train_config=fit_config,
     )
 
 

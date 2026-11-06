@@ -11,7 +11,7 @@ import torch
 from beartype import beartype
 from jaxtyping import Float, Int, jaxtyped
 from loguru import logger
-from training.common.constants import PAD_ID
+from training.preprocess.constants import PAD_ID
 from training.transformer.constants import B, H, L, S
 
 MAX_TOKENS = 24
@@ -47,7 +47,7 @@ def plot_attention_heads(
         weights: Detached attention weights from one layer, one batch row per
             sentence, as `save_attention_maps` stores them.
         token_ids: The query ids those weights came from, right-padded with PAD_ID.
-        vocab: Maps query ids to token strings, as returned by bpe.train.
+        vocab: Maps query ids to token strings, as `Tokenizer.vocab` does.
         key_ids: The key ids, when they differ from the queries (cross-attention).
             Defaults to `token_ids`, the self-attention case.
         key_vocab: Maps key ids to token strings, when keys come from another
@@ -111,7 +111,7 @@ def plot_attention_probes(
 
     Args:
         probe_dir: Directory the probe wrote to.
-        vocab: Maps ids to token strings, as returned by bpe.train. For an
+        vocab: Maps ids to token strings, as `Tokenizer.vocab` does. For an
             encoder-decoder capture, the source vocab.
         tgt_vocab: The target vocab of an encoder-decoder capture. When set,
             `token_ids` must be `(n, 2, L)` with the source ids at index 0 and the

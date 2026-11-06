@@ -5,7 +5,7 @@ from training.metrics.loss_only_metrics import (
     calculate_metrics,
     reduce_metrics,
 )
-from training.train.model import Metrics
+from training.dataclass.model import Metrics
 
 
 def test_calculate_metrics_returns_empty_batch_metrics():

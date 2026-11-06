@@ -1,5 +1,5 @@
 import pytest
-from training.common.priority_queue import MaxHeap, PrioritizedItem
+from training.utils.priority_queue import MaxHeap, PrioritizedItem
 
 
 def _heap(pairs):

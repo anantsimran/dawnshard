@@ -1,17 +1,17 @@
 import pytest
 import torch
-from training.common.constants import MASK_ID, PAD_ID, PROTECTED_IDS
 from training.constants import CROSS_ENTROPY_IGNORE_INDEX
+from training.dataload import multi30k
 from training.dataload.multi30k import _mlm_collate, _translation_collate
+from training.preprocess.bpe.tokenizer import BpeTokenizer
+from training.preprocess.constants import MASK_ID, PAD_ID, PROTECTED_IDS
 
 # Bytes 0-255, the protected ids, then two merge ids.
 VOCAB_LENGTH = 256 + len(PROTECTED_IDS) + 2  # noqa: NAR001
 
 
 def _rows(num_rows, seq_len):
-    ids = torch.randint(
-        low=0, high=256, size=(num_rows, seq_len), generator=torch.Generator()
-    )
+    ids = torch.randint(low=0, high=256, size=(num_rows, seq_len), generator=torch.Generator())
     ids[:, seq_len // 2 :] = PAD_ID
     return list(enumerate(ids.unbind(dim=0)))  # noqa: NAR001
 
@@ -110,3 +110,69 @@ def test_translation_collate_stacks_x_and_flattens_y_row_major():
 
     assert torch.equal(x, inputs)  # noqa: NAR001
     assert torch.equal(y, targets.reshape(-1))  # noqa: NAR001
+
+
+def _fake_texts(monkeypatch, texts_by_lang):
+    monkeypatch.setattr(
+        target=multi30k,
+        name="get_multi30k_texts",
+        value=lambda lang, cache=None: texts_by_lang[lang],
+    )
+
+
+def _texts(count, prefix):
+    rows = [f"{prefix} sentence {i}" for i in range(count)]
+    return multi30k.Multi30kTexts(train=rows, val=rows[:4], test=rows[:3])
+
+
+def test_translation_loader_keeps_pairs_aligned_after_sampling(monkeypatch):
+    _fake_texts(monkeypatch, {"en": _texts(20, "en"), "de": _texts(20, "de")})
+    torch.manual_seed(0)
+    train_loader, val_loader, test_loader = multi30k.get_multi30k_translation_dataloader(
+        seq_len=24,
+        batch_size=20,
+        src_tokenizer=BpeTokenizer(merges=[]),
+        tgt_tokenizer=BpeTokenizer(merges=[]),
+        train_num=8,
+        val_num=3,
+        test_num=2,
+    )
+    x, _ = next(iter(train_loader))
+    for src, tgt_in in x.tolist():
+        src_text = bytes(i for i in src if 0 < i < 256).decode()
+        tgt_text = bytes(i for i in tgt_in if 0 < i < 256).decode()
+        assert src_text.split()[-1] == tgt_text.split()[-1]
+    assert (len(train_loader.dataset), len(val_loader.dataset), len(test_loader.dataset)) == (
+        8,
+        3,
+        2,
+    )
+
+
+def test_translation_loader_rejects_languages_with_different_row_counts(monkeypatch):
+    _fake_texts(monkeypatch, {"en": _texts(20, "en"), "de": _texts(19, "de")})
+    with pytest.raises(ValueError, match="cannot be aligned"):
+        multi30k.get_multi30k_translation_dataloader(
+            seq_len=8,
+            batch_size=4,
+            src_tokenizer=BpeTokenizer(merges=[]),
+            tgt_tokenizer=BpeTokenizer(merges=[]),
+        )
+
+
+def test_loaders_draw_once_from_the_torch_rng_even_without_train_num(monkeypatch):
+    _fake_texts(monkeypatch, {"en": _texts(10, "en")})
+    for train_num in (None, 5):
+        torch.manual_seed(0)
+        torch.rand(size=())
+        expected = torch.rand(size=(1,))[0]
+        torch.manual_seed(0)
+        multi30k.get_multi30ken_mlm_dataloader(
+            seq_len=8,
+            val_seed=0,
+            test_seed=100,
+            batch_size=4,
+            tokenizer=BpeTokenizer(merges=[]),
+            train_num=train_num,
+        )
+        assert torch.rand(size=(1,))[0] == expected

@@ -28,7 +28,7 @@ without advancing the default.
 
 ## Why `train_seed` appears twice
 
-In the [Multi30k entry point](../app/src/training/model/multi30ken_predictor.py),
+In the [Multi30k entry point](../app/src/training/run/multi30ken_predictor.py),
 Python's `random.getrandbits(32)` chooses `train_seed`. The entry point calls
 `torch.manual_seed(train_seed)` immediately before constructing the model,
 which fixes its initial weights for the same model configuration. At the start
@@ -101,8 +101,9 @@ the validation schedule can shift later training draws from that stream.
 Use the recorded `train_seed` with the same configuration, prepared data,
 loader settings, and validation schedule. The two seed calls then recreate
 the initial weights and the seeded training path. The
-[history file](../app/src/training/train/train_loop.py) records the train,
-validation, and test seeds for that purpose.
+[history file](../app/src/training/train/checkpoint.py) records the train,
+validation, and test seeds for that purpose, inside the full configuration the
+run was built from.
 
 The seed cannot reach backward into data preparation. Multi30k currently
 samples training rows before `train_seed` is chosen, so the recorded seed

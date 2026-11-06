@@ -2,7 +2,7 @@
 
 import psutil
 import torch
-from training.train.model import SystemMetrics
+from training.dataclass.model import SystemMetrics
 
 
 def collect_system_metrics() -> SystemMetrics:

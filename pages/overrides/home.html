@@ -15,7 +15,8 @@
         <p class="ds-hero__description">
           State, policy, and mechanism are three separate objects.
           <code>TrainState</code> holds the model and optimizer,
-          <code>EpochSpec</code> decides how batches are scored and observed, and
+          <code>EpochSpec</code> decides how batches are scored and observed,
+          <code>FitConfig</code> sets the epochs, seeds, and early stopping, and
           <code>fit</code> runs the epochs. A CNN and a transformer go through the
           same <code>fit</code>, and the loop's package imports neither.
         </p>
@@ -31,10 +32,10 @@
         </div>
       </div>
 
-      <div class="ds-run" aria-label="A classification run using TrainState, EpochSpec, and fit">
+      <div class="ds-run" aria-label="A classification run using TrainState, EpochSpec, FitConfig, and fit">
         <div class="ds-run__header">
           <span class="ds-run__label">One classification run</span>
-          <span class="ds-run__file">TrainState · EpochSpec · fit</span>
+          <span class="ds-run__file">TrainState · EpochSpec · FitConfig · fit</span>
         </div>
         <pre class="ds-run__code"><code>train_state = TrainState(
     model=model.to(device=DEVICE),
@@ -53,11 +54,13 @@ history = fit(
     epoch_spec=epoch_spec,
     train_loader=train_loader,
     val_loader=val_loader,
-    num_epochs=15,
-    val_epoch_list=[5, 10, 15],
-    train_seed=random.getrandbits(32),
-    val_seed=VAL_SEED,
-    test_seed=TEST_SEED,
+    fit_config=FitConfig(
+        num_epochs=15,
+        val_epoch_list=[5, 10, 15],
+        train_seed=random.getrandbits(32),
+        val_seed=VAL_SEED,
+        test_seed=TEST_SEED,
+    ),
 )</code></pre>
         <a class="ds-run__source" href="#a-training-run-in-one-screen">
           Read the training API
@@ -81,8 +84,9 @@ history = fit(
           <h3>Separate state, policy, and mechanism</h3>
           <p>
             Replace a model through <code>TrainState</code> or change metrics through
-            <code>EpochSpec</code>. <code>fit</code> uses both without
-            importing a model or dataset.
+            <code>EpochSpec</code>. <code>fit</code> reads both, plus a
+            <code>FitConfig</code> for epochs and seeds, without importing a model
+            or dataset.
           </p>
           <a class="ds-card__link" href="#separate-state-policy-and-mechanism">
             Trace the separation {% include ".icons/material/arrow-right.svg" %}
@@ -127,7 +131,7 @@ history = fit(
           <h3>Leave evidence behind</h3>
           <p>
             Epoch records and run history retain metrics, seeds, the Git revision,
-            and machine context. <code>log_elapsed</code> times setup phases in the
+            machine context, and the run's whole config. <code>log_elapsed</code> times setup phases in the
             terminal; local plots and probes help explain the numbers.
           </p>
           <a class="ds-card__link" href="#debuggability">
@@ -146,23 +150,23 @@ history = fit(
         Follow a topic in the revision guide or trace a design choice through the code.
       </p>
       <div class="ds-track-grid">
-        <a class="ds-track" href="{{ 'tutorials/pytorch/' | url }}">
+        <a class="ds-track" href="{{ 'knowledge_sharing/tutorials/pytorch/' | url }}">
           <strong>PyTorch</strong>
           <span>Tensors, shared weights, autograd, token losses, and data loading.</span>
         </a>
-        <a class="ds-track" href="{{ 'tutorials/training/' | url }}">
+        <a class="ds-track" href="{{ 'knowledge_sharing/tutorials/training/' | url }}">
           <strong>Training</strong>
           <span>Loops, optimizers, schedules, and observability.</span>
         </a>
-        <a class="ds-track" href="{{ 'tutorials/math/' | url }}">
+        <a class="ds-track" href="{{ 'knowledge_sharing/tutorials/math/' | url }}">
           <strong>Math</strong>
           <span>Matrix calculus and the chain rule behind gradients.</span>
         </a>
-        <a class="ds-track" href="{{ 'tutorials/vision/' | url }}">
+        <a class="ds-track" href="{{ 'knowledge_sharing/tutorials/vision/' | url }}">
           <strong>Vision</strong>
           <span>Convolutions, parameter counts, and model graphs.</span>
         </a>
-        <a class="ds-track" href="{{ 'tutorials/transformer/' | url }}">
+        <a class="ds-track" href="{{ 'knowledge_sharing/tutorials/transformer/' | url }}">
           <strong>Transformers</strong>
           <span>Encoder and decoder attention, causal masks, normalization, and compute.</span>
         </a>
@@ -171,7 +175,7 @@ history = fit(
           <span>Why Dawnshard seeds twice, and where loaders, workers, and masks draw.</span>
         </a>
       </div>
-      <a class="ds-track-index" href="{{ 'tutorials/' | url }}">
+      <a class="ds-track-index" href="{{ 'knowledge_sharing/tutorials/' | url }}">
         Browse the revision guide {% include ".icons/material/arrow-right.svg" %}
       </a>
     </div>
@@ -182,8 +186,8 @@ history = fit(
       <p class="ds-eyebrow ds-eyebrow--accent">Reports</p>
       <h2 class="ds-section__title" id="ds-reports-title">Measure the choices behind the model</h2>
       <div class="ds-report-preview ds-report-preview--featured">
-        <a class="ds-report-preview__figure" href="{{ 'experiments/reports/multi30k_ablations/' | url }}" aria-label="Read the Multi30k ablation report">
-          <img src="{{ 'experiments/reports/assets/multi30k_ablations/width_and_schedule.png' | url }}" alt="Warmup plus cosine barely changes the narrow translator's loss but improves wider models." loading="lazy" width="1585" height="828">
+        <a class="ds-report-preview__figure" href="{{ 'app/src/training/ablations/reports/multi30k_ablations/' | url }}" aria-label="Read the Multi30k ablation report">
+          <img src="{{ 'app/src/training/ablations/reports/assets/multi30k_ablations/width_and_schedule.png' | url }}" alt="Warmup plus cosine barely changes the narrow translator's loss but improves wider models." loading="lazy" width="1585" height="828">
         </a>
         <div class="ds-report-preview__copy">
           <p class="ds-card__index">Multi30k / Ablation studies / October 2026</p>
@@ -199,17 +203,17 @@ history = fit(
             <li><strong>22</strong> arms</li>
             <li><strong>3</strong> seeds per arm</li>
           </ul>
-          <a class="ds-card__link" href="{{ 'experiments/reports/multi30k_ablations/' | url }}">
+          <a class="ds-card__link" href="{{ 'app/src/training/ablations/reports/multi30k_ablations/' | url }}">
             Read the ablation report {% include ".icons/material/arrow-right.svg" %}
           </a>
-          <a class="ds-card__link" href="{{ 'experiments/reports/multi30k_ablations/#data-and-reproduction' | url }}">
+          <a class="ds-card__link" href="{{ 'app/src/training/ablations/reports/multi30k_ablations/#data-and-reproduction' | url }}">
             Explore the study records and data {% include ".icons/material/arrow-right.svg" %}
           </a>
         </div>
       </div>
       <div class="ds-report-preview">
-        <a class="ds-report-preview__figure" href="{{ 'experiments/reports/multi30k_tokenisation/' | url }}" aria-label="Read the Multi30k tokenisation report">
-          <img src="{{ 'experiments/reports/assets/multi30k_tokenisation/mean_length.png' | url }}" alt="English and German caption lengths decrease as the BPE vocabulary grows, with diminishing returns." loading="lazy" width="1571" height="786">
+        <a class="ds-report-preview__figure" href="{{ 'app/src/training/ablations/reports/multi30k_tokenisation/' | url }}" aria-label="Read the Multi30k tokenisation report">
+          <img src="{{ 'app/src/training/ablations/reports/assets/multi30k_tokenisation/mean_length.png' | url }}" alt="English and German caption lengths decrease as the BPE vocabulary grows, with diminishing returns." loading="lazy" width="1571" height="786">
         </a>
         <div class="ds-report-preview__copy">
           <p class="ds-card__index">Multi30k / English and German</p>
@@ -219,10 +223,10 @@ history = fit(
             language. See how BPE changes sequence lengths, why a word-to-token
             ratio varies, and what averages hide about longer inputs.
           </p>
-          <a class="ds-card__link" href="{{ 'experiments/reports/multi30k_tokenisation/' | url }}">
+          <a class="ds-card__link" href="{{ 'app/src/training/ablations/reports/multi30k_tokenisation/' | url }}">
             Read the report {% include ".icons/material/arrow-right.svg" %}
           </a>
-          <a class="ds-card__link" href="{{ 'app/src/training/common/' | url }}">
+          <a class="ds-card__link" href="{{ 'app/src/training/preprocess/' | url }}">
             Use the BPE tokenizer {% include ".icons/material/arrow-right.svg" %}
           </a>
         </div>

@@ -1,9 +1,56 @@
+# The Dockerfile copies only pyproject.toml, uv.lock, .env and app/. Everything
+# else here keeps the build context small, so `docker build` uploads less.
+
+# Run output: datasets, checkpoints, histories and probes (app/history is GBs)
 app/datasets/
 app/checkpoints/
 app/history/
-.venv/
-__pycache__/
-**/*.pyc
-.git/
-wandb/
+**/wandb
+**/*.pt
+**/*.pth
+**/*.ckpt
+**/*.safetensors
+**/*.sqlite
+**/*.sqlite-*
 
+# Published ablation results and the scripts that render them
+app/src/training/ablations/multi30k_translator/
+app/src/training/ablations/multi30ken_predictor/
+app/src/training/ablations/reports/
+
+# Environments and VCS
+.venv
+.git
+.gitignore
+
+# Caches and editor debris. Patterns without **/ match only at the context root.
+**/__pycache__
+**/*.py[cod]
+**/.ipynb_checkpoints
+**/.DS_Store
+**/*.log
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+htmlcov
+
+# Docs, site build, tooling and local-only files the image never reads
+site/
+docs/
+pages/
+knowledge_sharing/
+status/
+scripts/
+mkdocs.yml
+*.md
+.claude/
+.github/
+.githooks/
+.vscode/
+
+# Secrets: the Dockerfile copies the root .env on purpose, so it is not listed.
+# Any other env file is kept out of the image.
+.env.*
+app/**/.env
+app/**/.env.*

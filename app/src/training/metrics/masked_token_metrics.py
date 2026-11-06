@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from torch import Tensor
 from training.constants import CROSS_ENTROPY_IGNORE_INDEX
-from training.train.model import Metrics
+from training.dataclass.model import Metrics
 
 
 @dataclass

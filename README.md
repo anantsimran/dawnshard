@@ -119,6 +119,15 @@ half of the policy: `num_epochs`, the val and test seeds, and optional `train_se
 `None` validates every epoch, and an empty one is rejected when the config is built,
 since a run that never validates would never checkpoint.
 
+The two halves differ in what they hold. `EpochSpec` holds code: a `Metrics` type,
+three functions, two probes, and a device. A YAML file can't carry a function, so
+each entry point builds its `EpochSpec` in Python (see `build_epoch_spec` in
+[multi30k_translator/setup.py](app/src/training/run/multi30k_translator/setup.py)).
+`FitConfig` holds only ints, lists, and strings, so it lives in the YAML, and the
+history file records it under `meta.train_config`. The step functions read `EpochSpec` on every
+batch. `fit` reads `FitConfig` to decide which epochs run, which ones validate, and
+with which seeds.
+
 `FitConfig` is the `fit` section of a `TrainConfig`, the root of a run's YAML file
 under [app/src/config/](app/src/config/). `fit` never sees the other sections:
 `model`, `optimizer`, `scheduler`, `dataloader`, and `data`. The entry point in
@@ -149,6 +158,29 @@ pass, and returns the records, and
 `profiled_fit` does the same with a profiler on the epochs you pick. None of these
 functions owns persistent training state; they change the objects inside `TrainState`
 and return metrics or epoch records.
+
+### Training and inference
+
+Training uses all three. Inference needs the model from state, the device from
+policy, and a mechanism of its own:
+
+| Tenet | Component | Training | Inference |
+|---|---|---|---|
+| State | `model` | updated on every step | read only, weights restored from a checkpoint |
+| State | `optimizer`, `scheduler` | step every batch and every epoch | not needed, since nothing is updated |
+| State | `criterion` | the loss behind `backward` | only to score outputs against references |
+| Policy | `EpochSpec.device` | where batches go | where inputs go, and the `map_location` for loading |
+| Policy | `EpochSpec` metrics functions | score every batch | only to score outputs against references |
+| Policy | `EpochSpec` probes | optional, on train or eval steps | not called; both are passed a target |
+| Policy | `FitConfig` | epochs, seeds, validation, early stopping | not needed |
+| Mechanism | `fit`, `run_epoch`, `train_step` | the loop | not needed |
+| Mechanism | `eval_step` | validation passes | not needed, since it scores a forward pass against a target |
+| Mechanism | [`load`](app/src/training/train/checkpoint.py) | resumes a run | restores the weights |
+| Mechanism | a predict function | none | turns model outputs into an answer: an argmax for a classifier, a decode loop for a sequence model |
+
+[`load`](app/src/training/train/checkpoint.py) restores the optimizer and scheduler
+along with the model, so it still expects a full `TrainState`. Everything else
+inference needs sits outside the training loop.
 
 ### What that buys you
 
@@ -301,8 +333,8 @@ Four rules fall out of that layout:
 - Paths live in one `constants.py`. Device selection lives in one `setup.py`.
 - Everything a run produces lands in `app/history/` or `app/datasets/`, both
   gitignored.
-- Tests live in `app/tests/`, one file per module. The tests for `mask.py` are in
-  `test_mask.py` and nowhere else.
+- Tests live in `app/tests/`, one file per module. The tests for `masks.py` are in
+  `test_masks.py` and nowhere else.
 
 The pieces meet at the training call site. These arrows show what feeds a run,
 not Python import direction:
@@ -511,7 +543,7 @@ ______________________________________________________________________
 | Models | three MNIST classifiers, an AG News transformer classifier, a Multi30k masked-token predictor, and a Multi30k encoder-decoder translator | [model/](app/src/training/model/) |
 | Configs | one YAML per transformer model holding its architecture, epochs and seeds, optimizer, schedule, batch size, and data settings; an entry point per model reads it | [app/src/config/](app/src/config/), [run/](app/src/training/run/) |
 | Ablations | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation and its scale study, each a grid search ranked by best val loss | [ablations/](app/src/training/ablations/) |
-| Visualization | a run's metrics, two runs side by side, a model's autograd graph, attention heatmaps, BPE sequence length against merges | [viz/](app/src/training/viz/) |
+| Visualization | a run's metrics, two runs side by side, a model's autograd graph, what each attention head does by epoch, BPE sequence length against merges | [viz/](app/src/training/viz/) |
 | Notebooks | a starter notebook, the Multi30k tokenizer experiments, BPE length stats (mean, min, max, percentiles) for each Multi30k EN split, and a checkpoint-and-reload walkthrough | [notebooks/](app/src/notebooks/) |
 | Tests | a pytest suite; `attention` is checked against `torch.nn.functional.scaled_dot_product_attention` | [tests/](app/tests/) |
 | Tutorials | theory and revision notes from tensors to attention masks, published as a website | [knowledge_sharing/tutorials/](knowledge_sharing/tutorials/) |
@@ -634,12 +666,13 @@ the rewind implies for comparing runs.
 
 ```bash
 jq '.meta.train_config' app/history/<run-uuid>.json > repeat.yaml
-uv run python app/src/training/run/<model>.py --config repeat.yaml
+uv run python app/src/training/run/<model>.py --config-path repeat.yaml
 ```
 
 `meta.train_config` is the run's YAML with the drawn `train_seed` filled in, and JSON
-is valid YAML, so the file goes straight back to `--config`. The entry point keeps
-the recorded seed instead of drawing one and gives the repeat its own `run_uuid`.
+is valid YAML, so the file goes straight back to `--config-path` (after `train` for the
+translator). The entry point keeps the recorded seed instead of drawing one and gives
+the repeat its own `run_uuid`.
 
 For the same model and loaders, `fit` starts from the same RNG state, and weight
 initialization does too when `torch.manual_seed` runs before the model is built. The
@@ -788,8 +821,10 @@ number of epochs. Reading the results is a separate function you call after `fit
 
 A probe that needs values from inside `forward` reads them off the model, because
 `forward` has to keep returning only what the criterion expects. `AGNewsClassifier`
-stores each block's detached attention weights in `model.attention_map`, which keeps
-one batch of weights per block on the device between calls. `save_attention_maps` in
+stores an `AttentionProbePerEpoch` in `model.attention_maps`. Its `map` dict maps
+each kind of attention to a list holding one batch of detached weights per block, so
+the list index is the block number. The weights stay on the device between calls.
+`save_attention_maps` in
 [probes.py](app/src/training/transformer/probes.py) writes them to disk, and
 [Visualizing attention](#visualizing-attention) plots them.
 
@@ -914,7 +949,7 @@ Everything runs through `uv run`, never a bare `python`. With `UV_ENV_FILE` set,
 
 ```bash
 # Train the transformer classifier on AG News, saving attention maps as it goes.
-# Each run/ script reads its YAML in app/src/config/; pass --config to use another.
+# Each run/ script reads its YAML in app/src/config/; pass --config-path to use another.
 uv run python app/src/training/run/ag_news_classifier.py
 
 # Train the MNIST model (CNN by default — edit main() to pick a model)
@@ -924,7 +959,7 @@ uv run python app/src/training/model/mnist.py
 uv run python app/src/training/run/multi30ken_predictor.py
 
 # Train the Multi30k encoder-decoder translator once
-uv run python app/src/training/run/multi30k_translator.py
+uv run python app/src/training/run/multi30k_translator/main.py train
 
 # Run the Multi30k masked-token predictor's ablation (3 arms x 3 seeds, 100 epochs each)
 uv run python app/src/training/ablations/multi30ken_predictor_ablation.py
@@ -1022,25 +1057,46 @@ faster check. See the module docstring for both.
 
 ### Visualizing attention
 
-[attention_heatmap.py](app/src/training/viz/attention_heatmap.py) saves one layer's attention
-weights as a grid of heatmaps, with one row per sentence and one column per head. All
-cells share a single colour scale so heads can be compared, padding is dropped, and
-spaces are drawn as `·` so word boundaries stay visible.
+[attention_heatmap.py](app/src/training/viz/attention_heatmap.py) shows what each head
+does and when it started doing it. `head_stats` reduces one block's weights to four
+numbers per head, averaged over the saved sentences:
+
+- `entropy` is 0 when every query attends to one key and 1 when each query spreads
+  evenly over the keys it can see.
+- `top_key` is the share of a sentence's attention that goes to its most-attended key.
+  A head where every query points at the same token scores near 1.
+- `distance` is how many tokens away a query looks, weighted by attention.
+- `previous` is the weight a query puts on the token just before it. A previous-token
+  head scores near 1.
+
+Only self-attention gets the last two, because they compare query and key positions.
+
+`plot_attention_probes` writes two figures per kind of attention into the probe folder.
+`<kind>_heads.png` draws each statistic as a heatmap with a row per head and a column per
+epoch, so a head that specializes shows up as one row changing colour while the rest
+stay flat. `<kind>_sentence_0.png` shows the first saved sentence's weights in every
+block and head at the last epoch, and titles each panel with its head's statistics,
+which lets you check the numbers against real tokens. Each panel there gets its own
+colour scale, so a head that spreads its attention stays visible beside one that points
+at a single key.
 
 The AG News classifier records these maps during training with a probe:
 
-1. Every `AGNewsClassifier.forward` overwrites `model.attention_map` with each block's
-   detached `(B, h, L, L)` weights, keyed by kind: `{"encoder": [one per block]}`. A
-   model with a decoder adds `"decoder_self"` and `"decoder_cross"`.
-1. `main` sets `eval_probe=partial(save_attention_maps, out_dir=..., num_sentences=4)`
+1. Every `AGNewsClassifier.forward` overwrites `model.attention_maps` with
+   `AttentionProbePerEpoch(map={"encoder": [...]})`, one detached `(B, h, L, L)`
+   tensor per block. A model with a decoder also fills the `"decoder_self"` and
+   `"decoder_cross"` keys.
+1. `main` sets `eval_probe=partial(save_attention_maps, out_dir=..., num_sentences=16)`
    ([probes.py](app/src/training/transformer/probes.py)), with `out_dir` a fresh folder
    under `app/history/attention_probes/` (`ATTENTION_PROBES_PATH` in
    [constants.py](app/src/training/constants.py)).
 1. On each validation epoch, `save_attention_maps` ignores every batch except
-   batch 0 and saves its first 4 sentences to `epoch_<NNN>.pt`. Each file holds the
-   token ids and, for each kind, one weight tensor per block.
-1. After `fit`, `plot_attention_probes` reads those files and writes
-   `epoch_<NNN>_<kind>_block_<i>.png` next to each one.
+   batch 0. It writes the first 16 sentences of each map to
+   `epoch_<NNN>/<kind>_block_<i>.pt`, so a file's path names its epoch, kind, and
+   block. The file stores the same three values alongside the token ids.
+1. After `fit`, `load_attention_captures` reads the files back as `AttentionCapture`s
+   sorted by epoch, kind, and block, and `plot_attention_probes` writes the two figures
+   per kind into the run's folder.
 
 The validation loader isn't shuffled, so every capture shows the same sentences and
 you can compare how attention changes between epochs.
@@ -1166,8 +1222,8 @@ dawnshard/
 │   │       │   ├── README.md         # attention design choices and axis names
 │   │       │   ├── functions.py      # scaled dot-product attention
 │   │       │   ├── modules.py        # SinusoidalEmbedding, MultiHeadAttentionLayer (optional QK norm), EncoderBlock, DecoderBlock
-│   │       │   ├── probes.py         # save_attention_maps: probe that saves attention maps per epoch
-│   │       │   ├── mask.py           # padding and causal keep masks, pad-masked mean pool
+│   │       │   ├── probes.py         # AttentionProbePerEpoch; save_attention_maps probe and load_attention_captures
+│   │       │   ├── masks.py          # mask_tokenizer_pad_ids, mask_later_positions, masked_mean
 │   │       │   └── constants.py      # axis names for shape strings: B, L, D_MODEL, H, D_K
 │   │       ├── dal/                  # versioned cache: @cached and its stores
 │   │       │   ├── README.md         # @cached keys, versions, and swapping the store
@@ -1195,11 +1251,13 @@ dawnshard/
 │   │       │   ├── mnist.py                # three digit classifiers and their single run
 │   │       │   ├── ag_news_classifier.py   # text classifier
 │   │       │   ├── multi30ken_predictor.py # masked-token predictor
-│   │       │   └── multi30k_translator.py  # encoder-decoder translator
+│   │       │   └── transformer_translator.py # encoder-decoder translator
 │   │       ├── run/                  # entry points: train one model from its YAML
 │   │       │   ├── ag_news_classifier.py   # AGNewsClassifierTrainConfig and main
 │   │       │   ├── multi30ken_predictor.py # its TrainConfig, loaders, TrainState, EpochSpec, main
-│   │       │   └── multi30k_translator.py  # its TrainConfig, loaders, TrainState, EpochSpec, main
+│   │       │   └── multi30k_translator/    # the translator's entry point and the builders it shares
+│   │       │       ├── main.py             # train, infer
+│   │       │       └── setup.py            # its TrainConfig, loaders, TrainState, EpochSpec, load_transformer
 │   │       ├── ablations/            # config studies: a pinned YAML plus overrides per arm
 │   │       │   ├── setup.py          # grid_search, seed repeats
 │   │       │   ├── multi30ken_predictor_ablation.py # sweep, follow-ups, ablation

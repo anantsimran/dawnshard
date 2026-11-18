@@ -28,7 +28,7 @@ from training.dataclass.config import FitConfig
 from training.dataclass.model import EpochSpec, TrainState
 from training.run.ag_news_classifier import DEFAULT_CONFIG_PATH, AGNewsClassifierTrainConfig
 from training.train.train_loop import fit
-from training.transformer.probes import save_attention_maps
+from training.transformer.probes import load_attention_captures, save_attention_maps
 
 
 MODEL_CONFIG = AGNewsClassifierTrainConfig.from_yaml(path=DEFAULT_CONFIG_PATH).model
@@ -164,9 +164,10 @@ def test_classifier_forward_stores_detached_attention_map_per_block():
     torch.manual_seed(seed=0)
     model = AGNewsClassifier(model_config=MODEL_CONFIG, vocab_size=PAD_ID + 1)
     model(_padded_ids(batch_size=3, length=12))  # noqa: NAR001
-    assert list(model.attention_map) == ["encoder"]  # noqa: NAR001
-    assert len(model.attention_map["encoder"]) == NUM_BLOCKS  # noqa: NAR001
-    for weights in model.attention_map["encoder"]:
+    attention_maps = model.attention_maps.map
+    assert list(attention_maps) == ["encoder"]
+    assert len(attention_maps["encoder"]) == NUM_BLOCKS
+    for weights in attention_maps["encoder"]:
         assert weights.shape == (3, NUM_HEADS, 12, 12)
         assert not weights.requires_grad
 
@@ -203,14 +204,21 @@ def test_save_attention_maps_writes_first_batch_rows_once_per_epoch(tmp_path):
                 num_sentences=2,
             )
 
-    assert sorted(path.name for path in tmp_path.glob(pattern="*.pt")) == [  # noqa: NAR001
-        "epoch_001.pt",
-        "epoch_003.pt",
+    saved = sorted(  # noqa: NAR001
+        str(path.relative_to(tmp_path)) for path in tmp_path.rglob(pattern="*.pt")  # noqa: NAR001
+    )
+    assert saved == [
+        f"epoch_{epoch:03d}/encoder_block_{block}.pt"
+        for epoch in (1, 3)
+        for block in range(NUM_BLOCKS)  # noqa: NAR001
     ]
-    capture = torch.load(f=tmp_path / "epoch_001.pt")
-    assert torch.equal(capture["token_ids"], first[:2])  # noqa: NAR001
-    assert len(capture["weights"]["encoder"]) == NUM_BLOCKS  # noqa: NAR001
-    assert capture["weights"]["encoder"][0].shape == (2, NUM_HEADS, 12, 12)
+    captures = load_attention_captures(probe_dir=tmp_path)
+    assert [(c.epoch, c.kind, c.block) for c in captures] == [
+        (epoch, "encoder", block) for epoch in (1, 3) for block in range(NUM_BLOCKS)  # noqa: NAR001
+    ]
+    first_capture = captures[0]
+    assert torch.equal(first_capture.token_ids, first[:2])  # noqa: NAR001
+    assert first_capture.weights.shape == (2, NUM_HEADS, 12, 12)
 
 
 def test_small_training_run_reduces_train_loss():
@@ -267,7 +275,7 @@ def test_small_training_run_reduces_train_loss():
     assert history[-1].train_loss < history[0].train_loss
 
 
-def test_save_attention_maps_rejects_model_without_attention_map(tmp_path):
+def test_save_attention_maps_rejects_model_without_attention_maps(tmp_path):
     ids = _padded_ids(batch_size=2, length=4)
     with pytest.raises(TypeError):
         save_attention_maps(

@@ -553,13 +553,13 @@ softmax path shown here does not.
 
 ______________________________________________________________________
 
-### Q: I can't get past the syntax of `padding_keep_mask`
+### Q: I can't get past the syntax of `mask_tokenizer_pad_ids`
 
 The concepts above are enough for a theory pass. The next two questions unpack
 the tensor syntax used to express those masks in PyTorch.
 
 ```python
-def padding_keep_mask(token_ids: torch.Tensor, pad_id: int) -> torch.Tensor:
+def mask_tokenizer_pad_ids(token_ids: torch.Tensor, pad_id: int) -> torch.Tensor:
     """Mark real (non-pad) key positions.
 
     Args:
@@ -573,7 +573,7 @@ def padding_keep_mask(token_ids: torch.Tensor, pad_id: int) -> torch.Tensor:
     return (token_ids != pad_id)[:, None, None, :]
 
 
-src_keep = padding_keep_mask(token_ids=src_ids, pad_id=PAD)  # (B, 1, 1, L_src)
+src_keep = mask_tokenizer_pad_ids(token_ids=src_ids, pad_id=PAD)  # (B, 1, 1, L_src)
 scores = scores.masked_fill(~src_keep, float("-inf"))
 ```
 
@@ -588,7 +588,7 @@ token_ids = [[5, 7, 9, 0],     != 0     [[T, T, T, F],
              [3, 4, 0, 0]]     ---->     [T, T, F, F]]    # (2, 4)
 ```
 
-True = real token, False = padding. That's why it's called "keep".
+True = real token, False = padding. True means attention keeps that key.
 
 #### 2. `[:, None, None, :]`
 

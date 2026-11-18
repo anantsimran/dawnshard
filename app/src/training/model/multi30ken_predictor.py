@@ -21,8 +21,9 @@ from torch import nn
 from training.dataclass.config import EncoderConfig
 from training.preprocess.constants import PAD_ID
 from training.transformer.constants import B, L, V
-from training.transformer.mask import padding_keep_mask
+from training.transformer.masks import mask_tokenizer_pad_ids
 from training.transformer.modules import NORMS, EncoderBlock, SinusoidalEmbedding
+from training.transformer.probes import AttentionProbePerEpoch
 
 
 class Multi30kEnPredictor(nn.Module):
@@ -38,13 +39,15 @@ class Multi30kEnPredictor(nn.Module):
                             │                                 MASK_ID where masked
               ┌─────────────┴─────────────┐
               ▼                           ▼
-      padding_keep_mask             nn_embedding              padding_idx=PAD_ID
-        (B, 1, 1, L)                      │  (B, L, d_model)
+      mask_tokenizer_pad_ids        nn_embedding              .weight (vocab, d_model),
+        (B, 1, 1, L)                      │                   padding_idx=PAD_ID
+              │                           │  (B, L, d_model)
               │                           ▼
               │                 nn_embedding_dropout          on token content only;
               │                           │                   positions are added
               │                           ▼                   after, never dropped
-              │                  position_embedding           + fixed sin/cos table,
+              │                  position_embedding           + fixed sin/cos table
+              │                           │                   .pe (seq_length, d_model);
               │                           │  (B, L, d_model)  L ≤ seq_length; Identity
               │                           ▼                   if not position_encoding
               └────────────► EncoderBlock × num_encoders ──► weights (B, h, L, L) each
@@ -55,7 +58,8 @@ class Multi30kEnPredictor(nn.Module):
                                           │                   final_norm; the
                                           │                   stack is pre-norm, so
                                           ▼                   nothing else norms here
-                                        head                  Linear to vocab
+                                        head                  Linear to vocab,
+                                          │                   .weight (vocab, d_model)
                                           │  (B, L, vocab)
                                           ▼
                                        reshape                one row per position,
@@ -89,10 +93,10 @@ class Multi30kEnPredictor(nn.Module):
     `b*L + l` of both is the same position and a plain `CrossEntropyLoss` and
     `MaskedTokenMetrics` work on them unchanged.
 
-    Every `forward` overwrites `attention_map` with each block's detached attention
-    weights, `{"encoder": [(B, h, L, L) per block]}`, so it describes the most recent
-    call only. `save_attention_maps` reads it as an eval probe; nothing else may rely
-    on it surviving the next call.
+    Every `forward` overwrites `attention_maps` with an `AttentionProbePerEpoch`
+    whose only kind is `"encoder"`, one detached `(B, h, L, L)` tensor per block in
+    block order, so it describes the most recent call only. `save_attention_maps` reads it as an
+    eval probe; nothing else may rely on it surviving the next call.
 
     Output: raw logits (no softmax), as CrossEntropyLoss expects.
     """
@@ -151,7 +155,7 @@ class Multi30kEnPredictor(nn.Module):
             norm(normalized_shape=d_model) if model_config.final_norm else nn.Identity()
         )
         self.head = nn.Linear(in_features=d_model, out_features=vocab_size)
-        self.attention_map: dict[str, list[torch.Tensor]] = {}
+        self.attention_maps = AttentionProbePerEpoch()
 
     @jaxtyped(typechecker=beartype)
     def forward(self, ids: Int[torch.Tensor, f"{B} {L}"]) -> Float[torch.Tensor, f"{B}*{L} {V}"]:
@@ -171,18 +175,18 @@ class Multi30kEnPredictor(nn.Module):
                 position table.
 
         Side effects:
-            Replaces `self.attention_map` with this call's attention weights under
-            `"encoder"`, one detached `(B, h, L, L)` tensor per block in block order.
+            Replaces `self.attention_maps` with `{"encoder": [...]}`, one detached
+            `(B, h, L, L)` tensor per block in block order.
         """
-        pad_mask = padding_keep_mask(token_ids=ids, pad_id=PAD_ID)
+        pad_mask = mask_tokenizer_pad_ids(token_ids=ids, pad_id=PAD_ID)
         embedding = self.nn_embedding_dropout(self.nn_embedding(ids))  # noqa: NAR001
         # Positional: nn.Identity, the no-position-encoding case, has no `batch` kwarg.
         embedding = self.position_embedding(embedding)  # noqa: NAR001
-        attention_map = []
+        encoder_attn = []
         for encoder_block in self.encoder_blocks:
             embedding, attention_vector = encoder_block(batch=embedding, pad_mask=pad_mask)
-            attention_map.append(attention_vector.detach())  # noqa: NAR001
-        self.attention_map = {"encoder": attention_map}
+            encoder_attn.append(attention_vector.detach())  # noqa: NAR001
+        self.attention_maps = AttentionProbePerEpoch(map={"encoder": encoder_attn})
         encoded = self.final_norm(embedding)  # noqa: NAR001
         logits = self.head(encoded)  # noqa: NAR001
         return logits.reshape(-1, logits.size()[-1])  # noqa: NAR001

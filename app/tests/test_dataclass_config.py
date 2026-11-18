@@ -14,7 +14,7 @@ from training.dataclass.config import (
     TransformerConfig,
 )
 from training.run.ag_news_classifier import AGNewsClassifierTrainConfig
-from training.run.multi30k_translator import Multi30kTranslatorTrainConfig
+from training.run.multi30k_translator.setup import Multi30kTranslatorTrainConfig
 from training.run.multi30ken_predictor import Multi30kEnPredictorTrainConfig
 
 

@@ -21,7 +21,7 @@ fails in ways that are hard to see:
   runs, so an attribute added to `__init__` after the save is missing, and the failure
   appears in the first `forward` call. The checks in `__init__` do not run either.
 - A model trained by running its file directly records its class as
-  `__main__.Multi30kTranslator`. Loading from any other script fails.
+  `__main__.TransformerTranslator`. Loading from any other script fails.
 - Pickle can call any function while loading, so an untrusted `.pt` file can run code.
   `torch.load` defaults to `weights_only=True` for this reason, and under that default a
   pickled module or a dataclass instance raises.
@@ -81,7 +81,7 @@ string name and a lookup from name to class, which the norm layer already has.
 
 The format covers `state_dict` use only. Exporting a graph that runs without the Python
 class (`torch.export`) is a deployment step for later. The `beartype` checks and the
-`attention_map` attribute that `forward` sets are likely to need changes first.
+`attention_maps` attribute that `forward` sets are likely to need changes first.
 
 ## Alternatives considered
 

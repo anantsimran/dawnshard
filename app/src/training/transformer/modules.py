@@ -36,12 +36,12 @@ class SinusoidalEmbedding(nn.Module):
     The table is built once at construction and never trained:
 
     ```
-        positions p = 0 … L-1          feature pairs i = 0 … d_model/2-1
+        positions p = 0 … seq_length-1     feature pairs i = 0 … d_model/2-1
                     │                        d_model_by_2_arr (d_model/2,)
                     │                                │
                     │        10000 ** (-2i / d_model)│
                     └────────────► outer product ◄───┘
-                                        │  angles (L, d_model/2)
+                                        │  angles (seq_length, d_model/2)
                     ┌───────────────────┴───────────────────┐
                     ▼                                       ▼
                 sin(angles)                            cos(angles)
@@ -49,7 +49,10 @@ class SinusoidalEmbedding(nn.Module):
                     ▼  even columns                         ▼  odd columns
                 pe[:, 0::2]                             pe[:, 1::2]
                     └───────────────────┬───────────────────┘
-                                        │  pe (L, d_model)
+                                        │  .pe (seq_length, d_model)
+                                        ▼
+                                     pe[0:L]                 forward reads the
+                                        │  (L, d_model)      first L rows only
     batch (B, L, d_model) ─────────────► + ──────────► (B, L, d_model)
     ```
 
@@ -118,6 +121,18 @@ class SinusoidalEmbedding(nn.Module):
             )
         return batch + self.pe[0:seq_length, :]
 
+    def at_pos(self, pos: int) -> Float[torch.Tensor, f"{D_MODEL}"]:
+        """Return the encoding vector for one position.
+
+        Raises:
+            ValueError: If `pos` is outside [0, seq_length).
+        """
+        if not 0 <= pos < self.pe.shape[0]:
+            raise ValueError(  # noqa: NAR001
+                f"position {pos} outside table of length {self.pe.shape[0]}"
+            )
+        return self.pe[pos]
+
 
 class MultiHeadAttentionLayer(nn.Module):
     """Multi-head attention: self-attention over `x`, or cross-attention to `memory`.
@@ -149,8 +164,8 @@ class MultiHeadAttentionLayer(nn.Module):
                      transpose(1, 2) + reshape          merge the heads
                                 │  (B, L, d_model)
                                 ▼
-                             @ w_o                      mix across heads
-                                │
+                             @ w_o                      (d_model, d_model),
+                                │                       mixes across heads
                                 ▼  (B, L, d_model)
     ```
 
@@ -208,8 +223,8 @@ class MultiHeadAttentionLayer(nn.Module):
 
         Args:
             mask: Passed straight to `attention`; True marks a visible key. Build
-                it with `transformer.mask.padding_keep_mask`, combined with
-                `causal_keep_mask` by `&` where needed. For cross-attention it
+                it with `transformer.masks.mask_tokenizer_pad_ids`, combined with
+                `mask_later_positions` by `&` where needed. For cross-attention it
                 masks the padding of `memory`, not of `x`. None attends
                 everywhere.
             memory: Source of keys and values, such as an encoder's output. None
@@ -250,8 +265,18 @@ class EncoderBlock(nn.Module):
     The FFN is the same two-layer MLP applied to every position independently:
 
     ```
-    (B, L, d_model) ─► Linear ─► ReLU ─► Linear ─► (B, L, d_model)
-                        d_ff = d_ff_multiplier * d_model
+    (B, L, d_model)
+          │
+          ▼
+        ffn[0]             Linear, .weight (d_ff, d_model),
+          │                d_ff = d_ff_multiplier * d_model
+          ▼  (B, L, d_ff)
+         ReLU
+          │
+          ▼
+        ffn[2]             Linear, .weight (d_model, d_ff)
+          │
+          ▼  (B, L, d_model)
     ```
 
     Pre-norm, not post-norm: `x` reaches every add untouched, so there is a
@@ -321,7 +346,7 @@ class EncoderBlock(nn.Module):
         Args:
             batch: Token embeddings.
             pad_mask: Passed through to the attention sublayer; True marks a
-                visible key. Build it with `transformer.mask.padding_keep_mask`.
+                visible key. Build it with `transformer.masks.mask_tokenizer_pad_ids`.
                 None attends everywhere.
 
         Returns:
@@ -369,9 +394,9 @@ class DecoderBlock(nn.Module):
     │  (B, L, d_model)
     ├──────────────────► ffn_norm
     │                          ▼
-    │                         ffn                         Linear ─► ReLU ─► Linear
-    │                          ▼
-    │                       dropout
+    │                         ffn                         Linear ─► ReLU ─► Linear,
+    │                          ▼                          ffn[0].weight (d_ff, d_model)
+    │                       dropout                       ffn[2].weight (d_model, d_ff)
     ▼                          │
     + ◄────────────────────────┘
     │
@@ -459,10 +484,10 @@ class DecoderBlock(nn.Module):
             x: Target embeddings.
             memory: The encoder stack's output after its final norm. The block
                 does not norm it.
-            x_mask: True marks a visible key. Build it as `causal_keep_mask &
-                padding_keep_mask` over the target ids, shape (B, 1, L, L).
+            x_mask: True marks a visible key. Build it as `mask_later_positions &
+                mask_tokenizer_pad_ids` over the target ids, shape (B, 1, L, L).
             memory_mask: True marks a visible source key. Build it with
-                `padding_keep_mask` over the source ids, shape (B, 1, 1, S).
+                `mask_tokenizer_pad_ids` over the source ids, shape (B, 1, 1, S).
                 None attends to every source position.
 
         Returns:

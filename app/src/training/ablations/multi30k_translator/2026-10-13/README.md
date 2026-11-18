@@ -68,7 +68,7 @@ padded or truncated to `seq_len=32`; the source and the target input start with
 
 ### Model
 
-[multi30k_translator.py](../../../model/multi30k_translator.py): a
+[transformer_translator.py](../../../model/transformer_translator.py): a
 source and a target embedding, dropout, one fixed sinusoidal position table, a stack
 of pre-norm `EncoderBlock`s, a norm over the encoder output, a stack of pre-norm
 `DecoderBlock`s with causal self-attention and cross-attention to the encoder, a final

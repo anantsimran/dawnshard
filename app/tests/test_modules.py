@@ -2,7 +2,7 @@ import math
 
 import pytest
 import torch
-from training.transformer.mask import padding_keep_mask
+from training.transformer.masks import mask_tokenizer_pad_ids
 from training.transformer.modules import MultiHeadAttentionLayer, SinusoidalEmbedding
 
 
@@ -37,7 +37,7 @@ def test_pad_mask_hides_padded_positions_from_real_tokens():
     torch.manual_seed(seed=0)
     layer = MultiHeadAttentionLayer(d_model=64, h=8, qk_norm=True)
     token_ids = torch.tensor([[5, 7, 9, 0]])  # noqa: NAR001
-    mask = padding_keep_mask(token_ids=token_ids, pad_id=0)
+    mask = mask_tokenizer_pad_ids(token_ids=token_ids, pad_id=0)
     x = torch.randn(1, 4, 64)  # noqa: NAR001
     x_other_pad = x.clone()
     x_other_pad[:, 3] = torch.randn(64)  # noqa: NAR001

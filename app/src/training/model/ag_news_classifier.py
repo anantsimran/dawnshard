@@ -53,8 +53,9 @@ from training.dataclass.config import EncoderConfig
 from training.dataload.ag_news import NUM_CLASSES
 from training.preprocess.constants import PAD_ID
 from training.transformer.constants import B, L
-from training.transformer.mask import pad_masked_mean, padding_keep_mask
+from training.transformer.masks import mask_tokenizer_pad_ids, masked_mean
 from training.transformer.modules import NORMS, EncoderBlock, SinusoidalEmbedding
+from training.transformer.probes import AttentionProbePerEpoch
 
 
 class AGNewsClassifier(nn.Module):
@@ -65,11 +66,14 @@ class AGNewsClassifier(nn.Module):
                             │
               ┌─────────────┴─────────────┐
               ▼                           ▼
-        padding_keep_mask             embedding          padding_idx=PAD_ID
-          (B, 1, 1, L)                    │  (B, L, d_model)
+        mask_tokenizer_pad_ids        embedding          .weight (vocab, d_model),
+          (B, 1, 1, L)                    │              padding_idx=PAD_ID
+              │                           │  (B, L, d_model)
               │                           ▼
-              │                   position_encoding      + fixed sin/cos table,
-              │                           │  (B, L, d_model)   L ≤ seq_length
+              │                   position_encoding      + .pe (seq_length, d_model),
+              │                           │              the fixed sin/cos table;
+              │                           │              L ≤ seq_length
+              │                           │  (B, L, d_model)
               │                           ▼
               │                   embedding_dropout
               │                           │
@@ -80,11 +84,11 @@ class AGNewsClassifier(nn.Module):
               │                           │                    stack is pre-norm,
               │                           │                    so its output is
               │                           │                    not normed otherwise
-              └─► [:, 0, 0, :] ─► pad_masked_mean
+              └─► [:, 0, 0, :] ─► masked_mean
                      (B, L)              │  (B, d_model)
                                          ▼
-                                       head                    Linear to 4
-                                         │
+                                       head                    Linear to 4,
+                                         │                     .weight (4, d_model)
                                          ▼  logits (B, 4)
     ```
 
@@ -106,10 +110,10 @@ class AGNewsClassifier(nn.Module):
     `embedding_dropout` so the dropout acts on the sum, as in the original
     Transformer. Pad positions get encodings too; the padding mask keeps them out.
 
-    Every `forward` overwrites `attention_map` with each block's detached attention
-    weights, `{"encoder": [(B, h, L, L) per block]}`, so it describes the most recent
-    call only. `save_attention_maps` reads it as an eval probe; nothing else may rely
-    on it surviving the next call.
+    Every `forward` overwrites `attention_maps` with an `AttentionProbePerEpoch`
+    whose only kind is `"encoder"`, one detached `(B, h, L, L)` tensor per block in
+    block order, so it describes the most recent call only. `save_attention_maps` reads it as an
+    eval probe; nothing else may rely on it surviving the next call.
 
     Output: raw logits (no softmax), as CrossEntropyLoss expects.
     """
@@ -163,7 +167,7 @@ class AGNewsClassifier(nn.Module):
             norm(normalized_shape=d_model) if model_config.final_norm else nn.Identity()
         )
         self.head = nn.Linear(in_features=d_model, out_features=NUM_CLASSES)
-        self.attention_map: dict[str, list[torch.Tensor]] = {}
+        self.attention_maps = AttentionProbePerEpoch()
 
     @jaxtyped(typechecker=beartype)
     def forward(
@@ -184,20 +188,20 @@ class AGNewsClassifier(nn.Module):
                 position table.
 
         Side effects:
-            Replaces `self.attention_map` with this call's attention weights under
-            `"encoder"`, one detached `(B, h, L, L)` tensor per block in block order.
+            Replaces `self.attention_maps` with `{"encoder": [...]}`, one detached
+            `(B, h, L, L)` tensor per block in block order.
         """
-        pad_mask = padding_keep_mask(token_ids=token_ids, pad_id=PAD_ID)
+        pad_mask = mask_tokenizer_pad_ids(token_ids=token_ids, pad_id=PAD_ID)
         hidden = self.embedding(token_ids)  # noqa: NAR001
         # Positional: nn.Identity, the no-position-encoding case, has no `batch` kwarg.
         hidden = self.position_encoding(hidden)  # noqa: NAR001
         hidden = self.embedding_dropout(hidden)  # noqa: NAR001
-        attention_map = []
+        encoder_attn = []
         for block in self.blocks:
             hidden, weights = block(batch=hidden, pad_mask=pad_mask)
-            attention_map.append(weights.detach())  # noqa: NAR001
-        self.attention_map = {"encoder": attention_map}
+            encoder_attn.append(weights.detach())  # noqa: NAR001
+        self.attention_maps = AttentionProbePerEpoch(map={"encoder": encoder_attn})
         normalized = self.final_norm(hidden)  # noqa: NAR001
         # (B, 1, 1, L) is the attention view; the pool wants (B, L).
-        pooled = pad_masked_mean(attn=normalized, mask=pad_mask[:, 0, 0, :])
+        pooled = masked_mean(attn=normalized, mask=pad_mask[:, 0, 0, :])
         return self.head(pooled)  # noqa: NAR001

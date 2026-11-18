@@ -12,7 +12,7 @@ from training.transformer.constants import D_MODEL, B, L
 
 
 @jaxtyped(typechecker=beartype)
-def padding_keep_mask(
+def mask_tokenizer_pad_ids(
     token_ids: Int[torch.Tensor, f"{B} {L}"], pad_id: int
 ) -> Bool[torch.Tensor, f"{B} 1 1 {L}"]:
     """Mark real (non-pad) key positions.
@@ -32,7 +32,7 @@ def padding_keep_mask(
 
 
 @jaxtyped(typechecker=beartype)
-def causal_keep_mask(
+def mask_later_positions(
     seq_len: int, device: torch.device | None = None
 ) -> Bool[torch.Tensor, f"1 1 {L} {L}"]:
     """Let each query see only keys at its own position or earlier.
@@ -50,7 +50,7 @@ def causal_keep_mask(
 
 
 @jaxtyped(typechecker=beartype)
-def pad_masked_mean(
+def masked_mean(
     attn: Float[torch.Tensor, f"{B} {L} {D_MODEL}"], mask: Bool[torch.Tensor, f"{B} {L}"]
 ) -> Float[torch.Tensor, f"{B} {D_MODEL}"]:
     """Average `attn` over the sequence axis, counting only real positions.

@@ -13,16 +13,16 @@ Train from the repo root, optionally naming another YAML; losses are logged to t
 terminal after every epoch:
 
     uv run python app/src/training/run/multi30ken_predictor.py
-    uv run python app/src/training/run/multi30ken_predictor.py --config my_run.yaml
+    uv run python app/src/training/run/multi30ken_predictor.py --config-path my_run.yaml
 """
 
-import argparse
 import random
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from uuid import uuid4
 
+import cyclopts
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
@@ -148,12 +148,9 @@ def build_epoch_spec(probe_dir: Path, num_sentences: int) -> EpochSpec:
     )
 
 
-def main():
-    """Train one Multi30kEnPredictor from the `--config` YAML, optionally logging to W&B."""
-    parser = argparse.ArgumentParser(description="Train one Multi30kEnPredictor.")
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)  # noqa: NAR001
-    args = parser.parse_args()
-    config = Multi30kEnPredictorTrainConfig.from_yaml(path=args.config)
+def main(config_path: Path = DEFAULT_CONFIG_PATH):
+    """Train one Multi30kEnPredictor from the YAML at `config_path`, optionally logging to W&B."""
+    config = Multi30kEnPredictorTrainConfig.from_yaml(path=config_path)
     SHOULD_LOG_WANDB: bool = False
     wandb_run = None
     if SHOULD_LOG_WANDB:
@@ -204,4 +201,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    cyclopts.run(main)  # noqa: NAR001

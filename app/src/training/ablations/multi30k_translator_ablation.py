@@ -1,7 +1,7 @@
 """
 multi30k_translator_ablation.py
-Component, LR-schedule, and source-language ablation of `Multi30kTranslator` (see
-model.multi30k_translator for the model), a `grid_search` (from ablations.setup)
+Component, LR-schedule, and source-language ablation of `TransformerTranslator` (see
+model.transformer_translator for the model), a `grid_search` (from ablations.setup)
 over a list of `Multi30kTranslatorTrainConfig`s.
 
 ABLATION_REFERENCE is `ablations/multi30k_translator.yaml` under CONFIGS_PATH, pinned
@@ -29,12 +29,12 @@ terminal after every epoch, and the ranked results once every config has finishe
     uv run python app/src/training/ablations/multi30k_translator_ablation.py scale
 """
 
-import argparse
 from dataclasses import replace
 from functools import cache, partial
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
+import cyclopts
 import torch
 from loguru import logger
 from torch.utils.data import DataLoader
@@ -45,7 +45,7 @@ from training.dal.dao.sqlite_dao import SqliteDao
 from training.dataclass.model import TrainState
 from training.dataload.constants import CACHE_PATH
 from training.preprocess.tokenizer import Tokenizer
-from training.run.multi30k_translator import (
+from training.run.multi30k_translator.setup import (
     Multi30kTranslatorTrainConfig,
     build_epoch_spec,
     build_loaders,
@@ -236,23 +236,17 @@ def train_best(cache: Dao) -> None:
     )
 
 
-def main():
+# The Literal repeats STUDIES' keys because a type cannot be built from a dict; a study
+# missing from it is rejected on the command line.
+def main(study: Literal["ablation", "scale", "best"] = "ablation"):
     """Run the study named on the command line: every arm, ABLATION_SEEDS times each,
     in the order STUDIES lists them. "best" runs `train_best` instead."""
-    parser = argparse.ArgumentParser(description="Run one Multi30kTranslator study.")
-    parser.add_argument(  # noqa: NAR001
-        "study",
-        nargs="?",
-        default="ablation",
-        choices=list(STUDIES) + ["best"],  # noqa: NAR001
-    )
-    args = parser.parse_args()
     with SqliteDao(path=CACHE_PATH) as cache:
-        if args.study == "best":
+        if study == "best":
             train_best(cache=cache)
             return
         grid_search(
-            configs=STUDIES[args.study],
+            configs=STUDIES[study],
             get_loaders=lambda config: _loaders_for(config=config, cache=cache),
             build_train_state=_state_for,
             build_epoch_spec=partial(build_epoch_spec, num_sentences=PROBE_SENTENCES),  # noqa: NAR001
@@ -260,4 +254,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    cyclopts.run(main)  # noqa: NAR001

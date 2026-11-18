@@ -3,7 +3,7 @@
 The [width-128 translator ablation](../2026-10-13/README.md) found no clear schedule
 effect. This follow-up
 compares 9 arms over 25 epochs with 3 seeds each, widening the
-`Multi30kTranslator` and changing schedules, depth, and dropout. Width 256 improves
+`TransformerTranslator` and changing schedules, depth, and dropout. Width 256 improves
 mean best validation loss by 0.056 over the earlier 128 control. At width 256, warmup
 plus cosine improves it by another 0.034 over the new control. At width 512, a
 constant learning rate performs worse; warmup helps, but its best loss still trails
@@ -78,7 +78,7 @@ DE merges files, so their val losses compare directly.
 
 ### Model
 
-[multi30k_translator.py](../../../model/multi30k_translator.py). The
+[transformer_translator.py](../../../model/transformer_translator.py). The
 control is the 128 study's control at `d_model=256`: 6 encoder and 6 decoder blocks, 4
 heads, an FFN 6× `d_model` wide, dropout 0.1, QK norm on, and LayerNorm. Most of the
 parameters are in the embeddings and the output head: 7.9M of the control's 22.1M,

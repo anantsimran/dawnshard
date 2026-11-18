@@ -1,16 +1,16 @@
 # Multi30kTranslatorTrainConfig, read by run/multi30k_translator.py.
 model:
-  d_model: 512
+  d_model: 256
   # The loader pads both sides to one length, so the two seq_lengths must match.
-  src: {seq_length: 32, dropout: 0.3}
-  tgt: {seq_length: 32, dropout: 0.3}
+  src: {seq_length: 32, dropout: 0.1}
+  tgt: {seq_length: 32, dropout: 0.1}
   num_encoders: 6
   num_decoders: 6
   # The two stacks use the same block; the config allows them to differ.
   encoder: &block
-    attention: {h: 4, qk_norm: false}
+    attention: {h: 4, qk_norm: true}
     ffn_multiplier: 6
-    dropout: 0.3
+    dropout: 0.1
     norm: layernorm
   decoder: *block
 fit:
@@ -21,6 +21,6 @@ fit:
   test_seed: 2000000
 optimizer: {name: adam, lr: 0.001}
 # Leave it out to train at a constant learning rate.
-scheduler: {name: cosine}
+scheduler: {name: warmup_cosine}
 dataloader: {batch_size: 64}
 data: {src_lang: en, tgt_lang: de, bpe_num_merges: 10000}

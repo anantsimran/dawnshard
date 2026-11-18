@@ -21,7 +21,9 @@ def test_forward_returns_one_row_per_position():
     model = Multi30kEnPredictor(model_config=_config(), vocab_size=VOCAB).eval()
     ids = torch.randint(low=0, high=VOCAB, size=(3, SEQ_LEN))
     assert model(ids).shape == (3 * SEQ_LEN, VOCAB)
-    assert len(model.attention_map["encoder"]) == 2  # noqa: NAR001
+    assert {kind: len(blocks) for kind, blocks in model.attention_maps.map.items()} == {
+        "encoder": 2
+    }
 
 
 def test_switched_off_components_become_identity():

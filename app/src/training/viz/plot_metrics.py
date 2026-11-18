@@ -5,7 +5,6 @@ One panel per metric. A metric recorded for both splits, as `train_loss` and
 with a train line and a val line, so the gap between them is the plot.
 """
 
-import argparse
 import base64
 import io
 import json
@@ -13,6 +12,7 @@ import math
 import webbrowser
 from pathlib import Path
 
+import cyclopts
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
@@ -90,17 +90,16 @@ def metric_series(history: list[dict]) -> dict[str, dict[str, list[tuple[int, fl
     }
 
 
-def main():
+def main(history_file: Path):
     """CLI entry point: plot metrics from a history file and open the result.
 
     Writes the chart to `/tmp/plot_metrics.html` and opens it in the default
     browser.
-    """
-    parser = argparse.ArgumentParser(description="Plot training metrics from a history JSON file.")
-    parser.add_argument("history_file", type=Path, help="Path to history JSON file.")  # noqa: NAR001
-    args = parser.parse_args()
 
-    series = metric_series(history=load_history(history_path=args.history_file))
+    Args:
+        history_file: Path to history JSON file.
+    """
+    series = metric_series(history=load_history(history_path=history_file))
 
     num_rows = math.ceil(len(series) / PANEL_COLUMNS)  # noqa: NAR001
     fig, axes = plt.subplots(
@@ -131,4 +130,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    cyclopts.run(main)  # noqa: NAR001

@@ -11,16 +11,16 @@ Train from the repo root, optionally naming another YAML; losses are logged to t
 terminal after every epoch:
 
     uv run python app/src/training/run/ag_news_classifier.py
-    uv run python app/src/training/run/ag_news_classifier.py --config my_run.yaml
+    uv run python app/src/training/run/ag_news_classifier.py --config-path my_run.yaml
 """
 
-import argparse
 import random
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from uuid import uuid4
 
+import cyclopts
 import torch
 from torch import nn
 from training.constants import ATTENTION_PROBES_PATH, CONFIGS_PATH, HISTORY_PATH
@@ -45,7 +45,7 @@ from training.transformer.probes import save_attention_maps
 from training.viz.attention_heatmap import plot_attention_probes
 
 DEFAULT_CONFIG_PATH = CONFIGS_PATH / "ag_news_classifier.yaml"
-PROBE_SENTENCES = 4
+PROBE_SENTENCES = 16
 
 
 @dataclass(frozen=True)
@@ -65,12 +65,9 @@ class AGNewsClassifierTrainConfig(TrainConfig):
     data: AGNewsDataConfig
 
 
-def main():
-    """Train one AGNewsClassifier from the `--config` YAML, optionally logging to W&B."""
-    parser = argparse.ArgumentParser(description="Train one AGNewsClassifier.")
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)  # noqa: NAR001
-    args = parser.parse_args()
-    config = AGNewsClassifierTrainConfig.from_yaml(path=args.config)
+def main(config_path: Path = DEFAULT_CONFIG_PATH):
+    """Train one AGNewsClassifier from the YAML at `config_path`, optionally logging to W&B."""
+    config = AGNewsClassifierTrainConfig.from_yaml(path=config_path)
     data = config.data
     SHOULD_LOG_WANDB: bool = False
     wandb_run = None
@@ -159,4 +156,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    cyclopts.run(main)  # noqa: NAR001

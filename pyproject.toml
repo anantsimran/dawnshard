@@ -14,6 +14,7 @@ dependencies = [
     "sortedcontainers",
     "regex",
     "pyyaml",
+    "cyclopts>=5.5.1",
 ]
 
 [dependency-groups]

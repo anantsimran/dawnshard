@@ -10,4 +10,6 @@ S = "S"  # key/value length; equals L in self-attention
 D_MODEL = "d_model"  # embedding width
 H = "h"  # attention heads
 D_K = "d_k"  # width per head, d_model // h
+D_FF = "d_ff"  # FFN hidden width, d_ff_multiplier * d_model
+SEQ_LENGTH = "seq_length"  # rows of a position table, the longest L it accepts
 V = "vocab"  # vocabulary size, logits per position

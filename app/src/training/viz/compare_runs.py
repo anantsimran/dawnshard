@@ -1,12 +1,12 @@
 """Compare per-epoch metrics from two training runs on the same graph."""
 
-import argparse
 import base64
 import io
 import json
 import webbrowser
 from pathlib import Path
 
+import cyclopts
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
@@ -31,28 +31,21 @@ def load_history(history_path: Path) -> list[dict]:
     return data["history"]
 
 
-def main():
+def main(history_file_a: Path, history_file_b: Path):
     """CLI entry point: plot shared metrics from two history files and open the result.
 
     Writes the comparison chart to `/tmp/compare_runs.html` and opens it in the
     default browser.
+
+    Args:
+        history_file_a: Path to first history JSON file.
+        history_file_b: Path to second history JSON file.
     """
-    parser = argparse.ArgumentParser(
-        description="Compare metrics from two training history JSON files."
-    )
-    parser.add_argument(  # noqa: NAR001
-        "history_file_a", type=Path, help="Path to first history JSON file."
-    )
-    parser.add_argument(  # noqa: NAR001
-        "history_file_b", type=Path, help="Path to second history JSON file."
-    )
-    args = parser.parse_args()
+    history_a = load_history(history_path=history_file_a)
+    history_b = load_history(history_path=history_file_b)
 
-    history_a = load_history(history_path=args.history_file_a)
-    history_b = load_history(history_path=args.history_file_b)
-
-    label_a = args.history_file_a.stem
-    label_b = args.history_file_b.stem
+    label_a = history_file_a.stem
+    label_b = history_file_b.stem
 
     numeric_keys_a = {
         key
@@ -126,4 +119,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    cyclopts.run(main)  # noqa: NAR001

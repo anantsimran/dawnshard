@@ -1,37 +1,34 @@
 """
-multi30k_translator.py
-Train one `Multi30kTranslator` (see model.multi30k_translator) from a YAML config.
+setup.py
+Build a `TransformerTranslator` run (see model.transformer_translator): its config
+types, its loaders, its `TrainState`, and its `EpochSpec`.
 
-`Multi30kTranslatorTrainConfig` is the YAML's shape, and `multi30k_translator.yaml`
-under CONFIGS_PATH is the default. Each side's tokenizer is
+`Multi30kTranslatorTrainConfig` is the YAML's shape. Each side's tokenizer is
 `multi30k-{lang}-{bpe_num_merges}.json` under TOKENIZERS_PATH: the first run trains and
 writes it, and later runs load it. `build_loaders`, `build_train_state`, and
-`build_epoch_spec` are shared with `ablations/multi30k_translator_ablation.py`, so a
-study arm is built exactly as a single run is.
+`build_epoch_spec` are shared by `main.py` beside this file and by
+`ablations/multi30k_translator_ablation.py`, so a study arm is built exactly as a
+single run is.
 
-Train from the repo root, optionally naming another YAML; losses are logged to the
-terminal after every epoch:
-
-    uv run python app/src/training/run/multi30k_translator.py
-    uv run python app/src/training/run/multi30k_translator.py --config my_run.yaml
+`load_transformer` restores the best run so far for inference or fine-tuning:
+BEST_TRANSLATOR_CHECKPOINT_PATH holds its weights, and BEST_TRANSLATOR_CONFIG_PATH,
+beside them, the config it was trained with, so the model's own YAML can change
+freely.
 """
 
-import argparse
 import random
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from uuid import uuid4
 
-import torch
 from torch import nn
 from torch.utils.data import DataLoader
-from training.constants import ATTENTION_PROBES_PATH, CONFIGS_PATH, HISTORY_PATH
+from training.constants import ATTENTION_PROBES_PATH
 from training.dal.dao.dao import Dao
-from training.dal.dao.sqlite_dao import SqliteDao
 from training.dataclass.config import DataloadConfig, TrainConfig, TransformerConfig
 from training.dataclass.model import EpochSpec, TrainState
-from training.dataload.constants import CACHE_PATH, TOKENIZERS_PATH
+from training.dataload.constants import TOKENIZERS_PATH
 from training.dataload.multi30k import get_multi30k_texts, get_multi30k_translation_dataloader
 from training.metrics.masked_token_metrics import (
     MaskedTokenMetrics,
@@ -39,16 +36,13 @@ from training.metrics.masked_token_metrics import (
     calculate_metrics,
     reduce_metrics,
 )
-from training.model.multi30k_translator import Multi30kTranslator
+from training.model.transformer_translator import TransformerTranslator
 from training.preprocess.tokenizer import Tokenizer, get_tokenizer
-from training.setup import DEVICE, init_wandb
-from training.train.checkpoint import save_history
+from training.setup import DEVICE
+from training.train.checkpoint import load
 from training.train.optim import build_optimizer, build_scheduler
-from training.train.train_loop import fit
 from training.transformer.probes import save_attention_maps
-from training.viz.attention_heatmap import plot_attention_probes
 
-DEFAULT_CONFIG_PATH = CONFIGS_PATH / "multi30k_translator.yaml"
 PROBE_SENTENCES = 20
 
 
@@ -126,7 +120,7 @@ def build_train_state(
         Initializing the weights draws from the global torch RNG, so seed it first
         for the init to repeat.
     """
-    model = Multi30kTranslator(
+    model = TransformerTranslator(
         model_config=config.model,
         src_vocab_size=src_vocab_size,
         tgt_vocab_size=tgt_vocab_size,
@@ -168,26 +162,39 @@ def build_epoch_spec(probe_dir: Path, num_sentences: int) -> EpochSpec:
     )
 
 
-def main():
-    """Train one Multi30kTranslator from the `--config` YAML, optionally logging to W&B."""
-    parser = argparse.ArgumentParser(description="Train one Multi30kTranslator.")
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)  # noqa: NAR001
-    args = parser.parse_args()
-    config = Multi30kTranslatorTrainConfig.from_yaml(path=args.config)
-    SHOULD_LOG_WANDB: bool = False
-    wandb_run = None
-    if SHOULD_LOG_WANDB:
-        wandb_run = init_wandb(project="dawnshard", run_name="multi30k_translator")
-    with SqliteDao(path=CACHE_PATH) as cache:
-        train_loader, val_loader, tokenizers = build_loaders(
-            dataload_config=config.data,
-            seq_len=loader_seq_len(model_config=config.model),
-            batch_size=config.dataloader.batch_size,
-            cache=cache,
+def load_transformer(
+    config_path: Path,
+    checkpoint_path: Path,
+) -> tuple[TrainState, EpochSpec, Multi30kTranslatorTrainConfig, tuple[Tokenizer, Tokenizer]]:
+    """Return a trained TransformerTranslator, ready to translate or fine-tune.
+
+    Nothing is seeded: the weights come from the checkpoint, so the global torch RNG
+    is left as it is, and the returned config's `fit.train_seed` does not reproduce
+    them. It is filled in, if the YAML lacks one, along with a fresh `fit.run_uuid`,
+    because `fit` needs both to fine-tune. The uuid is always new, so a fine-tune
+    checkpoints into its own folder and never overwrites the source run's.
+
+    Args:
+        config_path: The config `checkpoint_path` was trained with. Pass the two
+            together; the defaults are the best run so far.
+
+    Returns:
+        The restored state, its model in train mode as `build_train_state` leaves
+        it, so a caller that translates sets `eval()`; the epoch spec, whose probe
+        writes under the new run uuid; the resolved config, for `fit`; and the source
+        and target tokenizers, for encoding input and decoding output.
+
+    Raises:
+        FileNotFoundError: If either side's tokenizer file is missing. It is only
+            loaded here, never trained, because the checkpoint's vocab must match.
+    """
+    config = Multi30kTranslatorTrainConfig.from_yaml(path=config_path)
+    src_tokenizer, tgt_tokenizer = (
+        get_tokenizer(
+            merges_path=TOKENIZERS_PATH / f"multi30k-{lang}-{config.data.bpe_num_merges}.json",
         )
-    # Fresh per run unless the YAML pins one, so no single lucky draw is trained on
-    # forever; the history file records it, so a run can be repeated by putting its
-    # recorded seed in the YAML.
+        for lang in (config.data.src_lang, config.data.tgt_lang)
+    )
     train_seed = config.fit.train_seed
     if train_seed is None:
         train_seed = random.getrandbits(32)  # noqa: NAR001
@@ -196,10 +203,6 @@ def main():
         config,
         fit=replace(config.fit, train_seed=train_seed, run_uuid=run_uuid),  # noqa: NAR001
     )
-    # fit reseeds from it, but only after the model exists; seed here so weight init
-    # uses the recorded seed too. See the README on what the rewind implies.
-    torch.manual_seed(seed=train_seed)
-    src_tokenizer, tgt_tokenizer = tokenizers
     state = build_train_state(
         config=config,
         src_vocab_size=len(src_tokenizer.vocab),  # noqa: NAR001
@@ -208,27 +211,5 @@ def main():
     epoch_spec = build_epoch_spec(
         probe_dir=ATTENTION_PROBES_PATH / run_uuid, num_sentences=PROBE_SENTENCES
     )
-    history = fit(
-        state=state,
-        epoch_spec=epoch_spec,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        fit_config=config.fit,
-        wandb_run=wandb_run,
-    )
-    save_history(
-        history=history,
-        history_path=HISTORY_PATH / f"{run_uuid}.json",
-        train_state=state,
-        epoch_spec=epoch_spec,
-        train_config=config,
-    )
-    plot_attention_probes(
-        probe_dir=ATTENTION_PROBES_PATH / run_uuid,
-        vocab=src_tokenizer.vocab,
-        tgt_vocab=tgt_tokenizer.vocab,
-    )
-
-
-if __name__ == "__main__":
-    main()
+    load(state=state, epoch_spec=epoch_spec, checkpoint_path=checkpoint_path)
+    return state, epoch_spec, config, (src_tokenizer, tgt_tokenizer)

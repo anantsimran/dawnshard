@@ -21,7 +21,7 @@ Pickle saves an object's data plus the name of its class, never the class's code
 ### What pickle does
 
 When `torch.save` writes an object, pickle records two things: a pointer to the class,
-like `training.model.multi30k_translator.Multi30kTranslator`, and the object's
+like `training.model.transformer_translator.TransformerTranslator`, and the object's
 attributes. When loading, pickle imports that path, creates an empty object without
 calling `__init__`, and copies the saved attributes onto it.
 
@@ -34,7 +34,7 @@ from whatever code exists when you load. Loading breaks when:
 - You change the attributes. Say you add a submodule in `__init__` later: the old pickle
   doesn't have it, and `forward` crashes with an `AttributeError`.
 - You trained by running the file directly. That's how your `main` runs, so the class is
-  recorded as `__main__.Multi30kTranslator`. Loading from any other script fails.
+  recorded as `__main__.TransformerTranslator`. Loading from any other script fails.
 
 It's also unsafe. Pickle can be made to call any function while loading, so opening an
 untrusted `.pt` file can run arbitrary code.
@@ -50,7 +50,7 @@ the recipe. The recipe has two parts:
 Config, commit hash, and `state_dict` recreate the model exactly. If you want the model
 to run without your Python class at all, use `torch.export`, which saves the computation
 graph with the weights. That's a deployment step, though, and your `beartype` decorators
-and the `attention_map` side effect may get in its way.
+and the `attention_maps` side effect may get in its way.
 
 ______________________________________________________________________
 
@@ -117,7 +117,7 @@ ______________________________________________________________________
 
 Creating an object normally takes two steps, and unpickling does only the first.
 
-Normal creation. `Multi30kTranslator(...)` first calls `__new__`, which allocates a blank
+Normal creation. `TransformerTranslator(...)` first calls `__new__`, which allocates a blank
 object with no attributes. Then it calls `__init__` on that object, and your code runs:
 it builds `self.dropout`, both embeddings, the encoder and decoder stacks, and
 `self.pred`, fills the weights with random values, and checks that `d_model` divides
@@ -126,7 +126,7 @@ evenly by the head count.
 Unpickling. Pickle calls `__new__` to get the blank object and skips `__init__`
 completely. Then it copies the saved attributes straight onto the object: the submodules
 (each unpickled the same way), the parameter tensors, `src_seq_length`, the `training`
-flag, `attention_map`, and so on. None of your `__init__` lines run, so the object ends
+flag, `attention_maps`, and so on. None of your `__init__` lines run, so the object ends
 up looking like it went through `__init__` only because the saved attributes say so.
 
 Why that causes trouble. Anything `__init__` would do today doesn't happen. Suppose you
@@ -137,7 +137,7 @@ crashes. Checks in `__init__` also don't run on load. `nn.Module` does patch in 
 PyTorch's own internal attributes when unpickling an older file, but none of yours.
 
 The `state_dict` route works the other way round. You call
-`Multi30kTranslator(**config)` yourself, so the current `__init__` runs: it builds every
+`TransformerTranslator(**config)` yourself, so the current `__init__` runs: it builds every
 layer from today's code, fills random weights, and runs its checks. Then
 `load_state_dict` overwrites those random values with the saved tensors. The structure
 comes from current code and only the numbers come from the file. That's why a mismatch is
@@ -152,24 +152,24 @@ This comes from how Python names modules, and it only bites if you pickle the wh
 model.
 
 Every class records which module defined it. It's stored in
-`Multi30kTranslator.__module__`, and pickle saves that string plus the class name.
+`TransformerTranslator.__module__`, and pickle saves that string plus the class name.
 
 A file you run directly isn't called by its path. When you run
-`uv run python app/src/training/model/multi30k_translator.py`, Python loads that file as
-a module named `__main__`, not `training.model.multi30k_translator`. That's also why
-`if __name__ == "__main__":` works. So during that run, `Multi30kTranslator.__module__`
+`uv run python app/src/training/model/transformer_translator.py`, Python loads that file as
+a module named `__main__`, not `training.model.transformer_translator`. That's also why
+`if __name__ == "__main__":` works. So during that run, `TransformerTranslator.__module__`
 is `"__main__"`, and `torch.save(model)` records the class as
-`__main__.Multi30kTranslator`.
+`__main__.TransformerTranslator`.
 
 Loading from another script then fails. Say you later write `translate.py` and call
 `torch.load` there. Pickle looks up `__main__`, but now `__main__` is `translate.py`,
-which has no `Multi30kTranslator`. You get PyTorch's well-known error:
-`Can't get attribute 'Multi30kTranslator' on <module '__main__'>`. The same thing happens
-in a notebook. Running with `python -m training.model.multi30k_translator` doesn't help,
+which has no `TransformerTranslator`. You get PyTorch's well-known error:
+`Can't get attribute 'TransformerTranslator' on <module '__main__'>`. The same thing happens
+in a notebook. Running with `python -m training.model.transformer_translator` doesn't help,
 because `-m` also names the module `__main__`.
 
 The usual hack is to import the class into the loading script. That puts the name
-`Multi30kTranslator` into that script's `__main__`, so the lookup happens to succeed. It
+`TransformerTranslator` into that script's `__main__`, so the lookup happens to succeed. It
 works, but only by accident.
 
 Only the top-level class is affected. `EncoderBlock`, `DecoderBlock`, and
@@ -215,7 +215,7 @@ flat list of low-level torch operations (`matmul`, `softmax`, `add`, and so on),
 weights attached.
 
 You save it with `torch.export.save` to a `.pt2` file and load it with
-`torch.export.load`. What you get back is callable, and your `Multi30kTranslator` source
+`torch.export.load`. What you get back is callable, and your `TransformerTranslator` source
 isn't needed. It's meant for deployment: compiling the model ahead of time, running it
 from C++, or on mobile.
 
@@ -225,7 +225,7 @@ primitives such as `int` and `float` are hardcoded unless you use `SymInt`. And
 `torch.export` may fail on untraceable code, requiring rewrites or extra information
 (unlike `torch.compile`'s fallback).
 
-### Why might `beartype` and `attention_map` get in the way of export?
+### Why might `beartype` and `attention_maps` get in the way of export?
 
 Both are things your `forward` does that aren't tensor math. No documentation was found
 on how export handles either specifically, so this is a likely outcome, not something
@@ -237,7 +237,7 @@ that was checked.
   through that Python or run it once at export time. The shape comparisons can make
   export hardcode your batch size and sequence length into the graph, or fail outright.
   The usual fix is to turn the checks off while exporting.
-- `attention_map`. `forward` stores a Python dict on `self` as a side effect. An exported
+- `attention_maps`. `forward` stores an `AttentionProbePerEpoch` dataclass on `self` as a side effect. An exported
   program is a pure function: inputs go in, outputs come out. A side effect on a regular
   Python attribute has nowhere to live in that graph, so export either errors or silently
   drops it, and the exported model would have no attention maps. The fix is to return the

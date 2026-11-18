@@ -262,7 +262,7 @@ ______________________________________________________________________
 | Which masks do the encoder and decoder use, and why? | [Attention Masks › masks](transformer.md#q-explain-the-masks-used-in-the-encoder-and-decoder-why-are-they-set-up-this-way) |
 | What does a causal mask look like, and what does each row predict? | [Attention Masks › causal mask](transformer.md#q-draw-a-causal-mask-does-the-position-predicting-t1-see-only-bos) |
 | A position can see its own token. Why can't it copy the answer? | [Attention Masks › copying](transformer.md#q-row-le-can-see-itself-can-it-copy-the-answer) |
-| How does `padding_keep_mask` work? | [Attention Masks › `padding_keep_mask`](transformer.md#q-i-cant-get-past-the-syntax-of-padding_keep_mask) |
+| How does `mask_tokenizer_pad_ids` work? | [Attention Masks › `mask_tokenizer_pad_ids`](transformer.md#q-i-cant-get-past-the-syntax-of-mask_tokenizer_pad_ids) |
 | `~keep`, `masked_fill`, and `-inf` | [Attention Masks › `masked_fill`](transformer.md#q-what-do-keep-masked_fill-and-float-inf-each-do) |
 | Does `-inf` work on Mac MPS? | [Attention Masks › MPS](transformer.md#q-does-float-inf-work-on-mac-mps) |
 | What does LayerNorm do? | [Pre-Norm vs. Post-Norm › What Layer Normalization Does](transformer.md#what-layer-normalization-does) |

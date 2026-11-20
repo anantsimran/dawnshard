@@ -1,11 +1,10 @@
 import torch
-
+from training.dataclass.model import Metrics
 from training.metrics.loss_only_metrics import (
     accumulate_metrics,
     calculate_metrics,
     reduce_metrics,
 )
-from training.dataclass.model import Metrics
 
 
 def test_calculate_metrics_returns_empty_batch_metrics():

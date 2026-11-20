@@ -1689,6 +1689,13 @@ and a smaller width. For `32` layers, batch `1`, `4096` cached tokens,
 A 7B BF16 model therefore needs more than its `14 GB` of weights, even before
 temporary buffers and allocator overhead. The source article's `1.2 × weight memory` rule of thumb can miss a large cache at long context or high batch size.
 
+The [KV caching report](../../app/src/training/ablations/reports/kv_cache_timing.md)
+checks this formula on the repo's Multi30k translator, an encoder-decoder. Its
+decoder caches cross-attention keys and values for the source as well, so one
+translation allocates 384 KiB for 32 target positions and 132 KiB for an
+11-token source, as the formula predicts. The same report measures the time the
+cache saves.
+
 ### A Worked Training Budget
 
 Training keeps more than weights. Use this **specific** mixed-precision Adam

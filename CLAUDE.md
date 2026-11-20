@@ -1,5 +1,13 @@
 # CLAUDE.md
 
+## Code Ownership
+
+This codebase is yours: what it's for and how it's built are your call, and you'll keep building on it.
+
+- **Work as the owner.** In the code your task touches, merge duplicate code, fix bugs you find, and improve structure when it gets in the way. Do not add a new function beside an old one that does the same job.
+- **Stay scoped.** Report issues you notice in unrelated files rather than fixing them unprompted.
+- **Respect guardrails.** The user still sets product decisions and task goals. Ask for confirmation before running destructive, hard-to-reverse, or outward-facing actions (like pushing code or opening PRs).
+
 ## Named-argument linting
 
 All function calls must use keyword arguments. A custom checker (`scripts/check_named_args.py`) enforces this as part of `make precheck`.
@@ -54,7 +62,7 @@ Write the class docstring in this order:
 - Data flows top to bottom. Annotate each wire with the shape it carries (`│  (B, L, d_model)`), and put commentary in a right-hand column (`padding_idx=PAD_ID`, `RMSNorm over d_k, only if qk_norm`).
 - Name the actual attributes and functions the diagram stands for — `embedding_dropout`, `masked_mean`, `@ w_o` — so the diagram can be grepped against the code.
 - Shapes use the axis vocabulary in [transformer/constants.py](app/src/training/transformer/constants.py): B, L, d_model, h, d_k. A new axis goes in that table first.
-- Fence it with triple backticks inside the docstring, and keep every line inside the 88-character limit. `ruff format` does not reflow docstrings, so this is on you — and count **characters**, not bytes: `awk 'length > 88'` reports every box-drawing character as three and will lie to you.
+- Fence it with triple backticks inside the docstring, and keep every line inside the 100-character limit. `ruff format` does not reflow docstrings, so this is on you — and count **characters**, not bytes: `awk 'length > 100'` reports every box-drawing character as three and will lie to you.
 
 ### The methods
 
@@ -74,7 +82,7 @@ A dataset or model belongs in exactly three places: its own module (`dataload/<n
 
 ## Line length
 
-The project enforces an 88-character line limit (configured in `pyproject.toml`). `ruff format` (run by `make precheck`) handles most wrapping automatically, but **cannot** split lines that contain `# noqa` comments or long string literals — those must be wrapped manually.
+The project enforces a 100-character line limit (configured in `pyproject.toml`). `ruff format` (run by `make precheck`) handles most wrapping automatically, but **cannot** split lines that contain `# noqa` comments or long string literals — those must be wrapped manually.
 
 The standard pattern is to open a parenthesis and move the `# noqa` to that first line:
 
@@ -333,7 +341,7 @@ The AG News data notes live in the module docstring of `app/src/training/model/a
 These choices are intentional, even where they look like bugs. Don't "fix" them without asking:
 
 - **Training loop:** there is no `Trainer` class. State (`TrainState`), policy (`EpochSpec`), and functions (`fit`, `run_epoch`, `train_step`, `eval_step`) stay separate. `fit` calls `checkpoint` after every validation pass, into `CHECKPOINTS_PATH / run_uuid / epoch_N.pt`; the history file is written by the caller through `save_history`. Neither is a lifecycle hook.
-- **Attention:** `attention` works on pre-split heads and returns `(out, weights)`. Masks are boolean, and `True` means keep. Padding masks hide key columns only, never whole query rows, because a fully masked row turns into NaN after softmax.
+- **Attention:** `attention` works on pre-split heads and returns `(out, weights)`. Masks are boolean, and `True` means keep. Padding masks hide key columns only, never whole query rows, because a fully masked row turns into NaN after softmax. The decoder KV cache (`KVCache`, `DecoderBlockCache`) is allocated by the decode loop and passed in on every step; the layers write into it and keep nothing on `self`. A decoder block accepts `x_mask=None` only for a single cached position, which may read every cached key.
 - **Caching (`app/src/training/dal/`):** a loader or tokenizer step is cached only when the caller opens a `Dao` and passes it down; with `cache=None` everything computes and nothing is stored. Bump the `version` of a `@cached` function whenever its output for the same arguments changes, including a bug fix in it or in anything it calls (the preprocessor, the download filter, CSV parsing). The key never sees code, so an unbumped fix keeps serving stale results. A change to the ids `encode` produces bumps `__version__` in `preprocess/bpe/tokenizer.py`, which changes every `tokenizer_id`, so no cached encoding is served for the old ids. Tokenizers are not in the `Dao`: `get_tokenizer` keeps each one's merges in a JSON file identified by its path alone, not by the texts it trained on, so rename or delete the file after changing those texts. The tokenizer does not hold a `Dao`; the caller passes one to `encode`. Pickled values tie the cache to class layout, so renaming `Multi30kTexts` needs a version bump.
 - **BPE (`app/src/training/preprocess/bpe/`: `tokenizer.py`, `train.py`, `encode.py`, `decode.py`, chunking in `gpt4_preprocessor.py`):** `preprocess` turns all whitespace into a single space, so the round trip through `encode`, `decode`, and `to_text` is lossy. `preprocess` splits text with the GPT-4 (`cl100k_base`) pattern and merges never cross a chunk; a leading space or symbol joins the next word, and numbers split into runs of at most 3 digits. Overlapping runs merge left to right (`aaa` → `aa` + `a`), and equal pair counts break toward the smaller `(first_id, second_id)`. The six protected ids (`PAD_ID = 256`, then `MASK_ID`, `CLS_ID`, `SEP_ID`, `BOS_ID`, `EOS_ID`) live in `preprocess/constants.py` and sit between the byte ids and the merge ids, so they don't move when `num_merges` changes. `FIRST_MERGE_ID` is derived in `preprocess/constants.py` as `256 + len(PROTECTED_IDS)`. Each `BpeTokenizer` has a `tokenizer_id`, the sha256 of `__version__` and its merges, and `encode` caches by it. Callers type against the `Tokenizer` protocol in `preprocess/tokenizer.py` (text in, text out); only BPE-specific code imports `bpe/`. Training is deterministic, so the first k merges of a run are what a run with `num_merges=k` learns.
 - **AG News (`app/src/training/dataload/ag_news.py`):** the tokenizer trains on train rows only, and the caller trains it (the loader takes one). The sampled rows are cached by `n_*` and `seed`, so changing either samples afresh. The DataLoaders use no worker processes, because the data is already tokenized in memory.

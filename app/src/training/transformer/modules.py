@@ -1,19 +1,21 @@
 """Transformer building blocks: position encodings, attention, encoder and decoder.
 
 Shapes use the axis vocabulary in this package's README: B batch, L sequence
-length, d_model embedding width, h heads, d_k = d_model // h. The same README
+length, S key length, T cached key length, d_model embedding width, h heads,
+d_k = d_model // h. The same README
 explains how the blocks name their norms (before each sublayer) and dropouts
 (after it).
 """
 
 import math
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
 from beartype import beartype
 from jaxtyping import Bool, Float, jaxtyped
 from torch import nn
-from training.transformer.constants import D_MODEL, B, H, L, S
+from training.transformer.constants import D_MODEL, B, H, L, S, T
 from training.transformer.functions import attention
 
 # A config names its norm as a string, not the class, so it reads the same in a log
@@ -134,6 +136,44 @@ class SinusoidalEmbedding(nn.Module):
         return self.pe[pos]
 
 
+@dataclass
+class KVCache:
+    """One attention layer's keys and values for one decode, filled from the front.
+
+    The caller allocates the buffers and passes the cache to the layer on every
+    step, so the layer itself still keeps nothing between calls.
+
+    Attributes:
+        k: Key buffer, (B, h, capacity, d_k). Rows from `length_filled` on hold
+            nothing yet. A cross-attention cache's capacity must equal S.
+        v: Value buffer, the same shape as `k`.
+        length_filled: How many rows of `k` and `v` hold real keys and values.
+    """
+
+    k: torch.Tensor
+    v: torch.Tensor
+    length_filled: int = 0
+
+    def append(self, k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Write `k` and `v` after the filled rows, then return every filled row.
+
+        Raises:
+            ValueError: If the new rows would run past the buffer's capacity.
+
+        Side effects:
+            Writes into `self.k` and `self.v` and advances `self.length_filled`.
+        """
+        end = self.length_filled + k.shape[2]
+        if end > self.k.shape[2]:
+            raise ValueError(  # noqa: NAR001
+                f"cache holds {self.k.shape[2]} rows, append needs {end}"
+            )
+        self.k[:, :, self.length_filled : end] = k
+        self.v[:, :, self.length_filled : end] = v
+        self.length_filled = end
+        return self.k[:, :, : self.length_filled], self.v[:, :, : self.length_filled]
+
+
 class MultiHeadAttentionLayer(nn.Module):
     """Multi-head attention: self-attention over `x`, or cross-attention to `memory`.
 
@@ -154,6 +194,11 @@ class MultiHeadAttentionLayer(nn.Module):
               ▼                 ▼                 │
            q_norm            k_norm               │      RMSNorm over d_k,
               │                 │                 │      only if qk_norm
+              │                 ▼                 ▼
+              │           ┌─────┴─────────────────┴──┐   self: append, then
+              │           │ kv_cache, if passed      │   attend to all filled
+              │           └─────┬─────────────────┬──┘   rows, so S = T; cross:
+              │                 │                 │      fill once, then read
               ▼                 ▼                 ▼
             q (B,h,L,d_k)     k (B,h,S,d_k)     v (B,h,S,d_k)
               └────────────────►│◄────────────────┘
@@ -175,7 +220,13 @@ class MultiHeadAttentionLayer(nn.Module):
     per-head outputs only become a single vector at `w_o` — attention itself
     never mixes across heads.
 
-    `forward` returns `(out, weights)` and holds no state between calls.
+    A `kv_cache` sits after `k_norm`, so it holds exactly the keys attention
+    consumed and QK-norm runs once per token. The caller allocates it and passes it
+    on every step, which keeps decode state off the module; the package README's
+    "KV cache" section explains why.
+
+    `forward` returns `(out, weights)` and holds no state between calls; a passed
+    `kv_cache` is the only thing it writes.
     """
 
     def __init__(self, d_model: int, h: int, qk_norm: bool) -> None:
@@ -215,6 +266,7 @@ class MultiHeadAttentionLayer(nn.Module):
         x: Float[torch.Tensor, f"{B} {L} {D_MODEL}"],
         mask: Optional[Bool[torch.Tensor, f"#{B} #{H} #{L} {S}"]],
         memory: Optional[Float[torch.Tensor, f"{B} {S} {D_MODEL}"]] = None,
+        kv_cache: Optional[KVCache] = None,
     ) -> tuple[
         Float[torch.Tensor, f"{B} {L} {D_MODEL}"],
         Float[torch.Tensor, f"{B} {H} {L} {S}"],
@@ -229,19 +281,46 @@ class MultiHeadAttentionLayer(nn.Module):
                 everywhere.
             memory: Source of keys and values, such as an encoder's output. None
                 makes this self-attention over `x`.
+            kv_cache: This layer's cache for one decode, or None to cache nothing.
+                Self-attention appends the keys and values of `x` and attends to
+                every filled row, so `x` holds only the new positions. Cross-
+                attention projects `memory` on the first call and reads the cache
+                after that.
 
         Returns:
             (out, weights): the mixed output, and each head's post-softmax
             attention weights as returned by `attention`.
+
+        Raises:
+            ValueError: If a filled cross-attention cache holds a different number
+                of source rows than `memory`, or a self-attention append would run
+                past the cache's capacity.
+
+        Side effects:
+            Writes into `kv_cache` and advances its `length_filled`.
         """
         batch_size, n, d_model = x.shape
         q = self.q_norm(x.unsqueeze(dim=1) @ self.w_q)  # noqa: NAR001
         if memory is not None:
-            k = self.k_norm(memory.unsqueeze(dim=1) @ self.w_k)  # noqa: NAR001
-            v = memory.unsqueeze(dim=1) @ self.w_v
+            if kv_cache is not None and kv_cache.length_filled > 0:
+                if memory.shape[1] != kv_cache.length_filled:
+                    raise ValueError(  # noqa: NAR001
+                        f"cross cache holds {kv_cache.length_filled} source rows, "
+                        f"memory has {memory.shape[1]}"
+                    )
+                k, v = kv_cache.k, kv_cache.v
+            else:
+                k = self.k_norm(memory.unsqueeze(dim=1) @ self.w_k)  # noqa: NAR001
+                v = memory.unsqueeze(dim=1) @ self.w_v
+                if kv_cache is not None:
+                    kv_cache.k.copy_(other=k)
+                    kv_cache.v.copy_(other=v)
+                    kv_cache.length_filled = k.shape[2]
         else:
             k = self.k_norm(x.unsqueeze(dim=1) @ self.w_k)  # noqa: NAR001
             v = x.unsqueeze(dim=1) @ self.w_v
+            if kv_cache is not None:
+                k, v = kv_cache.append(k=k, v=v)
         out, weights = attention(q=q, k=k, v=v, mask=mask)
         concat = out.transpose(dim0=1, dim1=2).reshape(  # noqa: NAR001
             batch_size, n, d_model
@@ -361,6 +440,19 @@ class EncoderBlock(nn.Module):
         return batch + self.dropout(ffn_output), weights  # noqa: NAR001
 
 
+@dataclass
+class DecoderBlockCache:
+    """One decoder block's caches, one per attention sublayer.
+
+    Attributes:
+        self_attn: Gains one row per decoded token; capacity is the longest target.
+        cross_attn: Filled from `memory` on the first step; capacity is S.
+    """
+
+    self_attn: KVCache
+    cross_attn: KVCache
+
+
 class DecoderBlock(nn.Module):
     """Pre-norm decoder block: causal self-attention → cross-attention → FFN.
 
@@ -377,8 +469,8 @@ class DecoderBlock(nn.Module):
     ├──────────────────► self_attn_norm
     │                          ▼
     │                      self_attn                      mask=x_mask: causal
-    │                          ├──► self_attn_weights     & target padding
-    │                          ▼        (B, h, L, L)
+    │                          ├──► self_attn_weights     & target padding;
+    │                          ▼        (B, h, L, T)      kv_cache=self_cache
     │                       dropout
     ▼                          │
     + ◄────────────────────────┘
@@ -387,7 +479,8 @@ class DecoderBlock(nn.Module):
     │                          ▼              │           keys and values only
     │                      cross_attn ◄───────┘
     │                          ├──► cross_attn_weights    mask=memory_mask:
-    │                          ▼        (B, h, L, S)      source padding
+    │                          ▼        (B, h, L, S)      source padding;
+    │                          │                          kv_cache=cross_cache
     │                       dropout
     ▼                          │
     + ◄────────────────────────┘
@@ -420,11 +513,17 @@ class DecoderBlock(nn.Module):
     passing `memory` is what switches it to cross-attention.
 
     `x_mask` has no `None` default. Decoder self-attention without a causal mask
-    lets every position read its own future, so the caller has to pass one.
+    lets every position read its own future, so the caller has to pass one. The
+    one exception is a cached decode step with a single new position, which may
+    read every cached key; `forward` raises on `None` for anything longer.
     `memory_mask` may be `None` when no source sequence is padded.
 
+    With a `DecoderBlockCache`, `x` holds only the new positions and the
+    self-attention keys are the whole prefix so far, so the self-attention weights
+    are (B, h, L, T) with T the prefix length. Without one, T is L.
+
     `forward` returns `(out, self_attn_weights, cross_attn_weights)` and holds no
-    state between calls.
+    state between calls; a passed cache is the only thing it writes.
     """
 
     def __init__(
@@ -471,11 +570,12 @@ class DecoderBlock(nn.Module):
         self,
         x: Float[torch.Tensor, f"{B} {L} {D_MODEL}"],
         memory: Float[torch.Tensor, f"{B} {S} {D_MODEL}"],
-        x_mask: Bool[torch.Tensor, f"#{B} #{H} #{L} {L}"],
+        x_mask: Optional[Bool[torch.Tensor, f"#{B} #{H} #{L} {T}"]],
         memory_mask: Optional[Bool[torch.Tensor, f"#{B} #{H} #{L} {S}"]],
+        decoder_block_cache: Optional[DecoderBlockCache] = None,
     ) -> tuple[
         Float[torch.Tensor, f"{B} {L} {D_MODEL}"],
-        Float[torch.Tensor, f"{B} {H} {L} {L}"],
+        Float[torch.Tensor, f"{B} {H} {L} {T}"],
         Float[torch.Tensor, f"{B} {H} {L} {S}"],
     ]:
         """Run `x` through self-attention, cross-attention to `memory`, then the FFN.
@@ -486,21 +586,45 @@ class DecoderBlock(nn.Module):
                 does not norm it.
             x_mask: True marks a visible key. Build it as `mask_later_positions &
                 mask_tokenizer_pad_ids` over the target ids, shape (B, 1, L, L).
+                None only for a single position on a cached decode step.
             memory_mask: True marks a visible source key. Build it with
                 `mask_tokenizer_pad_ids` over the source ids, shape (B, 1, 1, S).
                 None attends to every source position.
+            decoder_block_cache: This block's caches for one decode, or None to
+                cache nothing. With a cache, `x` holds only the new positions.
 
         Returns:
             (out, self_attn_weights, cross_attn_weights): the block output, same
             shape as `x`, and each attention sublayer's post-softmax weights.
+
+        Raises:
+            ValueError: If `x_mask` is None and `x` has more than one position.
+            ValueError: From either attention sublayer, if its cache is misused.
+
+        Side effects:
+            Writes into both caches of `decoder_block_cache`.
         """
+        if x_mask is None and x.shape[1] > 1:
+            raise ValueError(  # noqa: NAR001
+                f"x_mask may be None only for one position, got {x.shape[1]}"
+            )
+        self_cache, cross_cache = (
+            (None, None)
+            if decoder_block_cache is None
+            else (decoder_block_cache.self_attn, decoder_block_cache.cross_attn)
+        )
         self_attn_in_normalized = self.self_attn_norm(x)  # noqa: NAR001
-        self_attn, self_attn_weights = self.self_attn(x=self_attn_in_normalized, mask=x_mask)
+        self_attn, self_attn_weights = self.self_attn(
+            x=self_attn_in_normalized, mask=x_mask, kv_cache=self_cache
+        )
         x = x + self.dropout(self_attn)  # noqa: NAR001
 
         cross_attn_in_normalized = self.cross_attn_norm(x)  # noqa: NAR001
         cross_attn, cross_attn_weights = self.cross_attn(
-            x=cross_attn_in_normalized, memory=memory, mask=memory_mask
+            x=cross_attn_in_normalized,
+            memory=memory,
+            mask=memory_mask,
+            kv_cache=cross_cache,
         )
         x = x + self.dropout(cross_attn)  # noqa: NAR001
 

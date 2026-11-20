@@ -18,7 +18,7 @@ ALLOWED_IMPORTS: dict[str, set[str]] = {
     "train": {"constants", "dataclass", "utils"},
     "metrics": {"constants", "dataclass", "train"},
     "dataload": {"constants", "dal", "preprocess", "utils"},
-    "viz": {"constants", "dal", "dataload", "preprocess", "transformer"},
+    "viz": {"constants", "dal", "dataload", "preprocess", "transformer", "utils"},
     "model": {
         "constants",
         "dataclass",

@@ -103,6 +103,7 @@ nav:
   - Reports:
       - Multi30k ablation studies: app/src/training/ablations/reports/multi30k_ablations.md
       - Multi30k tokenisation: app/src/training/ablations/reports/multi30k_tokenisation.md
+      - KV caching: app/src/training/ablations/reports/kv_cache_timing.md
   - Ablations:
       - Multi30k masked-token pretraining: app/src/training/ablations/multi30ken_predictor/2026-09-29/README.md
       - Multi30k masked-token dropout and decay: app/src/training/ablations/multi30ken_predictor/2026-10-15/README.md

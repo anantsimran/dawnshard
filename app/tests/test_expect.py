@@ -1,5 +1,4 @@
 import pytest
-
 from training.utils.expect import expect
 
 

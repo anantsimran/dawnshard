@@ -1,16 +1,15 @@
 import pytest
 import torch
 import torch.nn as nn
-
+from training.constants import TEST_SEED, VAL_SEED
+from training.dataclass.config import EarlyStoppingConfig, FitConfig
+from training.dataclass.model import EpochSpec, Metrics, TrainState
 from training.metrics.loss_only_metrics import (
     accumulate_metrics,
     calculate_metrics,
     reduce_metrics,
 )
-from training.dataclass.config import EarlyStoppingConfig, FitConfig
-from training.dataclass.model import EpochSpec, Metrics, TrainState
 from training.train.checkpoint import serialize_epoch_record
-from training.constants import TEST_SEED, VAL_SEED
 from training.train.train_loop import (
     eval_step,
     fit,
@@ -412,9 +411,7 @@ def test_fit_validates_every_epoch_when_val_epoch_list_is_none():
         epoch_spec=config,
         train_loader=batches,
         val_loader=batches,
-        fit_config=FitConfig(
-            num_epochs=3, train_seed=0, val_seed=VAL_SEED, test_seed=TEST_SEED
-        ),
+        fit_config=FitConfig(num_epochs=3, train_seed=0, val_seed=VAL_SEED, test_seed=TEST_SEED),
     )
     assert all(record.val_loss is not None for record in history)  # noqa: NAR001
     assert len(history) == 3  # noqa: NAR001

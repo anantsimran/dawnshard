@@ -1,13 +1,13 @@
 # Transformer
 
 This package owns the transformer building blocks: attention, masks, the encoder and
-decoder blocks, position encodings, an attention-map probe, and the axis names for
-tensor shapes. The attention function returns its weights, and the normalization,
+decoder blocks, the decoder's KV cache, position encodings, an attention-map probe,
+and the axis names for tensor shapes. The attention function returns its weights, and the normalization,
 residual, and mask operations are visible in the source.
 
 | Owns | Imports from the library | Never sees |
 |---|---|---|
-| attention, masks, blocks, position encodings, axis names | nothing | the tokenizer, datasets, the training loop |
+| attention, masks, blocks, the KV cache, position encodings, axis names | nothing | the tokenizer, datasets, the training loop |
 
 [test_layout.py](../../../tests/test_layout.py) fails if this package imports anything
 else from `training/`. Attention does not know a loop exists. `save_attention_maps`
@@ -141,6 +141,66 @@ for block in decoder_blocks:
     x, _, _ = block(x=x, memory=memory, x_mask=tgt_keep, memory_mask=src_keep)
 ```
 
+### KV cache
+
+Decoding one token at a time changes only where attention gets its keys and
+values. `MultiHeadAttentionLayer.forward` takes an optional
+`KVCache`, and `DecoderBlock.forward` takes a `DecoderBlockCache` that holds one for
+each attention sublayer. Without a cache, every call runs exactly as before, so
+training never touches one.
+
+- **The caller owns the cache.** It allocates the buffers for one decode, passes
+  them in on every step, and drops them afterwards. A layer writes into the cache it
+  receives and stores nothing on `self`, so modules still hold no state between
+  calls, and two decodes can share one model.
+- **Buffers start at full capacity.** `KVCache.append` writes the new rows after
+  `length_filled` and returns a view of the filled rows, so no step concatenates or
+  copies the cache. Self-attention needs room for the longest target the decode can
+  reach. Cross-attention needs exactly S rows.
+- **Cross-attention fills once.** `memory` stays fixed for a whole decode, so the
+  first call projects it into the cache and later calls read it back. A later call
+  raises if `memory` no longer has `length_filled` rows.
+- **Keys are cached after `k_norm`.** The cache holds what attention consumed, so
+  QK-norm runs once per token.
+- **A single new position may pass `x_mask=None`**, since the newest token may read
+  every cached key. For more than one position, `DecoderBlock.forward` raises on
+  `None`: without a causal mask, earlier positions would read later ones.
+- **Positions belong to the caller too.** The newest token is always at index 0 of
+  what the block sees, so the caller adds row t of the position table itself, for
+  example with `SinusoidalEmbedding.at_pos(pos=t)`.
+
+With a cache, the self-attention weights are `(B, h, L, T)`, with L new queries
+against the T rows filled so far. Without one, T equals L.
+
+```python
+from transformer.modules import DecoderBlockCache, KVCache
+
+
+def empty_cache(rows):
+    shape = (memory.shape[0], h, rows, d_k)
+    return KVCache(k=memory.new_empty(size=shape), v=memory.new_empty(size=shape))
+
+
+caches = [
+    DecoderBlockCache(
+        self_attn=empty_cache(rows=max_len),
+        cross_attn=empty_cache(rows=memory.shape[1]),
+    )
+    for _ in decoder_blocks
+]
+for t in range(max_len):
+    x = embed(token) + position_table.at_pos(pos=t)  # (B, 1, d_model)
+    for block, cache in zip(decoder_blocks, caches):
+        x, _, _ = block(
+            x=x,
+            memory=memory,
+            x_mask=None,
+            memory_mask=src_keep,
+            decoder_block_cache=cache,
+        )
+    token = next_token_from(x)
+```
+
 ______________________________________________________________________
 
 ## Axis names
@@ -153,6 +213,7 @@ docstring, or a comment, uses these symbols:
 | `B` | `B` | batch | 32 | training loop |
 | `L` | `L` | sequence length | 128 | tokenizer + padding |
 | `S` | `S` | key/value length, equal to `L` in self-attention | 128 | memory's tokenizer + padding |
+| `T` | `T` | self-attention key length with a KV cache, the prefix decoded so far; equal to `L` without one | 17 | decode step |
 | `d_model` | `D_MODEL` | embedding width | 512 | model config |
 | `h` | `H` | heads | 8 | model config |
 | `d_k` | `D_K` | width per head | 64 | `d_model // h` |

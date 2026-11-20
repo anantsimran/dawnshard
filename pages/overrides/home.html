@@ -231,6 +231,26 @@ history = fit(
           </a>
         </div>
       </div>
+      <div class="ds-report-preview">
+        <a class="ds-report-preview__figure" href="{{ 'app/src/training/ablations/reports/kv_cache_timing/' | url }}" aria-label="Read the KV caching report">
+          <img src="{{ 'app/src/training/ablations/reports/assets/kv_cache_timing/step_latency.png' | url }}" alt="Each cached decode step takes about 6.7 ms while an uncached step takes 7.6 to 11.5 ms, across 32 output positions." loading="lazy" width="1579" height="786">
+        </a>
+        <div class="ds-report-preview__copy">
+          <p class="ds-card__index">Multi30k / Translator inference</p>
+          <h3>A KV cache the caller owns</h3>
+          <p>
+            Feed the decoder one new token per step and read every earlier key and
+            value from a cache that the decode loop allocates. Greedy translation
+            runs 1.45 times faster, and all 200 test translations come out the same.
+          </p>
+          <a class="ds-card__link" href="{{ 'app/src/training/ablations/reports/kv_cache_timing/' | url }}">
+            Read the report {% include ".icons/material/arrow-right.svg" %}
+          </a>
+          <a class="ds-card__link" href="{{ 'app/src/training/transformer/#kv-cache' | url }}">
+            How the layers use the cache {% include ".icons/material/arrow-right.svg" %}
+          </a>
+        </div>
+      </div>
     </div>
   </section>
 {% endblock %}

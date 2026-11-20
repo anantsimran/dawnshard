@@ -1,6 +1,5 @@
 import torch
 import torch.nn.functional as F
-
 from training.transformer.functions import attention
 
 

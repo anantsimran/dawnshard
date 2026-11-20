@@ -23,6 +23,7 @@ TRAINER_DESIGN_PAGE = "knowledge_sharing/trainer_design.md"
 ARTICLE_PAGES = {REPRODUCIBILITY_PAGE, TRAINER_DESIGN_PAGE}
 TOKENISATION_REPORT = "app/src/training/ablations/reports/multi30k_tokenisation.md"
 ABLATION_REPORT = "app/src/training/ablations/reports/multi30k_ablations.md"
+KV_CACHE_REPORT = "app/src/training/ablations/reports/kv_cache_timing.md"
 STUDY_DETAILS = {
     "app/src/training/ablations/multi30ken_predictor/2026-09-29/README.md": (
         "Masked-token pretraining",
@@ -55,6 +56,7 @@ EXTRA_PAGES = [
     TRAINER_DESIGN_PAGE,
     TOKENISATION_REPORT,
     ABLATION_REPORT,
+    KV_CACHE_REPORT,
     "app/src/training/preprocess/README.md",
     "app/src/training/transformer/README.md",
     "app/src/training/dataload/README.md",
@@ -96,6 +98,12 @@ EXTRA_ASSETS = [
     "app/src/training/ablations/reports/assets/multi30k_tokenisation/length_tail.png",
     "app/src/training/ablations/reports/assets/multi30k_tokenisation/length_tail.svg",
     "app/src/training/ablations/reports/assets/multi30k_tokenisation/stats.csv",
+    "app/src/training/ablations/reports/assets/kv_cache_timing/sentence_latency.png",
+    "app/src/training/ablations/reports/assets/kv_cache_timing/sentence_latency.svg",
+    "app/src/training/ablations/reports/assets/kv_cache_timing/step_latency.png",
+    "app/src/training/ablations/reports/assets/kv_cache_timing/step_latency.svg",
+    "app/src/training/ablations/reports/assets/kv_cache_timing/sentences.csv",
+    "app/src/training/ablations/reports/assets/kv_cache_timing/positions.csv",
     "knowledge_sharing/assets/rng-state.svg",
     "knowledge_sharing/assets/dawnshard-replay.svg",
     "knowledge_sharing/assets/trainer-ownership.svg",
@@ -155,6 +163,14 @@ def on_page_markdown(markdown: str, page: Page, config: MkDocsConfig, files: Fil
         page.meta["description"] = (
             "Learn to read transformer ablations through learning curves: "
             "overfitting, dropout, model size, learning rates, and loss versus accuracy."
+        )
+    if page.file.src_uri == KV_CACHE_REPORT:
+        page.meta["template"] = "report.html"
+        page.meta["hide"] = ["navigation", "toc"]
+        page.meta["report_subject"] = "KV caching"
+        page.meta["description"] = (
+            "How much a caller-owned KV cache speeds up greedy translation, "
+            "per sentence and per decode step, with identical output."
         )
     if page.file.src_uri in STUDY_DETAILS:
         subject, *facts = STUDY_DETAILS[page.file.src_uri]

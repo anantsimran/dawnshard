@@ -7,6 +7,8 @@ from torch import nn
 from torch.utils.data import DataLoader
 from training.constants import TEST_SEED, VAL_SEED
 from training.dal.dao.sqlite_dao import SqliteDao
+from training.dataclass.config import FitConfig
+from training.dataclass.model import EpochSpec, TrainState
 from training.dataload import ag_news
 from training.dataload.ag_news import (
     AGNewsDataset,
@@ -24,12 +26,9 @@ from training.model.ag_news_classifier import AGNewsClassifier
 from training.preprocess.bpe.gpt4_preprocessor import preprocess
 from training.preprocess.bpe.train import build_tokenizer
 from training.preprocess.constants import PAD_ID
-from training.dataclass.config import FitConfig
-from training.dataclass.model import EpochSpec, TrainState
 from training.run.ag_news_classifier import DEFAULT_CONFIG_PATH, AGNewsClassifierTrainConfig
 from training.train.train_loop import fit
 from training.transformer.probes import load_attention_captures, save_attention_maps
-
 
 MODEL_CONFIG = AGNewsClassifierTrainConfig.from_yaml(path=DEFAULT_CONFIG_PATH).model
 MAX_LEN = MODEL_CONFIG.embedding.seq_length
@@ -205,7 +204,8 @@ def test_save_attention_maps_writes_first_batch_rows_once_per_epoch(tmp_path):
             )
 
     saved = sorted(  # noqa: NAR001
-        str(path.relative_to(tmp_path)) for path in tmp_path.rglob(pattern="*.pt")  # noqa: NAR001
+        str(path.relative_to(tmp_path))
+        for path in tmp_path.rglob(pattern="*.pt")  # noqa: NAR001
     )
     assert saved == [
         f"epoch_{epoch:03d}/encoder_block_{block}.pt"
@@ -214,7 +214,9 @@ def test_save_attention_maps_writes_first_batch_rows_once_per_epoch(tmp_path):
     ]
     captures = load_attention_captures(probe_dir=tmp_path)
     assert [(c.epoch, c.kind, c.block) for c in captures] == [
-        (epoch, "encoder", block) for epoch in (1, 3) for block in range(NUM_BLOCKS)  # noqa: NAR001
+        (epoch, "encoder", block)
+        for epoch in (1, 3)
+        for block in range(NUM_BLOCKS)  # noqa: NAR001
     ]
     first_capture = captures[0]
     assert torch.equal(first_capture.token_ids, first[:2])  # noqa: NAR001

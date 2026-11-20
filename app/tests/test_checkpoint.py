@@ -2,7 +2,6 @@ import json
 
 import torch
 import torch.nn as nn
-
 from training.constants import TEST_SEED, VAL_SEED
 from training.dataclass.config import (
     DataloadConfig,

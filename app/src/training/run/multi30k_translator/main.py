@@ -13,6 +13,12 @@ the best run so far and prints it:
     uv run python app/src/training/run/multi30k_translator/main.py train
     uv run python app/src/training/run/multi30k_translator/main.py train --config-path my_run.yaml
     uv run python app/src/training/run/multi30k_translator/main.py infer "A man is riding a bike."
+
+`infer` decodes with `translate_with_cache`, which keeps a KV cache from
+`init_decoder_cache`. `greedy_translate` returns the same translation by re-running the
+whole prefix each step; it stays as the reference the cached path is tested and timed
+against (`time_decoding.py` beside this file, for
+`ablations/reports/kv_cache_timing.md`).
 """
 
 import random
@@ -41,6 +47,8 @@ from training.run.multi30k_translator.setup import (
 from training.setup import init_wandb
 from training.train.checkpoint import save_history
 from training.train.train_loop import fit
+from training.transformer.masks import mask_later_positions
+from training.transformer.modules import DecoderBlock, DecoderBlockCache, KVCache
 from training.viz.attention_heatmap import plot_attention_probes
 
 DEFAULT_CONFIG_PATH = CONFIGS_PATH / "multi30k_translator.yaml"
@@ -115,6 +123,27 @@ def train(config_path: Path = DEFAULT_CONFIG_PATH) -> None:
     )
 
 
+def encode_source(
+    src_sentence: str,
+    transformer_model: TransformerTranslator,
+    device: torch.device,
+    src_tokenizer: Tokenizer,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return `(memory, encoder_mask)` for one sentence, framed as the loader frames it.
+
+    The source is `BOS_ID` then the ids, truncated to `src_seq_length`, unpadded.
+    """
+    ids = src_tokenizer.encode(texts=[src_sentence])[0]
+    src = torch.tensor(
+        data=[[BOS_ID] + ids[: transformer_model.src_seq_length - 1]],
+        dtype=torch.int64,
+        device=device,
+    )  # (1, S)
+    encoder_mask = transformer_model.build_encoder_mask(src=src)
+    memory, _ = transformer_model.encode(src=src, encoder_mask=encoder_mask)
+    return memory, encoder_mask
+
+
 @torch.no_grad()
 def greedy_translate(
     src_sentence: str,
@@ -125,32 +154,34 @@ def greedy_translate(
 ) -> str:
     """Translate one sentence by appending the argmax token until EOS or `tgt_seq_length`.
 
-    The source is framed as the loader frames it, `BOS_ID` then the ids, truncated to
-    `src_seq_length`. Each step re-runs the whole target prefix, since
-    `decode_next_token` keeps no cache.
+    Uncached: each step re-runs the whole target prefix through the decoder, so step t
+    sends t positions through every block. `translate_with_cache` produces the same
+    translation from one position per step.
 
     Args:
         transformer_model: Must already be in eval mode, so dropout is off.
         src_tokenizer: The tokenizer the model's source side was trained with.
         tgt_tokenizer: The tokenizer the model's target side was trained with.
     """
-    ids = src_tokenizer.encode(texts=[src_sentence])[0]
-    src = torch.tensor(
-        data=[[BOS_ID] + ids[: transformer_model.src_seq_length - 1]],
-        dtype=torch.int64,
+    memory, encoder_mask = encode_source(
+        src_sentence=src_sentence,
+        transformer_model=transformer_model,
         device=device,
-    )  # (1, S)
-    encoder_mask = transformer_model.build_encoder_mask(src=src)
-    memory, _ = transformer_model.encode(src=src, encoder_mask=encoder_mask)
+        src_tokenizer=src_tokenizer,
+    )
+    # One causal mask for the longest prefix; each step reads its top-left corner.
+    causal_mask = mask_later_positions(seq_len=transformer_model.tgt_seq_length, device=device)
     tgt_in = torch.tensor(data=[[BOS_ID]], dtype=torch.int64, device=device)  # (1, 1)
-    # The position table has tgt_seq_length rows, so the prefix never grows past it.
     for _ in range(transformer_model.tgt_seq_length):  # noqa: NAR001
-        next_token = transformer_model.decode_next_token(
+        prefix_len = tgt_in.shape[1]
+        logits, _, _ = transformer_model.decode(
             tgt_in=tgt_in,
+            pos_encoding=transformer_model.positional_embedding.pe[:prefix_len],
             memory=memory,
-            decoder_mask=transformer_model.build_decoder_later_positions_mask(tgt_in=tgt_in),
+            decoder_mask=causal_mask[:, :, :prefix_len, :prefix_len],
             memory_mask=encoder_mask,
-        ).argmax(dim=-1)  # (1,)
+        )
+        next_token = logits[:, -1].argmax(dim=-1)  # (1,)
         if next_token.item() == EOS_ID:
             break
         tgt_in = torch.cat(tensors=[tgt_in, next_token.unsqueeze(dim=-1)], dim=1)  # (1, L+1)
@@ -158,10 +189,87 @@ def greedy_translate(
     return tgt_tokenizer.decode(ids=tgt_in.tolist())[0]
 
 
+def init_decoder_cache(
+    transformer_model: TransformerTranslator, memory: torch.Tensor
+) -> list[DecoderBlockCache]:
+    """Return one empty `DecoderBlockCache` per decoder block, for one decode.
+
+    The decode loop owns the result: it lives for one translation and is passed to
+    every `decode` call. Buffers take `memory`'s device and dtype. Self-attention gets
+    room for `tgt_seq_length` positions, the most a decode feeds the position table,
+    and cross-attention gets exactly S rows, as `KVCache` requires.
+    """
+    caches = []
+    for block in transformer_model.decoder_blocks:
+        attn = cast(typ=DecoderBlock, val=block).self_attn
+        self_size = (memory.shape[0], attn.h, transformer_model.tgt_seq_length, attn.d_k)
+        cross_size = (memory.shape[0], attn.h, memory.shape[1], attn.d_k)
+        caches.append(  # noqa: NAR001
+            DecoderBlockCache(
+                self_attn=KVCache(
+                    k=memory.new_empty(size=self_size), v=memory.new_empty(size=self_size)
+                ),
+                cross_attn=KVCache(
+                    k=memory.new_empty(size=cross_size), v=memory.new_empty(size=cross_size)
+                ),
+            )
+        )
+    return caches
+
+
+@torch.no_grad()
+def translate_with_cache(
+    src_sentence: str,
+    transformer_model: TransformerTranslator,
+    device: torch.device,
+    src_tokenizer: Tokenizer,
+    tgt_tokenizer: Tokenizer,
+) -> str:
+    """Translate one sentence greedily, as `greedy_translate` does, with a KV cache.
+
+    Each step sends only the newest token through the decoder. Its self-attention
+    reads the earlier tokens' keys and values from the cache, and its cross-attention
+    reads the source's, projected once on the first step. The token gets its position
+    from `at_pos`, since it is always at index 0 of what the decoder sees.
+
+    Args:
+        transformer_model: Must already be in eval mode, so dropout is off.
+        src_tokenizer: The tokenizer the model's source side was trained with.
+        tgt_tokenizer: The tokenizer the model's target side was trained with.
+    """
+    memory, encoder_mask = encode_source(
+        src_sentence=src_sentence,
+        transformer_model=transformer_model,
+        device=device,
+        src_tokenizer=src_tokenizer,
+    )
+    decoder_cache = init_decoder_cache(transformer_model=transformer_model, memory=memory)
+    token = torch.tensor(data=[[BOS_ID]], dtype=torch.int64, device=device)  # (1, 1)
+    out_ids = [BOS_ID]
+    for pos in range(transformer_model.tgt_seq_length):  # noqa: NAR001
+        logits, _, _ = transformer_model.decode(
+            tgt_in=token,
+            pos_encoding=transformer_model.positional_embedding.at_pos(pos=pos).unsqueeze(dim=0),
+            memory=memory,
+            decoder_mask=None,
+            memory_mask=encoder_mask,
+            decoder_cache=decoder_cache,
+        )
+        next_token = logits[:, -1].argmax(dim=-1)  # (1,)
+        if next_token.item() == EOS_ID:
+            break
+        out_ids.append(int(next_token.item()))  # noqa: NAR001
+        token = next_token.unsqueeze(dim=-1)  # (1, 1)
+    # decode drops protected ids, so the leading BOS does not reach the text.
+    return tgt_tokenizer.decode(ids=[out_ids])[0]
+
+
 def infer(src_sentence: str) -> str:
     """Translate `src_sentence` with the best run so far and return the translation.
 
-    Loads the checkpoint at BEST_TRANSLATOR_CHECKPOINT_PATH with the config beside it.
+    Loads the checkpoint at BEST_TRANSLATOR_CHECKPOINT_PATH with the config beside it
+    and decodes with `translate_with_cache`, which matches `greedy_translate` token for
+    token and runs faster.
     """
     train_state, epoch_spec, _, (src_tokenizer, tgt_tokenizer) = load_transformer(
         config_path=BEST_TRANSLATOR_CONFIG_PATH,
@@ -169,7 +277,7 @@ def infer(src_sentence: str) -> str:
     )
     model = cast(typ=TransformerTranslator, val=train_state.model)
     model.eval()
-    return greedy_translate(
+    return translate_with_cache(
         src_sentence=src_sentence,
         transformer_model=model,
         device=epoch_spec.device,

@@ -315,7 +315,7 @@ accident.
 | `dataclass/` | the plain dataclasses the loop and the models share: `TrainState`, `EpochSpec`, and `Metrics` in `model.py`; `TrainConfig`, `FitConfig`, and the model configs in `config.py` |
 | `train/` | the loop: the step functions, `fit`, checkpoints, history and its serialization, and the optimizer and scheduler a config names |
 | `metrics/` | the `Metrics` subclasses and their three functions |
-| `transformer/` | attention, the encoder block, masks, probes, axis names |
+| `transformer/` | attention, the encoder and decoder blocks, the decoder KV cache, masks, probes, axis names |
 | `dal/` | `@cached`, the `Dao` protocol, and its SQLite file |
 | `preprocess/` | the `Tokenizer` interface and `get_tokenizer`, the BPE tokenizer in `bpe/`, and the protected token ids |
 | `dataload/` | the AG News and Multi30k pipelines |
@@ -540,7 +540,7 @@ ______________________________________________________________________
 | Tokenizer | byte-level BPE, written from scratch; training links each distinct chunk once and keeps pair counts in a heap, so a merge touches only the pairs it changes | [preprocess/](app/src/training/preprocess/) |
 | Cache | `@cached` stores a function's result in a versioned SQLite file; downloads, samples, and encodings use it | [dal/](app/src/training/dal/) |
 | Data | MNIST through torchvision; AG News and Multi30k sampled, tokenized, and cached; how a `DataLoader` is built in the [dataload README](app/src/training/dataload/README.md) | [dataload/](app/src/training/dataload/), [mnist.py](app/src/training/model/mnist.py) |
-| Models | three MNIST classifiers, an AG News transformer classifier, a Multi30k masked-token predictor, and a Multi30k encoder-decoder translator | [model/](app/src/training/model/) |
+| Models | three MNIST classifiers, an AG News transformer classifier, a Multi30k masked-token predictor, and a Multi30k encoder-decoder translator that decodes greedily with or without a KV cache | [model/](app/src/training/model/) |
 | Configs | one YAML per transformer model holding its architecture, epochs and seeds, optimizer, schedule, batch size, and data settings; an entry point per model reads it | [app/src/config/](app/src/config/), [run/](app/src/training/run/) |
 | Ablations | the Multi30k predictor's config sweep, follow-ups, and component and LR-schedule ablation, and the Multi30k translator's component, depth, LR-schedule, and source-language ablation and its scale study, each a grid search ranked by best val loss | [ablations/](app/src/training/ablations/) |
 | Visualization | a run's metrics, two runs side by side, a model's autograd graph, what each attention head does by epoch, BPE sequence length against merges | [viz/](app/src/training/viz/) |
@@ -548,7 +548,7 @@ ______________________________________________________________________
 | Tests | a pytest suite; `attention` is checked against `torch.nn.functional.scaled_dot_product_attention` | [tests/](app/tests/) |
 | Tutorials | theory and revision notes from tensors to attention masks, published as a website | [knowledge_sharing/tutorials/](knowledge_sharing/tutorials/) |
 | Knowledge sharing | engineering articles that trace design choices through the implementation | [Trainer design](knowledge_sharing/trainer_design.md), [Reproducibility](knowledge_sharing/reproducibility.md) |
-| Reports | measured tradeoffs, with figures, exported data, and reproduction commands | [Multi30k ablations](app/src/training/ablations/reports/multi30k_ablations.md), [tokenisation](app/src/training/ablations/reports/multi30k_tokenisation.md) |
+| Reports | measured tradeoffs, with figures, exported data, and reproduction commands | [Multi30k ablations](app/src/training/ablations/reports/multi30k_ablations.md), [tokenisation](app/src/training/ablations/reports/multi30k_tokenisation.md), [KV caching](app/src/training/ablations/reports/kv_cache_timing.md) |
 
 Logs go through loguru, Weights & Biases is optional, and everything runs with `uv`
 locally or in Docker.
@@ -961,6 +961,12 @@ uv run python app/src/training/run/multi30ken_predictor.py
 # Train the Multi30k encoder-decoder translator once
 uv run python app/src/training/run/multi30k_translator/main.py train
 
+# Translate one English sentence to German with the best translator checkpoint
+uv run python app/src/training/run/multi30k_translator/main.py infer "A man is riding a bike."
+
+# Time cached against uncached greedy decoding on that checkpoint, writing the KV report's CSVs
+uv run python app/src/training/run/multi30k_translator/time_decoding.py
+
 # Run the Multi30k masked-token predictor's ablation (3 arms x 3 seeds, 100 epochs each)
 uv run python app/src/training/ablations/multi30ken_predictor_ablation.py
 
@@ -991,6 +997,9 @@ uv run python app/src/training/ablations/reports/generate_multi30k_tokenisation.
 
 # Export the ablation report's summary and plots from checked-in study CSVs
 uv run python app/src/training/ablations/reports/generate_multi30k_ablations.py
+
+# Redraw the KV caching report's plots from its checked-in timing CSVs
+uv run python app/src/training/ablations/reports/generate_kv_cache_timing.py
 
 # Execute the starter notebook and print its outputs, leaving the file unchanged
 uv run jupyter nbconvert --execute --to markdown --stdout app/src/notebooks/hello_world.ipynb
@@ -1168,6 +1177,8 @@ vocabulary sizes with downloadable figures and statistics.
 The [Multi30k ablation report](app/src/training/ablations/reports/multi30k_ablations.md) follows dropout,
 depth, and learning-rate schedules across 66 comparison runs, with links to the
 full study records and their data.
+The [KV caching report](app/src/training/ablations/reports/kv_cache_timing.md) times
+greedy translation with and without a decoder KV cache, per sentence and per step.
 
 The project landing page, tutorials, code notes, articles, and reports are built as a website at
 [anantsimran.github.io/dawnshard](https://anantsimran.github.io/dawnshard/) by
@@ -1221,10 +1232,10 @@ dawnshard/
 │   │       ├── transformer/          # attention built from scratch
 │   │       │   ├── README.md         # attention design choices and axis names
 │   │       │   ├── functions.py      # scaled dot-product attention
-│   │       │   ├── modules.py        # SinusoidalEmbedding, MultiHeadAttentionLayer (optional QK norm), EncoderBlock, DecoderBlock
+│   │       │   ├── modules.py        # SinusoidalEmbedding, MultiHeadAttentionLayer (optional QK norm), EncoderBlock, DecoderBlock, KVCache
 │   │       │   ├── probes.py         # AttentionProbePerEpoch; save_attention_maps probe and load_attention_captures
 │   │       │   ├── masks.py          # mask_tokenizer_pad_ids, mask_later_positions, masked_mean
-│   │       │   └── constants.py      # axis names for shape strings: B, L, D_MODEL, H, D_K
+│   │       │   └── constants.py      # axis names for shape strings: B, L, S, T, D_MODEL, H, D_K
 │   │       ├── dal/                  # versioned cache: @cached and its stores
 │   │       │   ├── README.md         # @cached keys, versions, and swapping the store
 │   │       │   ├── cache.py          # @cached, CacheKeyed
@@ -1256,8 +1267,9 @@ dawnshard/
 │   │       │   ├── ag_news_classifier.py   # AGNewsClassifierTrainConfig and main
 │   │       │   ├── multi30ken_predictor.py # its TrainConfig, loaders, TrainState, EpochSpec, main
 │   │       │   └── multi30k_translator/    # the translator's entry point and the builders it shares
-│   │       │       ├── main.py             # train, infer
-│   │       │       └── setup.py            # its TrainConfig, loaders, TrainState, EpochSpec, load_transformer
+│   │       │       ├── main.py             # train, infer, greedy decoding with or without a KV cache
+│   │       │       ├── setup.py            # its TrainConfig, loaders, TrainState, EpochSpec, load_transformer
+│   │       │       └── time_decoding.py    # times cached against uncached decoding for the KV report
 │   │       ├── ablations/            # config studies: a pinned YAML plus overrides per arm
 │   │       │   ├── setup.py          # grid_search, seed repeats
 │   │       │   ├── multi30ken_predictor_ablation.py # sweep, follow-ups, ablation

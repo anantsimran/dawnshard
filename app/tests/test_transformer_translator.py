@@ -1,3 +1,5 @@
+from typing import cast
+
 import pytest
 import torch
 from torch import nn
@@ -5,12 +7,13 @@ from training.dataclass.config import (
     AttentionConfig,
     BlockConfig,
     EmbeddingConfig,
-    TransformerConfig,
     NormName,
+    TransformerConfig,
 )
 from training.model.transformer_translator import TransformerTranslator
 from training.preprocess.constants import PAD_ID
 from training.transformer.masks import mask_later_positions, mask_tokenizer_pad_ids
+from training.transformer.modules import DecoderBlock, DecoderBlockCache, KVCache
 
 SEQ_LEN = 8
 SRC_VOCAB, TGT_VOCAB = 300, 310
@@ -56,25 +59,112 @@ def test_each_stack_picks_its_own_norm():
 def test_rejects_a_side_without_position_encoding():
     config = _config().with_overrides(overrides={"tgt": {"position_encoding": False}})
     with pytest.raises(expected_exception=ValueError, match="position encoding"):
-        TransformerTranslator(model_config=config, src_vocab_size=SRC_VOCAB, tgt_vocab_size=TGT_VOCAB)
+        TransformerTranslator(
+            model_config=config, src_vocab_size=SRC_VOCAB, tgt_vocab_size=TGT_VOCAB
+        )
 
 
-def test_decode_next_token_matches_teacher_forcing_at_each_prefix():
-    config = _config().with_overrides(overrides={"num_decoders": 2})
-    model = TransformerTranslator(
+def _two_block_model(qk_norm: bool = False) -> TransformerTranslator:
+    config = _config().with_overrides(
+        overrides={
+            "num_decoders": 2,
+            "decoder": {"attention": {"qk_norm": qk_norm}},
+        }
+    )
+    return TransformerTranslator(
         model_config=config, src_vocab_size=SRC_VOCAB, tgt_vocab_size=TGT_VOCAB
     ).eval()
+
+
+def _empty_cache(model: TransformerTranslator, memory: torch.Tensor) -> list[DecoderBlockCache]:
+    # Room for every target position in self-attention, exactly S rows in cross.
+    attn = cast(DecoderBlock, model.decoder_blocks[0]).self_attn
+
+    def kv(rows: int) -> KVCache:
+        shape = (memory.shape[0], attn.h, rows, attn.d_k)
+        return KVCache(k=memory.new_empty(size=shape), v=memory.new_empty(size=shape))
+
+    return [
+        DecoderBlockCache(self_attn=kv(rows=SEQ_LEN), cross_attn=kv(rows=memory.shape[1]))
+        for _ in model.decoder_blocks
+    ]
+
+
+def _teacher_forced(model, src_len=SEQ_LEN):
     # Ids below PAD_ID, so neither side has padding.
-    batch = torch.randint(low=0, high=PAD_ID, size=(3, 2, SEQ_LEN))
-    src, tgt_in = batch[:, 0], batch[:, 1]
-    full = model(batch).reshape(3, SEQ_LEN, TGT_VOCAB)
+    src = torch.randint(low=0, high=PAD_ID, size=(3, src_len))
+    tgt_in = torch.randint(low=0, high=PAD_ID, size=(3, SEQ_LEN))
     encoder_mask = mask_tokenizer_pad_ids(token_ids=src, pad_id=PAD_ID)
     memory, _ = model.encode(src=src, encoder_mask=encoder_mask)
+    full, _, _ = model.decode(
+        tgt_in=tgt_in,
+        pos_encoding=model.positional_embedding.pe[:SEQ_LEN],
+        memory=memory,
+        decoder_mask=mask_later_positions(seq_len=SEQ_LEN),
+        memory_mask=encoder_mask,
+    )
+    return tgt_in, memory, encoder_mask, full
+
+
+def test_decode_of_each_prefix_matches_teacher_forcing():
+    model = _two_block_model()
+    tgt_in, memory, encoder_mask, full = _teacher_forced(model=model)
+    causal = mask_later_positions(seq_len=SEQ_LEN)
     for t in range(1, SEQ_LEN + 1):
-        step = model.decode_next_token(
+        step, _, _ = model.decode(
             tgt_in=tgt_in[:, :t],
+            pos_encoding=model.positional_embedding.pe[:t],
             memory=memory,
-            decoder_mask=mask_later_positions(seq_len=t),
+            decoder_mask=causal[:, :, :t, :t],
             memory_mask=encoder_mask,
         )
-        torch.testing.assert_close(actual=step, expected=full[:, t - 1])
+        torch.testing.assert_close(actual=step[:, -1], expected=full[:, t - 1])
+
+
+@pytest.mark.parametrize(argnames="qk_norm", argvalues=[False, True])
+def test_cached_decode_one_token_at_a_time_matches_teacher_forcing(qk_norm):
+    model = _two_block_model(qk_norm=qk_norm)
+    # A source length unlike the target's, so a swapped self and cross cache fails.
+    tgt_in, memory, encoder_mask, full = _teacher_forced(model=model, src_len=5)
+    cache = _empty_cache(model=model, memory=memory)
+    for t in range(SEQ_LEN):
+        step, self_attn, _ = model.decode(
+            tgt_in=tgt_in[:, t : t + 1],
+            pos_encoding=model.positional_embedding.at_pos(pos=t).unsqueeze(dim=0),
+            memory=memory,
+            decoder_mask=None,
+            memory_mask=encoder_mask,
+            decoder_cache=cache,
+        )
+        torch.testing.assert_close(actual=step[:, 0], expected=full[:, t])
+        assert self_attn[0].shape == (3, 2, 1, t + 1)
+    assert [c.self_attn.length_filled for c in cache] == [SEQ_LEN, SEQ_LEN]
+    assert [c.cross_attn.length_filled for c in cache] == [5, 5]
+
+
+def test_decode_rejects_a_cache_per_block_mismatch():
+    model = _two_block_model()
+    _, memory, encoder_mask, _ = _teacher_forced(model=model)
+    cache = _empty_cache(model=model, memory=memory)[:1]
+    with pytest.raises(expected_exception=ValueError, match="shorter"):
+        model.decode(
+            tgt_in=torch.zeros(3, 1, dtype=torch.int64),
+            pos_encoding=model.positional_embedding.pe[:1],
+            memory=memory,
+            decoder_mask=None,
+            memory_mask=encoder_mask,
+            decoder_cache=cache,
+        )
+
+
+def test_decode_rejects_no_mask_for_more_than_one_position():
+    model = _two_block_model()
+    tgt_in, memory, encoder_mask, _ = _teacher_forced(model=model)
+    with pytest.raises(expected_exception=ValueError, match="x_mask may be None"):
+        model.decode(
+            tgt_in=tgt_in,
+            pos_encoding=model.positional_embedding.pe[:SEQ_LEN],
+            memory=memory,
+            decoder_mask=None,
+            memory_mask=encoder_mask,
+        )

@@ -7,6 +7,7 @@ same vocabulary. See README.md in this package for what each axis means.
 B = "B"  # batch
 L = "L"  # sequence length
 S = "S"  # key/value length; equals L in self-attention
+T = "T"  # cached self-attention key length, the prefix so far; L without a cache
 D_MODEL = "d_model"  # embedding width
 H = "h"  # attention heads
 D_K = "d_k"  # width per head, d_model // h

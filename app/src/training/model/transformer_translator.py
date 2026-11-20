@@ -6,7 +6,7 @@
 #   because tgt_in is shifted: position i holds token i but is scored on token i+1,
 #   so a token sees its own input, never its own answer. A zero diagonal would leave
 #   the BOS row with no visible key, and softmax over nothing is NaN.
-#   So the model like learns to predict its next answer
+#   So the model learns to predict the next token from the tokens up to its own.
 # - Cross-attention takes its query from the target and its keys AND values from
 #   memory. Values from the source are fine: the output is added to the residual
 #   stream, which still carries the target side, and `pred` maps that mix to
@@ -26,24 +26,13 @@
 #   (and after `k_norm`), per block.
 # - The self-attention mask becomes None, since the newest token may see every
 #   cached key. `memory_mask` stays (B, 1, 1, S).
+# - The newest token is at index 0 of what `decode` sees, so the caller passes its
+#   position row (`positional_embedding.at_pos(pos=t)`) as `pos_encoding`.
 #
-# Plan, bottom up. The cache is a function argument, so with no cache every call
-# behaves exactly as now and training does not change.
-# 1. `MultiHeadAttentionLayer.forward` takes an optional cache. Self-attention
-#    appends the new token's k and v to it. Cross-attention computes k and v from
-#    memory on the first call and reuses them after, since memory is fixed.
-# 2. `DecoderBlock.forward` takes its two caches (self, cross), hands each to the
-#    right layer, and accepts `x_mask=None`.
-# 3. `SinusoidalEmbedding.forward` takes a start position, so step t adds row t of
-#    the table instead of row 0.
-# 4. `decode` takes the list of per-block caches and that start position.
-# 5. The one new function, a generate loop: `encode` once, start from BOS, call
-#    `decode` on the newest token, append the argmax of its logits, and stop at
-#    EOS or `tgt_seq_length`.
-#
-# Gotchas: the cached key length t is not L, so the jaxtyping shapes need a new
-# axis, which goes in `transformer/constants.py` first. Generate under
-# `model.eval()` so dropout is off.
+# `run/multi30k_translator/main.py` builds the caches (`init_decoder_cache`) and the
+# cached decode loop (`translate_with_cache`); the transformer package README's
+# "KV cache" section explains the layer side. Decode under `model.eval()` so
+# dropout is off.
 # ─────────────────────────────────────────────────────────────────────────────────
 
 """
@@ -62,17 +51,20 @@ trains one from its YAML, and `ablations/multi30k_translator_ablation.py` holds 
 studies.
 """
 
+from typing import Optional
+
 import torch
 from beartype import beartype
 from jaxtyping import Bool, Float, Int, jaxtyped
 from torch import nn
 from training.dataclass.config import TransformerConfig
 from training.preprocess.constants import PAD_ID
-from training.transformer.constants import D_MODEL, B, H, L, S, V
+from training.transformer.constants import D_MODEL, B, H, L, S, T, V
 from training.transformer.masks import mask_later_positions, mask_tokenizer_pad_ids
 from training.transformer.modules import (
     NORMS,
     DecoderBlock,
+    DecoderBlockCache,
     EncoderBlock,
     SinusoidalEmbedding,
 )
@@ -136,6 +128,12 @@ class TransformerTranslator(nn.Module):
     position keeps its full sin/cos signal. Each side takes its rate from its own
     `EmbeddingConfig`. One position table serves both sides, sized to the longer of the
     two lengths: it is a fixed function of position, so sharing it shares no weights.
+
+    `decode` takes the target's position rows as `pos_encoding` rather than reading
+    the table itself. `forward` passes `positional_embedding.pe[:L]`; a cached decode
+    step feeds one token that sits at index 0 of its input but at position t of the
+    translation, so it passes `positional_embedding.at_pos(pos=t)`, and the model
+    keeps no position counter between steps.
 
     `encoder_norm` is the encoder stack's final norm. The stack is pre-norm, so its
     output is an unnormed residual, and `DecoderBlock` does not norm `memory` itself;
@@ -270,67 +268,69 @@ class TransformerTranslator(nn.Module):
             encoder_attn.append(attn.detach())  # noqa: NAR001
         return self.encoder_norm(memory), encoder_attn  # noqa: NAR001
 
-    # TODO: Add cache
-    # TODO: join all decode
-    # TODO: Add type hints
-    # TODO: Match signature with decode()
-    @jaxtyped(typechecker=beartype)
-    def decode_next_token(
-        self,
-        tgt_in: Int[torch.Tensor, f"{B} {L}"],
-        memory: Float[torch.Tensor, f"{B} {S} {D_MODEL}"],
-        decoder_mask: Bool[torch.Tensor, f"#{B} 1 {L} {L}"],
-        memory_mask: Bool[torch.Tensor, f"{B} 1 1 {S}"],
-    ) -> Float[torch.Tensor, f"{B} {V}"]:
-        """Return raw logits for the token after the last position of `tgt_in`.
-
-        Re-runs the whole prefix with no cache, so a decode loop calls it once per
-        new token with the prefix so far.
-
-        Args:
-            decoder_mask: Causal mask for the current prefix length, as
-                `mask_later_positions` builds it. It is needed even though only the
-                last row is read: without it, earlier positions see later tokens and
-                feed every block after the first different keys and values.
-        """
-        tgt_vector = self.positional_embedding(
-            batch=self.tgt_dropout(self.tgt_embedding(tgt_in))  # noqa: NAR001
-        )
-        for decoder in self.decoder_blocks:
-            tgt_vector, _, _ = decoder(
-                x=tgt_vector, memory=memory, x_mask=decoder_mask, memory_mask=memory_mask
-            )
-
-        logits = self.pred(self.pred_norm(tgt_vector))  # noqa: NAR001
-
-        return logits[:, -1, :]
-
     @jaxtyped(typechecker=beartype)
     def decode(
         self,
         tgt_in: Int[torch.Tensor, f"{B} {L}"],
+        pos_encoding: Float[torch.Tensor, f"{L} {D_MODEL}"],
         memory: Float[torch.Tensor, f"{B} {S} {D_MODEL}"],
-        decoder_mask: Bool[torch.Tensor, f"{B} 1 {L} {L}"],
+        decoder_mask: Optional[Bool[torch.Tensor, f"#{B} 1 {L} {T}"]],
         memory_mask: Bool[torch.Tensor, f"{B} 1 1 {S}"],
+        decoder_cache: Optional[list[DecoderBlockCache]] = None,
     ) -> tuple[
         Float[torch.Tensor, f"{B} {L} {V}"],
-        list[Float[torch.Tensor, f"{B} {H} {L} {L}"]],
+        list[Float[torch.Tensor, f"{B} {H} {L} {T}"]],
         list[Float[torch.Tensor, f"{B} {H} {L} {S}"]],
     ]:
         """Run the target through the decoder stack against `memory` to logits.
+
+        Training passes the whole target and no cache. A decode loop either passes
+        the whole prefix so far with no cache, and reads the last row of the logits,
+        or passes only the newest token with caches it allocated and owns.
+
+        Args:
+            tgt_in: Target ids. With a cache, only the ids not yet cached.
+            pos_encoding: The position table's rows for those ids, added after
+                `tgt_dropout`: `positional_embedding.pe[:L]` for a prefix starting
+                at 0, or `positional_embedding.at_pos(pos=t)` as one row for the
+                single cached token at position t.
+            decoder_mask: Causal mask, `& target padding` in training, sliced to
+                (L, T). It is needed even when only the last row is read: without
+                it, earlier positions see later tokens and feed every block after
+                the first different keys and values. None only for a single cached
+                position.
+            decoder_cache: One `DecoderBlockCache` per decoder block, in block order,
+                or None to cache nothing. The caller allocates it for one decode
+                and keeps it between calls; the model only writes into it.
 
         Returns:
             `(logits, decoder_self_attn, decoder_cross_attn)`: unflattened raw
             logits, then each decoder block's detached self- and cross-attention
             weights in block order.
+
+        Raises:
+            ValueError: If `decoder_cache` does not have one entry per block, or a
+                block rejects its mask or cache.
+
+        Side effects:
+            Writes into every cache in `decoder_cache`.
         """
-        tgt_vector = self.positional_embedding(
-            batch=self.tgt_dropout(self.tgt_embedding(tgt_in))  # noqa: NAR001
+        tgt_vector = self.tgt_dropout(self.tgt_embedding(tgt_in)) + pos_encoding  # noqa: NAR001
+        block_caches = (
+            [None] * len(self.decoder_blocks)  # noqa: NAR001
+            if decoder_cache is None
+            else decoder_cache
         )
         decoder_self_attn, decoder_cross_attn = [], []
-        for decoder in self.decoder_blocks:
+        for decoder, block_cache in zip(  # noqa: NAR001
+            self.decoder_blocks, block_caches, strict=True
+        ):
             tgt_vector, self_attn, cross_attn = decoder(
-                x=tgt_vector, memory=memory, x_mask=decoder_mask, memory_mask=memory_mask
+                x=tgt_vector,
+                memory=memory,
+                x_mask=decoder_mask,
+                memory_mask=memory_mask,
+                decoder_block_cache=block_cache,
             )
             decoder_self_attn.append(self_attn.detach())  # noqa: NAR001
             decoder_cross_attn.append(cross_attn.detach())  # noqa: NAR001
@@ -354,7 +354,8 @@ class TransformerTranslator(nn.Module):
             `b`, the order the loader flattens its target in.
 
         Raises:
-            ValueError: If either side is longer than the position table.
+            ValueError: If the source is longer than the position table. A target
+                longer than it fails `decode`'s shape check instead.
 
         Side effects:
             Replaces `self.attention_maps` with three kinds, `"encoder"`,
@@ -369,6 +370,7 @@ class TransformerTranslator(nn.Module):
         ) & self.build_decoder_later_positions_mask(tgt_in=tgt_in)
         logits, decoder_self_attn, decoder_cross_attn = self.decode(
             tgt_in=tgt_in,
+            pos_encoding=self.positional_embedding.pe[: tgt_in.shape[1]],
             memory=memory,
             decoder_mask=decoder_mask,
             memory_mask=encoder_mask,
